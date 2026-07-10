@@ -12,6 +12,10 @@ A settings tab (Obsidian Settings > AIOS Dashboard) configures the plugin's root
 
 A row of small pills at the top of the dashboard surfaces vault upkeep issues: intake backlog, stale in-progress and stale open tasks, un-mined journal entries, orphan tasks (pointing at an unknown project), status/folder mismatches, and broken wikilinks. Tiles with a zero count are hidden entirely, so a healthy vault shows no strip. Click a tile to open a list of the offending files. Turn it off in settings with `showHealthStrip`.
 
+## Usage tab
+
+A "Usage" tab shows token-usage/cost stats: today/7d/30d cost tiles, a 30-day stacked bar chart by model family (fable/opus/sonnet/haiku/other), a legend, a model breakdown table, and a top-projects table. It reads `Operations/usage/usage-stats.json`, which is produced by `Operations/scripts/export-usage-stats.mjs` (a dependency of this tab, not part of the plugin itself). The exporter scans Claude Code session transcripts and estimates API-equivalent cost; it is wired into the vault's SessionStart hook so the data refreshes automatically, or run it manually. If the stats file does not exist yet, the tab shows a hint instead of an error. The stats file path is configurable in settings (`usageStatsPath`, default `Operations/usage/usage-stats.json`).
+
 ## Actions
 
 On desktop, the dashboard can launch a Claude Code (Dispatch) session directly: each health tile's detail modal has a "Fix with Dispatch" button that opens a terminal in the vault with a canned prompt for that problem (plus a "Copy prompt" fallback that works everywhere), and the header has an "Ask Dispatch" button for a plain session. Launch mode is a setting: Terminal.app, iTerm2, or a custom command template with `{vault}` and `{prompt}` placeholders for wiring any other tool. Security note: actions only run the binary or template you configured in settings, prompts are passed as single quoted arguments, and the launched session is visible and interactive, so nothing executes without you watching it.
