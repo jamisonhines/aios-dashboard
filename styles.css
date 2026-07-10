@@ -909,3 +909,126 @@
   align-items: center;
   gap: 6px;
 }
+
+/* Ops map tab: deterministic layered SVG graph (agents, workflows, SOPs,
+   guidelines, skills). Type-accent colors reuse the existing palette so the
+   graph never introduces a new hue system. */
+.aios-dashboard-root {
+  --aios-opsmap-agent: var(--aios-purple);
+  --aios-opsmap-workflow: var(--aios-p3);
+  --aios-opsmap-sop: var(--aios-grad-3);
+  --aios-opsmap-guideline: var(--aios-p2);
+  --aios-opsmap-skill: var(--aios-dim);
+  --aios-opsmap-skill-summary: var(--aios-foot-color);
+}
+
+.aios-dashboard-root .aios-opsmap-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aios-dashboard-root .aios-opsmap-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--aios-border);
+  background: var(--aios-panel);
+  padding: 4px 6px 10px;
+}
+
+.aios-dashboard-root .aios-opsmap-headers {
+  position: relative;
+  height: 26px;
+}
+.aios-dashboard-root .aios-opsmap-header {
+  position: absolute;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 12px;
+}
+.aios-dashboard-root .aios-opsmap-header-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-opsmap-header-count {
+  font-size: 11px;
+  color: var(--aios-foot-color);
+}
+
+.aios-dashboard-root .aios-opsmap-svg-wrap {
+  overflow: visible;
+}
+.aios-opsmap-svg {
+  display: block;
+}
+
+.aios-opsmap-node-rect {
+  fill: var(--aios-panel-2);
+  stroke: var(--aios-border);
+  stroke-width: 1;
+}
+.aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-skill);
+}
+.aios-opsmap-node-agent .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-agent);
+}
+.aios-opsmap-node-workflow .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-workflow);
+}
+.aios-opsmap-node-sop .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-sop);
+}
+.aios-opsmap-node-guideline .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-guideline);
+}
+.aios-opsmap-node-skill .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-skill);
+}
+.aios-opsmap-node-skill-summary .aios-opsmap-node-rect {
+  stroke-dasharray: 3 2;
+}
+.aios-opsmap-node-skill-summary .aios-opsmap-node-accent {
+  fill: var(--aios-opsmap-skill-summary);
+}
+.aios-opsmap-node-label {
+  fill: var(--aios-text);
+  font-size: 11px;
+}
+.aios-opsmap-node {
+  cursor: pointer;
+}
+.aios-opsmap-node-skill-summary {
+  cursor: default;
+}
+.aios-opsmap-node-rect,
+.aios-opsmap-node-accent,
+.aios-opsmap-node-label {
+  transition: opacity 0.12s ease;
+}
+
+.aios-opsmap-edge {
+  stroke: var(--aios-dim);
+  stroke-width: 1;
+  opacity: 0.25;
+  transition: opacity 0.12s ease, stroke 0.12s ease;
+}
+
+/* Hover highlight: bring the hovered node's edges + connected nodes to full
+   opacity, dim everything else. */
+.aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-node:not(.aios-opsmap-node-active) .aios-opsmap-node-rect,
+.aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-node:not(.aios-opsmap-node-active) .aios-opsmap-node-accent,
+.aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-node:not(.aios-opsmap-node-active) .aios-opsmap-node-label {
+  opacity: 0.3;
+}
+.aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-edge {
+  opacity: 0.06;
+}
+.aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-edge.aios-opsmap-edge-active {
+  opacity: 0.9;
+  stroke: var(--aios-purple);
+}

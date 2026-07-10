@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "test": "node resolveBuckets.test.mjs && node groupProjects.test.mjs && node viewModel.test.mjs && node healthModel.test.mjs && node launchModel.test.mjs && node usageModel.test.mjs && node exportUsageWorkflows.test.mjs"
+    "test": "node resolveBuckets.test.mjs && node groupProjects.test.mjs && node viewModel.test.mjs && node healthModel.test.mjs && node launchModel.test.mjs && node usageModel.test.mjs && node exportUsageWorkflows.test.mjs && node opsMapModel.test.mjs && node exportOpsMap.test.mjs"
   },
   "keywords": [
     "obsidian",

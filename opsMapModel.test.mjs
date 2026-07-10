@@ -1,0 +1,224 @@
+// Tests for the ops-map view model (build 2.5 m2): computeOpsMapLayout.
+// Mirror of the function in main.ts (kept in sync manually).
+// Run: node opsMapModel.test.mjs
+import assert from "node:assert";
+
+const OPS_MAP_COLUMNS = [
+  { type: "agent", label: "Agents" },
+  { type: "workflow", label: "Workflows" },
+  { type: "sop", label: "SOPs" },
+  { type: "guideline", label: "Guidelines" },
+  { type: "skill", label: "Skills" },
+];
+
+const OPS_MAP_DEFAULTS = {
+  columnWidth: 220,
+  rowHeight: 40,
+  nodeWidth: 180,
+  nodeHeight: 28,
+  paddingX: 24,
+  paddingY: 40,
+};
+
+const OPS_MAP_SKILL_SUMMARY_ID = "__skills_summary__";
+
+function computeOpsMapLayout(manifest, opts) {
+  const o = { ...OPS_MAP_DEFAULTS, ...(opts || {}) };
+  const nodes = manifest?.nodes || [];
+  const edges = manifest?.edges || [];
+
+  const referenced = new Set();
+  for (const e of edges) {
+    referenced.add(e.from);
+    referenced.add(e.to);
+  }
+
+  const columns = [];
+  const positioned = [];
+  const positionById = new Map();
+
+  OPS_MAP_COLUMNS.forEach((col, columnIndex) => {
+    const colX = o.paddingX + columnIndex * o.columnWidth;
+    let colNodes = nodes.filter((n) => n.type === col.type);
+
+    let collapsedNames = [];
+    if (col.type === "skill") {
+      const unreferenced = colNodes.filter((n) => !referenced.has(n.id));
+      colNodes = colNodes.filter((n) => referenced.has(n.id));
+      collapsedNames = unreferenced.map((n) => n.label).sort((a, b) => a.localeCompare(b));
+    }
+
+    colNodes = [...colNodes].sort((a, b) => a.id.localeCompare(b.id));
+
+    let rowIndex = 0;
+    for (const n of colNodes) {
+      const pos = {
+        id: n.id,
+        type: n.type,
+        label: n.label,
+        description: n.description,
+        path: n.path,
+        external: n.external,
+        column: columnIndex,
+        x: colX,
+        y: o.paddingY + rowIndex * o.rowHeight,
+        width: o.nodeWidth,
+        height: o.nodeHeight,
+      };
+      positioned.push(pos);
+      positionById.set(n.id, pos);
+      rowIndex += 1;
+    }
+
+    if (collapsedNames.length > 0) {
+      const summary = {
+        id: OPS_MAP_SKILL_SUMMARY_ID,
+        type: "skill-summary",
+        label: `+${collapsedNames.length} unreferenced skills`,
+        column: columnIndex,
+        x: colX,
+        y: o.paddingY + rowIndex * o.rowHeight,
+        width: o.nodeWidth,
+        height: o.nodeHeight,
+        collapsedNames,
+      };
+      positioned.push(summary);
+      rowIndex += 1;
+    }
+
+    columns.push({ type: col.type, label: col.label, count: colNodes.length, x: colX });
+  });
+
+  const resolvedEdges = [];
+  for (const e of edges) {
+    const from = positionById.get(e.from);
+    const to = positionById.get(e.to);
+    if (!from || !to) continue;
+    resolvedEdges.push({
+      from: e.from,
+      to: e.to,
+      viaType: e.viaType,
+      x1: from.x + from.width,
+      y1: from.y + from.height / 2,
+      x2: to.x,
+      y2: to.y + to.height / 2,
+    });
+  }
+
+  const rowCounts = OPS_MAP_COLUMNS.map((col, i) => {
+    const base = columns[i].count;
+    const hasSummary = positioned.some((n) => n.type === "skill-summary" && n.column === i);
+    return base + (hasSummary ? 1 : 0);
+  });
+  const maxRows = Math.max(1, ...rowCounts);
+
+  const width = o.paddingX + OPS_MAP_COLUMNS.length * o.columnWidth;
+  const height = o.paddingY + maxRows * o.rowHeight + o.paddingY;
+
+  return { columns, nodes: positioned, edges: resolvedEdges, width, height };
+}
+
+// --- empty manifest ---
+{
+  const layout = computeOpsMapLayout(null);
+  assert.equal(layout.columns.length, 5, "always 5 columns, even with no manifest");
+  assert.ok(layout.columns.every((c) => c.count === 0), "every column count is 0");
+  assert.equal(layout.nodes.length, 0, "no nodes");
+  assert.equal(layout.edges.length, 0, "no edges");
+
+  const layoutEmptyObj = computeOpsMapLayout({ nodes: [], edges: [] });
+  assert.equal(layoutEmptyObj.nodes.length, 0, "explicit empty arrays also produce no nodes");
+}
+
+// --- unknown edge endpoints dropped ---
+{
+  const manifest = {
+    nodes: [
+      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "WS-001-daily-journaling", type: "workflow", label: "WS-001", path: "Operations/Workflows/WS-001-daily-journaling.md" },
+    ],
+    edges: [
+      { from: "capture", to: "WS-001-daily-journaling", viaType: "token" },
+      { from: "capture", to: "SOP-999-does-not-exist", viaType: "token" },
+      { from: "GL-999-ghost", to: "capture", viaType: "token" },
+    ],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  assert.equal(layout.edges.length, 1, "only the edge with two known endpoints survives");
+  assert.equal(layout.edges[0].from, "capture");
+  assert.equal(layout.edges[0].to, "WS-001-daily-journaling");
+}
+
+// --- collapse rule: zero-edge skills collapse into one summary node ---
+{
+  const manifest = {
+    nodes: [
+      { id: "blog-write", type: "skill", label: "blog-write", path: "/skills/blog-write" },
+      { id: "blog-outline", type: "skill", label: "blog-outline", path: "/skills/blog-outline" },
+      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+    ],
+    edges: [{ from: "capture", to: "blog-write", viaType: "skill" }],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const skillNodes = layout.nodes.filter((n) => n.column === 4);
+  // blog-write has an edge -> stays individual. blog-outline has none -> collapses.
+  assert.ok(skillNodes.some((n) => n.id === "blog-write"), "referenced skill stays as its own node");
+  const summary = skillNodes.find((n) => n.type === "skill-summary");
+  assert.ok(summary, "unreferenced skill collapses into a summary node");
+  assert.equal(summary.label, "+1 unreferenced skills", "summary label counts the collapsed skills");
+  assert.deepEqual(summary.collapsedNames, ["blog-outline"], "summary lists the collapsed skill names");
+  assert.equal(layout.columns[4].count, 1, "column count reflects only the individually-shown skill");
+}
+
+// --- collapse rule: all skills unreferenced -> all collapse, none individual ---
+{
+  const manifest = {
+    nodes: [
+      { id: "a-skill", type: "skill", label: "a-skill", path: "/skills/a-skill" },
+      { id: "b-skill", type: "skill", label: "b-skill", path: "/skills/b-skill" },
+    ],
+    edges: [],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const skillNodes = layout.nodes.filter((n) => n.column === 4);
+  assert.equal(skillNodes.length, 1, "only the summary node is shown");
+  assert.equal(skillNodes[0].type, "skill-summary");
+  assert.deepEqual(skillNodes[0].collapsedNames, ["a-skill", "b-skill"], "collapsed names sorted alphabetically");
+}
+
+// --- deterministic ordering: nodes sorted by id within column ---
+{
+  const manifest = {
+    nodes: [
+      { id: "web-builder", type: "agent", label: "Web Builder", path: ".claude/agents/web-builder.md" },
+      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "recruit", type: "agent", label: "Recruit", path: ".claude/agents/recruit.md" },
+    ],
+    edges: [],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const agentIds = layout.nodes.filter((n) => n.column === 0).map((n) => n.id);
+  assert.deepEqual(agentIds, ["capture", "recruit", "web-builder"], "agents sorted alphabetically by id, not input order");
+}
+
+// --- column headers always present in the fixed order, with correct counts ---
+{
+  const manifest = {
+    nodes: [
+      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "SOP-001-x", type: "sop", label: "SOP-001", path: "Operations/SOPs/SOP-001-x.md" },
+    ],
+    edges: [],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  assert.deepEqual(
+    layout.columns.map((c) => c.type),
+    ["agent", "workflow", "sop", "guideline", "skill"],
+    "columns always appear left-to-right in the fixed order"
+  );
+  assert.equal(layout.columns[0].count, 1, "agent column count");
+  assert.equal(layout.columns[1].count, 0, "empty workflow column count is 0, not omitted");
+  assert.equal(layout.columns[2].count, 1, "sop column count");
+}
+
+console.log("opsMapModel: all assertions passed");

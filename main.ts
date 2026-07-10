@@ -134,6 +134,7 @@ interface AiosDashboardSettings {
   ideSessionTarget: "terminal" | "extension"; // where auto-session runs: integrated terminal (claude CLI) or the Claude Code extension panel
   ideNewSessionCommand: string; // command-palette entry used for the extension target
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
+  opsMapPath: string; // vault-relative path to the exporter's ops-map.json
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -158,6 +159,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideSessionTarget: "terminal",
   ideNewSessionCommand: "Claude Code: New Session",
   usageStatsPath: "Operations/usage/usage-stats.json",
+  opsMapPath: "Operations/ops-map.json",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -205,7 +207,7 @@ interface Progress {
 // Per-view UI state that must survive the debounced live re-render (v1 was stateless).
 // Not persisted to disk: resets to defaults when Obsidian restarts.
 interface ViewState {
-  activeTab: "projects" | "tasks" | "usage";
+  activeTab: "projects" | "tasks" | "usage" | "opsmap";
   activeStatus: string | null; // null = first non-empty status group
   activeCategory: string; // "all" | bucket slug | "inbox"
   expanded: Set<string>; // keys of expanded project cards and phase cards
@@ -1030,6 +1032,205 @@ function computeWorkflowsView(stats: UsageStats): UsageWorkflowsView {
   }));
 
   return { hasData: true, shareBar, table };
+}
+
+// ---------------------------------------------------------------------------
+// Ops map model (pure: no Obsidian deps; unit-tested in opsMapModel.test.mjs).
+// Reads Operations/ops-map.json (written by export-ops-map.mjs) and lays out
+// a deterministic 5-column graph: Agents, Workflows, SOPs, Guidelines, Skills.
+// ---------------------------------------------------------------------------
+
+type OpsMapNodeType = "agent" | "workflow" | "sop" | "guideline" | "skill";
+
+interface OpsMapNode {
+  id: string;
+  type: OpsMapNodeType;
+  label: string;
+  description?: string;
+  path: string;
+  external?: boolean;
+}
+
+interface OpsMapEdge {
+  from: string;
+  to: string;
+  viaType: string;
+}
+
+interface OpsMapManifest {
+  generatedAt?: string;
+  nodes: OpsMapNode[];
+  edges: OpsMapEdge[];
+}
+
+interface OpsMapLayoutOpts {
+  columnWidth?: number;
+  rowHeight?: number;
+  nodeWidth?: number;
+  nodeHeight?: number;
+  paddingX?: number;
+  paddingY?: number;
+}
+
+interface OpsMapPositionedNode {
+  id: string;
+  type: OpsMapNodeType | "skill-summary";
+  label: string;
+  description?: string;
+  path?: string;
+  external?: boolean;
+  column: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  // Only set on the collapsed "+N unreferenced skills" summary node.
+  collapsedNames?: string[];
+}
+
+interface OpsMapColumnHeader {
+  type: OpsMapNodeType;
+  label: string;
+  count: number;
+  x: number;
+}
+
+interface OpsMapResolvedEdge {
+  from: string;
+  to: string;
+  viaType: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+interface OpsMapLayout {
+  columns: OpsMapColumnHeader[];
+  nodes: OpsMapPositionedNode[];
+  edges: OpsMapResolvedEdge[];
+  width: number;
+  height: number;
+}
+
+const OPS_MAP_COLUMNS: { type: OpsMapNodeType; label: string }[] = [
+  { type: "agent", label: "Agents" },
+  { type: "workflow", label: "Workflows" },
+  { type: "sop", label: "SOPs" },
+  { type: "guideline", label: "Guidelines" },
+  { type: "skill", label: "Skills" },
+];
+
+const OPS_MAP_DEFAULTS: Required<OpsMapLayoutOpts> = {
+  columnWidth: 220,
+  rowHeight: 40,
+  nodeWidth: 180,
+  nodeHeight: 28,
+  paddingX: 24,
+  paddingY: 40,
+};
+
+const OPS_MAP_SKILL_SUMMARY_ID = "__skills_summary__";
+
+// MIRRORED in opsMapModel.test.mjs. Deterministic: no randomness, no wall-clock.
+function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?: OpsMapLayoutOpts): OpsMapLayout {
+  const o = { ...OPS_MAP_DEFAULTS, ...(opts || {}) };
+  const nodes = manifest?.nodes || [];
+  const edges = manifest?.edges || [];
+
+  // Which node ids are touched by at least one edge (either side).
+  const referenced = new Set<string>();
+  for (const e of edges) {
+    referenced.add(e.from);
+    referenced.add(e.to);
+  }
+
+  const columns: OpsMapColumnHeader[] = [];
+  const positioned: OpsMapPositionedNode[] = [];
+  const positionById = new Map<string, OpsMapPositionedNode>();
+
+  OPS_MAP_COLUMNS.forEach((col, columnIndex) => {
+    const colX = o.paddingX + columnIndex * o.columnWidth;
+    let colNodes = nodes.filter((n) => n.type === col.type);
+
+    let collapsedNames: string[] = [];
+    if (col.type === "skill") {
+      const unreferenced = colNodes.filter((n) => !referenced.has(n.id));
+      colNodes = colNodes.filter((n) => referenced.has(n.id));
+      collapsedNames = unreferenced.map((n) => n.label).sort((a, b) => a.localeCompare(b));
+    }
+
+    // Deterministic ordering: sort nodes by id within column.
+    colNodes = [...colNodes].sort((a, b) => a.id.localeCompare(b.id));
+
+    let rowIndex = 0;
+    for (const n of colNodes) {
+      const pos: OpsMapPositionedNode = {
+        id: n.id,
+        type: n.type,
+        label: n.label,
+        description: n.description,
+        path: n.path,
+        external: n.external,
+        column: columnIndex,
+        x: colX,
+        y: o.paddingY + rowIndex * o.rowHeight,
+        width: o.nodeWidth,
+        height: o.nodeHeight,
+      };
+      positioned.push(pos);
+      positionById.set(n.id, pos);
+      rowIndex += 1;
+    }
+
+    if (collapsedNames.length > 0) {
+      const summary: OpsMapPositionedNode = {
+        id: OPS_MAP_SKILL_SUMMARY_ID,
+        type: "skill-summary",
+        label: `+${collapsedNames.length} unreferenced skills`,
+        column: columnIndex,
+        x: colX,
+        y: o.paddingY + rowIndex * o.rowHeight,
+        width: o.nodeWidth,
+        height: o.nodeHeight,
+        collapsedNames,
+      };
+      positioned.push(summary);
+      rowIndex += 1;
+    }
+
+    columns.push({ type: col.type, label: col.label, count: colNodes.length, x: colX });
+  });
+
+  // Resolved edges: drop any edge whose endpoint is not a laid-out node
+  // (unknown token, or an endpoint that collapsed into the skills summary).
+  const resolvedEdges: OpsMapResolvedEdge[] = [];
+  for (const e of edges) {
+    const from = positionById.get(e.from);
+    const to = positionById.get(e.to);
+    if (!from || !to) continue;
+    resolvedEdges.push({
+      from: e.from,
+      to: e.to,
+      viaType: e.viaType,
+      x1: from.x + from.width,
+      y1: from.y + from.height / 2,
+      x2: to.x,
+      y2: to.y + to.height / 2,
+    });
+  }
+
+  const rowCounts = OPS_MAP_COLUMNS.map((col, i) => {
+    const base = columns[i].count;
+    const hasSummary = positioned.some((n) => n.type === "skill-summary" && n.column === i);
+    return base + (hasSummary ? 1 : 0);
+  });
+  const maxRows = Math.max(1, ...rowCounts);
+
+  const width = o.paddingX + OPS_MAP_COLUMNS.length * o.columnWidth;
+  const height = o.paddingY + maxRows * o.rowHeight + o.paddingY;
+
+  return { columns, nodes: positioned, edges: resolvedEdges, width, height };
 }
 
 // ---------------------------------------------------------------------------
@@ -2408,6 +2609,181 @@ function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboar
   });
 }
 
+// ---------------------------------------------------------------------------
+// Ops map tab: gather (impure, async) + render.
+// ---------------------------------------------------------------------------
+
+// Reads and defensively parses ops-map.json off the vault adapter. Returns
+// null on any failure (missing file, malformed JSON, unexpected shape) so the
+// caller can fall back to the "no ops map yet" hint instead of throwing.
+async function loadOpsMap(app: App, mapPath: string): Promise<OpsMapManifest | null> {
+  try {
+    const exists = await app.vault.adapter.exists(mapPath);
+    if (!exists) return null;
+    const raw = await app.vault.adapter.read(mapPath);
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return null;
+    return parsed as OpsMapManifest;
+  } catch {
+    return null;
+  }
+}
+
+const OPS_MAP_TYPE_LABEL: Record<string, string> = {
+  agent: "Agent",
+  workflow: "Workflow",
+  sop: "SOP",
+  guideline: "Guideline",
+  skill: "Skill",
+  "skill-summary": "Skills",
+};
+
+function opsMapNodeSvgClass(type: string): string {
+  return "aios-opsmap-node aios-opsmap-node-" + type;
+}
+
+// Renders the deterministic layered SVG graph. Hovering a node highlights its
+// edges + connected nodes and dims the rest (class toggles, no re-layout).
+function renderOpsMapGraph(
+  app: App,
+  container: HTMLElement,
+  layout: OpsMapLayout,
+  onOpenVaultNode: (path: string) => void
+) {
+  const wrap = container.createDiv({ cls: "aios-opsmap-wrap" });
+
+  // Column headers.
+  const headerRow = wrap.createDiv({ cls: "aios-opsmap-headers" });
+  headerRow.style.width = layout.width + "px";
+  for (const col of layout.columns) {
+    const h = headerRow.createDiv({ cls: "aios-opsmap-header" });
+    h.style.left = col.x + "px";
+    h.style.width = OPS_MAP_DEFAULTS.nodeWidth + "px";
+    h.createSpan({ cls: "aios-opsmap-header-label", text: col.label });
+    h.createSpan({ cls: "aios-opsmap-header-count", text: String(col.count) });
+  }
+
+  const svgWrap = wrap.createDiv({ cls: "aios-opsmap-svg-wrap" });
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "aios-opsmap-svg");
+  svg.setAttribute("width", String(layout.width));
+  svg.setAttribute("height", String(layout.height));
+  svg.setAttribute("viewBox", `0 0 ${layout.width} ${layout.height}`);
+  svgWrap.appendChild(svg);
+
+  const edgesByNode = new Map<string, OpsMapResolvedEdge[]>();
+  for (const e of layout.edges) {
+    if (!edgesByNode.has(e.from)) edgesByNode.set(e.from, []);
+    if (!edgesByNode.has(e.to)) edgesByNode.set(e.to, []);
+    edgesByNode.get(e.from)!.push(e);
+    edgesByNode.get(e.to)!.push(e);
+  }
+
+  // Edges (cubic bezier, low opacity by default).
+  const edgeEls: { el: SVGPathElement; edge: OpsMapResolvedEdge }[] = [];
+  for (const e of layout.edges) {
+    const midX = (e.x1 + e.x2) / 2;
+    const d = `M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    path.setAttribute("class", "aios-opsmap-edge aios-opsmap-edge-" + e.viaType);
+    path.setAttribute("fill", "none");
+    svg.appendChild(path);
+    edgeEls.push({ el: path, edge: e });
+  }
+
+  // Nodes: rounded rects + label text, foreignObject-free (plain SVG text,
+  // truncated by width via CSS on the wrapping rect's title).
+  const nodeEls: { el: SVGGElement; node: OpsMapPositionedNode }[] = [];
+  for (const n of layout.nodes) {
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", opsMapNodeSvgClass(n.type));
+    g.setAttribute("transform", `translate(${n.x}, ${n.y})`);
+
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("class", "aios-opsmap-node-rect");
+    rect.setAttribute("width", String(n.width));
+    rect.setAttribute("height", String(n.height));
+    rect.setAttribute("rx", "6");
+    g.appendChild(rect);
+
+    const accent = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    accent.setAttribute("class", "aios-opsmap-node-accent");
+    accent.setAttribute("width", "4");
+    accent.setAttribute("height", String(n.height));
+    accent.setAttribute("rx", "2");
+    g.appendChild(accent);
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("class", "aios-opsmap-node-label");
+    text.setAttribute("x", "12");
+    text.setAttribute("y", String(n.height / 2 + 4));
+    text.textContent = n.label.length > 24 ? n.label.slice(0, 23) + "…" : n.label;
+    g.appendChild(text);
+
+    const titleParts = [OPS_MAP_TYPE_LABEL[n.type] || n.type, n.label];
+    if (n.type === "skill-summary" && n.collapsedNames) titleParts.push(n.collapsedNames.join(", "));
+    else if (n.description) titleParts.push(n.description);
+    else if (n.path) titleParts.push(n.path);
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = titleParts.join(": ");
+    g.appendChild(title);
+
+    g.addEventListener("mouseenter", () => {
+      svg.classList.add("aios-opsmap-hovering");
+      g.classList.add("aios-opsmap-node-active");
+      for (const { el, edge } of edgeEls) {
+        if (edge.from === n.id || edge.to === n.id) el.classList.add("aios-opsmap-edge-active");
+      }
+      for (const { el, node } of nodeEls) {
+        if (node.id === n.id) continue;
+        const touching = (edgesByNode.get(n.id) || []).some((e) => e.from === node.id || e.to === node.id);
+        if (touching) el.classList.add("aios-opsmap-node-active");
+      }
+    });
+    g.addEventListener("mouseleave", () => {
+      svg.classList.remove("aios-opsmap-hovering");
+      for (const { el } of nodeEls) el.classList.remove("aios-opsmap-node-active");
+      for (const { el } of edgeEls) el.classList.remove("aios-opsmap-edge-active");
+    });
+
+    if (n.type !== "skill-summary") {
+      g.addEventListener("click", () => {
+        if (n.external) {
+          new Notice("AIOS: " + (n.path || n.id));
+        } else if (n.path) {
+          onOpenVaultNode(n.path);
+        }
+      });
+    }
+
+    svg.appendChild(g);
+    nodeEls.push({ el: g, node: n });
+  }
+}
+
+// Ops map tab: async load + layout + render. Renders a hint when the
+// exporter has not run yet (no ops-map.json at settings.opsMapPath).
+function renderOpsMapTab(app: App, container: HTMLElement, settings: AiosDashboardSettings) {
+  const wrap = container.createDiv({ cls: "aios-opsmap-tab" });
+  wrap.createDiv({ cls: "aios-empty", text: "Loading ops map..." });
+  loadOpsMap(app, settings.opsMapPath).then((manifest) => {
+    wrap.empty();
+    if (!manifest) {
+      wrap.createDiv({
+        cls: "aios-empty",
+        text:
+          "No ops map yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs",
+      });
+      return;
+    }
+    const layout = computeOpsMapLayout(manifest);
+    renderOpsMapGraph(app, wrap, layout, (path) => {
+      app.workspace.openLinkText(path, "", false);
+    });
+  });
+}
+
 function renderDashboard(
   app: App,
   root: HTMLElement,
@@ -2464,7 +2840,7 @@ function renderDashboard(
 
   // ----- Tab bar -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
-  const mkTab = (id: "projects" | "tasks" | "usage", label: string) => {
+  const mkTab = (id: "projects" | "tasks" | "usage" | "opsmap", label: string) => {
     const t = tabs.createEl("button", {
       cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
       text: label,
@@ -2477,6 +2853,7 @@ function renderDashboard(
   mkTab("projects", "Projects");
   mkTab("tasks", "Tasks");
   mkTab("usage", "Usage");
+  mkTab("opsmap", "Ops map");
 
   // ----- Tab body -----
   const body = root.createDiv({ cls: "aios-tab-body" });
@@ -2484,6 +2861,8 @@ function renderDashboard(
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else if (viewState.activeTab === "usage") {
     renderUsageTab(app, body, settings);
+  } else if (viewState.activeTab === "opsmap") {
+    renderOpsMapTab(app, body, settings);
   } else {
     renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm);
   }
@@ -2712,6 +3091,23 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.usageStatsPath)
           .onChange(async (v) => {
             this.plugin.settings.usageStatsPath = v.trim() || DEFAULT_SETTINGS.usageStatsPath;
+            await save();
+          })
+      );
+
+    containerEl.createEl("h2", { text: "Ops map" });
+
+    new Setting(containerEl)
+      .setName("Ops map path")
+      .setDesc(
+        "Vault-relative path to the exporter's ops-map.json (see node Operations/scripts/export-ops-map.mjs)."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.opsMapPath)
+          .setValue(this.plugin.settings.opsMapPath)
+          .onChange(async (v) => {
+            this.plugin.settings.opsMapPath = v.trim() || DEFAULT_SETTINGS.opsMapPath;
             await save();
           })
       );
