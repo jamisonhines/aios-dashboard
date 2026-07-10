@@ -12,6 +12,10 @@ A settings tab (Obsidian Settings > AIOS Dashboard) configures the plugin's root
 
 A row of small pills at the top of the dashboard surfaces vault upkeep issues: intake backlog, stale in-progress and stale open tasks, un-mined journal entries, orphan tasks (pointing at an unknown project), status/folder mismatches, and broken wikilinks. Tiles with a zero count are hidden entirely, so a healthy vault shows no strip. Click a tile to open a list of the offending files. Turn it off in settings with `showHealthStrip`.
 
+## Actions
+
+On desktop, the dashboard can launch a Claude Code (Dispatch) session directly: each health tile's detail modal has a "Fix with Dispatch" button that opens a terminal in the vault with a canned prompt for that problem (plus a "Copy prompt" fallback that works everywhere), and the header has an "Ask Dispatch" button for a plain session. Launch mode is a setting: Terminal.app, iTerm2, or a custom command template with `{vault}` and `{prompt}` placeholders for wiring any other tool. Security note: actions only run the binary or template you configured in settings, prompts are passed as single quoted arguments, and the launched session is visible and interactive, so nothing executes without you watching it.
+
 ## Install
 
 - **BRAT** (recommended for forks): add this repo in the BRAT plugin settings; releases carry the built assets.

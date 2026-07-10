@@ -4,6 +4,7 @@ import {
   Menu,
   Modal,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -123,6 +124,10 @@ interface AiosDashboardSettings {
   inProgressStaleDays: number;
   openStaleDays: number;
   linkCheckExcludes: string; // comma-separated list
+  actionsEnabled: boolean;
+  launchMode: "terminal" | "iterm" | "custom";
+  customCommand: string; // shell template, {vault} and {prompt} placeholders
+  claudeBinary: string;
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -137,6 +142,10 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   inProgressStaleDays: 7,
   openStaleDays: 45,
   linkCheckExcludes: "Wiki/daily, Wiki/finances, Wiki/ea, Operations/Templates, _archive",
+  actionsEnabled: true,
+  launchMode: "terminal",
+  customCommand: "",
+  claudeBinary: "claude",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -478,7 +487,29 @@ interface HealthTile {
   summary: string;
   warn: boolean;
   items: HealthItem[];
+  prompt: string;
 }
+
+// Canned Dispatch prompt per health-tile key, shown as "Fix with Dispatch" in the
+// detail modal. Keyed by HealthTile.key (the internal computeHealth id, not the
+// UI label). stale-in-progress and stale-open share the same reconcile prompt;
+// orphan-tasks and status-mismatch share the same consistency-fix prompt.
+const HEALTH_TILE_PROMPTS: Record<string, string> = {
+  intake:
+    "Process the Intake inbox: route each item per AGENTS.md (Capture for personal, SOP-ingest-source for external content).",
+  "journal-unmined":
+    "List journal entries with ingested: false and ingest the ones worth mining per GL-007: create derived area notes linking back, then flip ingested to true.",
+  "stale-in-progress":
+    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
+  "stale-open":
+    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
+  "orphan-tasks":
+    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
+  "status-mismatch":
+    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
+  "broken-links":
+    "Fix broken wikilinks per GL-001: repoint renamed targets, convert out-of-vault targets to backtick paths, strip dead ones.",
+};
 
 interface HealthTaskInput {
   path: string;
@@ -536,6 +567,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
       summary: `${intake.length} · oldest ${oldest}d`,
       warn: oldest > input.thresholds.intakeWarnDays,
       items: sorted.map((f) => ({ path: f.path, label: f.name, detail: `${f.ageDays}d old` })),
+      prompt: HEALTH_TILE_PROMPTS["intake"],
     });
   }
 
@@ -554,6 +586,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
         .slice()
         .sort((a, b) => b.ageDays - a.ageDays)
         .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+      prompt: HEALTH_TILE_PROMPTS["stale-in-progress"],
     });
   }
 
@@ -572,6 +605,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
         .slice()
         .sort((a, b) => b.ageDays - a.ageDays)
         .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+      prompt: HEALTH_TILE_PROMPTS["stale-open"],
     });
   }
 
@@ -585,6 +619,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
       summary: `${unmined.length}`,
       warn: false,
       items: unmined.map((f) => ({ path: f.path, label: f.name, detail: "not ingested" })),
+      prompt: HEALTH_TILE_PROMPTS["journal-unmined"],
     });
   }
 
@@ -603,6 +638,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
         label: t.title,
         detail: `project: ${t.project}`,
       })),
+      prompt: HEALTH_TILE_PROMPTS["orphan-tasks"],
     });
   }
 
@@ -622,6 +658,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
         label: t.title,
         detail: `status: ${t.declaredStatus}, folder: ${healthInferStatusFromPath(t.path)}`,
       })),
+      prompt: HEALTH_TILE_PROMPTS["status-mismatch"],
     });
   }
 
@@ -645,6 +682,7 @@ function computeHealth(input: HealthInput): HealthTile[] {
       summary: `${brokenTotal}`,
       warn: true,
       items,
+      prompt: HEALTH_TILE_PROMPTS["broken-links"],
     });
   }
 
@@ -786,6 +824,143 @@ async function createQuickTask(
   } catch (e) {
     new Notice("AIOS: could not create task. " + (e?.message || e));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Launch Dispatch: build a launch command (pure, unit-tested in
+// launchModel.test.mjs) and run it (impure, desktop-only). Three modes:
+// terminal (macOS Terminal.app via AppleScript), iterm (iTerm2 via
+// AppleScript), custom (a user shell template run directly).
+//
+// QUOTING: the inner shell command (cd into the vault, run the claude binary,
+// pass the prompt as a single argument) is built with POSIX single-quoting
+// (each argument wrapped in '...', embedded single quotes escaped as '\'').
+// That whole string is then embedded as an AppleScript double-quoted string
+// literal for terminal/iterm modes, so it needs its own escaping pass
+// (backslash and double-quote). Getting the order right (shell-quote first,
+// then AppleScript-quote the result) is what keeps prompts with quotes safe.
+// ---------------------------------------------------------------------------
+
+// Wrap a single shell argument in POSIX single quotes, escaping any embedded
+// single quotes with the standard '\'' technique.
+function shellQuoteSingle(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+// Escape a string for embedding inside an AppleScript double-quoted literal.
+function escapeAppleScriptString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+// The shell command run inside the terminal: cd into the vault, then run the
+// claude binary with the prompt as a single trailing argument (omitted when
+// prompt is null, giving a plain interactive session).
+function buildInnerShellCommand(
+  claudeBinary: string,
+  vaultPath: string,
+  prompt: string | null
+): string {
+  const parts = ["cd", shellQuoteSingle(vaultPath), "&&", shellQuoteSingle(claudeBinary)];
+  if (prompt != null) parts.push(shellQuoteSingle(prompt));
+  return parts.join(" ");
+}
+
+// Pure: returns the exact argv to spawn for a given launch mode. Never touches
+// the filesystem or a process, so it is fully unit-testable.
+function buildLaunchCommand(
+  mode: "terminal" | "iterm" | "custom",
+  claudeBinary: string,
+  vaultPath: string,
+  prompt: string | null,
+  customCommand: string
+): string[] {
+  if (mode === "custom") {
+    const vaultArg = shellQuoteSingle(vaultPath);
+    const promptArg = prompt != null ? shellQuoteSingle(prompt) : "";
+    const substituted = customCommand
+      .split("{vault}")
+      .join(vaultArg)
+      .split("{prompt}")
+      .join(promptArg);
+    return ["/bin/sh", "-c", substituted];
+  }
+
+  const inner = buildInnerShellCommand(claudeBinary, vaultPath, prompt);
+  const escaped = escapeAppleScriptString(inner);
+
+  if (mode === "iterm") {
+    const script =
+      `tell application "iTerm2"\n` +
+      `activate\n` +
+      `create window with default profile\n` +
+      `tell current session of current window\n` +
+      `write text "${escaped}"\n` +
+      `end tell\n` +
+      `end tell`;
+    return ["osascript", "-e", script];
+  }
+
+  // terminal
+  const script =
+    `tell application "Terminal"\n` +
+    `activate\n` +
+    `do script "${escaped}"\n` +
+    `end tell`;
+  return ["osascript", "-e", script];
+}
+
+// Impure: spawns the argv built above. Detached and unref'd so the plugin does
+// not wait on (or block Obsidian on) the launched process. Never throws into
+// the render path; failures surface via Notice.
+function runLaunchCommand(argv: string[], cwd?: string): void {
+  try {
+    // Desktop-only Obsidian ships Node/Electron; `require` resolves at runtime.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const cp = require("child_process");
+    const [cmd, ...args] = argv;
+    const child = cp.spawn(cmd, args, { cwd, detached: true, stdio: "ignore" });
+    child.unref();
+  } catch (e) {
+    new Notice("AIOS: could not launch Dispatch. " + (e?.message || e));
+  }
+}
+
+// The thin orchestrator called from UI: resolves desktop-only, builds the
+// command, and runs it. `prompt` null gives a plain interactive session.
+function launchDispatch(
+  settings: AiosDashboardSettings,
+  vaultAbsolutePath: string,
+  prompt: string | null
+): void {
+  if (!Platform.isDesktop) {
+    new Notice("AIOS: Dispatch actions are desktop-only.");
+    return;
+  }
+  try {
+    const argv = buildLaunchCommand(
+      settings.launchMode,
+      settings.claudeBinary,
+      vaultAbsolutePath,
+      prompt,
+      settings.customCommand
+    );
+    const cwd = settings.launchMode === "custom" ? vaultAbsolutePath : undefined;
+    runLaunchCommand(argv, cwd);
+  } catch (e) {
+    new Notice("AIOS: could not launch Dispatch. " + (e?.message || e));
+  }
+}
+
+// Resolve the vault's absolute filesystem path via the desktop adapter. Returns
+// null (and surfaces a Notice) when unavailable, e.g. a non-desktop adapter.
+function getVaultBasePath(app: App): string | null {
+  const adapter = app.vault.adapter as any;
+  const base = adapter?.getBasePath?.();
+  if (typeof base !== "string" || !base) {
+    new Notice("AIOS: could not resolve the vault's file path.");
+    return null;
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,13 +1603,18 @@ function gatherHealthInput(
   };
 }
 
-// Lists the offending files for one health tile; click a row to open it.
+// Lists the offending files for one health tile; click a row to open it. When
+// actions are enabled and we are on desktop, the footer also offers a "Fix
+// with Dispatch" button (launches Claude Code with the tile's canned prompt)
+// and a "Copy prompt" button (clipboard, works everywhere).
 class HealthDetailModal extends Modal {
   private tile: HealthTile;
+  private settings: AiosDashboardSettings;
 
-  constructor(app: App, tile: HealthTile) {
+  constructor(app: App, tile: HealthTile, settings: AiosDashboardSettings) {
     super(app);
     this.tile = tile;
+    this.settings = settings;
   }
 
   onOpen() {
@@ -1452,6 +1632,29 @@ class HealthDetailModal extends Modal {
       });
       row.createSpan({ cls: "aios-health-modal-detail", text: item.detail });
     }
+
+    const footer = contentEl.createDiv({ cls: "aios-modal-footer" });
+    if (this.settings.actionsEnabled && Platform.isDesktop) {
+      const fixBtn = footer.createEl("button", {
+        cls: "aios-btn aios-btn-cta",
+        text: "Fix with Dispatch",
+      });
+      fixBtn.addEventListener("click", () => {
+        const base = getVaultBasePath(this.app);
+        if (!base) return;
+        launchDispatch(this.settings, base, this.tile.prompt);
+        this.close();
+      });
+    }
+    const copyBtn = footer.createEl("button", { cls: "aios-btn", text: "Copy prompt" });
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(this.tile.prompt);
+        new Notice("AIOS: prompt copied.");
+      } catch (e) {
+        new Notice("AIOS: could not copy prompt. " + (e?.message || e));
+      }
+    });
   }
 
   onClose() {
@@ -1462,7 +1665,12 @@ class HealthDetailModal extends Modal {
 // One row of small pills at the top of the dashboard. Tiles with a zero count
 // are omitted by computeHealth already, so an all-healthy vault renders no
 // strip at all. Click a tile to see the offending files.
-function renderHealthStrip(app: App, root: HTMLElement, tiles: HealthTile[]) {
+function renderHealthStrip(
+  app: App,
+  root: HTMLElement,
+  tiles: HealthTile[],
+  settings: AiosDashboardSettings
+) {
   if (tiles.length === 0) return;
   const strip = root.createDiv({ cls: "aios-health-strip" });
   for (const tile of tiles) {
@@ -1471,7 +1679,7 @@ function renderHealthStrip(app: App, root: HTMLElement, tiles: HealthTile[]) {
     });
     pill.createSpan({ cls: "aios-health-tile-label", text: tile.label });
     pill.createSpan({ cls: "aios-health-tile-count", text: tile.summary });
-    pill.addEventListener("click", () => new HealthDetailModal(app, tile).open());
+    pill.addEventListener("click", () => new HealthDetailModal(app, tile, settings).open());
   }
 }
 
@@ -1510,11 +1718,23 @@ function renderDashboard(
   const refreshBtn = header.createEl("button", { cls: "aios-refresh", text: "Refresh" });
   refreshBtn.addEventListener("click", () => refresh());
 
+  if (settings.actionsEnabled && Platform.isDesktop) {
+    const askBtn = header.createEl("button", {
+      cls: "aios-refresh aios-ask-dispatch",
+      text: "Ask Dispatch",
+    });
+    askBtn.addEventListener("click", () => {
+      const base = getVaultBasePath(app);
+      if (!base) return;
+      launchDispatch(settings, base, null);
+    });
+  }
+
   // ----- Health strip -----
   if (settings.showHealthStrip) {
     const healthInput = gatherHealthInput(app, settings, tasks, projects);
     const tiles = computeHealth(healthInput);
-    renderHealthStrip(app, root, tiles);
+    renderHealthStrip(app, root, tiles, settings);
   }
 
   // ----- Tab bar -----
@@ -1747,6 +1967,71 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.linkCheckExcludes)
           .onChange(async (v) => {
             this.plugin.settings.linkCheckExcludes = v;
+            await save();
+          })
+      );
+
+    containerEl.createEl("h2", { text: "Actions" });
+
+    if (!Platform.isDesktop) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "Dispatch launch actions are desktop-only and are hidden on this device.",
+      });
+      return;
+    }
+
+    new Setting(containerEl)
+      .setName("Enable Dispatch actions")
+      .setDesc(
+        "Show the \"Ask Dispatch\" header button and the \"Fix with Dispatch\" button in health tile details. Desktop only."
+      )
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.actionsEnabled).onChange(async (v) => {
+          this.plugin.settings.actionsEnabled = v;
+          await save();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Launch mode")
+      .setDesc("How Dispatch actions open Claude Code.")
+      .addDropdown((d) =>
+        d
+          .addOption("terminal", "Terminal.app")
+          .addOption("iterm", "iTerm2")
+          .addOption("custom", "Custom command")
+          .setValue(this.plugin.settings.launchMode)
+          .onChange(async (v) => {
+            this.plugin.settings.launchMode = v as "terminal" | "iterm" | "custom";
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Custom command")
+      .setDesc(
+        "Shell command template used when launch mode is Custom. Use {vault} and {prompt} as placeholders, e.g. code {vault}"
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("code {vault}")
+          .setValue(this.plugin.settings.customCommand)
+          .onChange(async (v) => {
+            this.plugin.settings.customCommand = v;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Claude binary")
+      .setDesc("Binary name or absolute path used by the Terminal and iTerm2 launch modes.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.claudeBinary)
+          .setValue(this.plugin.settings.claudeBinary)
+          .onChange(async (v) => {
+            this.plugin.settings.claudeBinary = v.trim() || DEFAULT_SETTINGS.claudeBinary;
             await save();
           })
       );

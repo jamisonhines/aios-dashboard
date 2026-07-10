@@ -13,6 +13,23 @@ function excludedBySource(source, excludes) {
   return excludes.some((ex) => source === ex || source.startsWith(ex + "/"));
 }
 
+const HEALTH_TILE_PROMPTS = {
+  intake:
+    "Process the Intake inbox: route each item per AGENTS.md (Capture for personal, SOP-ingest-source for external content).",
+  "journal-unmined":
+    "List journal entries with ingested: false and ingest the ones worth mining per GL-007: create derived area notes linking back, then flip ingested to true.",
+  "stale-in-progress":
+    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
+  "stale-open":
+    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
+  "orphan-tasks":
+    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
+  "status-mismatch":
+    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
+  "broken-links":
+    "Fix broken wikilinks per GL-001: repoint renamed targets, convert out-of-vault targets to backtick paths, strip dead ones.",
+};
+
 function computeHealth(input) {
   const tiles = [];
 
@@ -28,6 +45,7 @@ function computeHealth(input) {
       summary: `${intake.length} · oldest ${oldest}d`,
       warn: oldest > input.thresholds.intakeWarnDays,
       items: sorted.map((f) => ({ path: f.path, label: f.name, detail: `${f.ageDays}d old` })),
+      prompt: HEALTH_TILE_PROMPTS["intake"],
     });
   }
 
@@ -46,6 +64,7 @@ function computeHealth(input) {
         .slice()
         .sort((a, b) => b.ageDays - a.ageDays)
         .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+      prompt: HEALTH_TILE_PROMPTS["stale-in-progress"],
     });
   }
 
@@ -64,6 +83,7 @@ function computeHealth(input) {
         .slice()
         .sort((a, b) => b.ageDays - a.ageDays)
         .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+      prompt: HEALTH_TILE_PROMPTS["stale-open"],
     });
   }
 
@@ -77,6 +97,7 @@ function computeHealth(input) {
       summary: `${unmined.length}`,
       warn: false,
       items: unmined.map((f) => ({ path: f.path, label: f.name, detail: "not ingested" })),
+      prompt: HEALTH_TILE_PROMPTS["journal-unmined"],
     });
   }
 
@@ -91,6 +112,7 @@ function computeHealth(input) {
       summary: `${orphans.length}`,
       warn: true,
       items: orphans.map((t) => ({ path: t.path, label: t.title, detail: `project: ${t.project}` })),
+      prompt: HEALTH_TILE_PROMPTS["orphan-tasks"],
     });
   }
 
@@ -110,6 +132,7 @@ function computeHealth(input) {
         label: t.title,
         detail: `status: ${t.declaredStatus}, folder: ${healthInferStatusFromPath(t.path)}`,
       })),
+      prompt: HEALTH_TILE_PROMPTS["status-mismatch"],
     });
   }
 
@@ -126,7 +149,15 @@ function computeHealth(input) {
         label: source,
         detail: `${count} broken link${count === 1 ? "" : "s"}`,
       }));
-    tiles.push({ key: "broken-links", label: "Broken links", count: brokenTotal, summary: `${brokenTotal}`, warn: true, items });
+    tiles.push({
+      key: "broken-links",
+      label: "Broken links",
+      count: brokenTotal,
+      summary: `${brokenTotal}`,
+      warn: true,
+      items,
+      prompt: HEALTH_TILE_PROMPTS["broken-links"],
+    });
   }
 
   return tiles;
@@ -276,6 +307,56 @@ assert.deepEqual(computeHealth(emptyInput()), [], "empty input -> no tiles (calm
     undefined,
     "fully excluded sources produce no tile"
   );
+}
+
+// --- canned prompts: every tile carries its Dispatch prompt, and shared tiles
+//     (the two stale-task tiles, the two consistency tiles) share the exact
+//     same wording ---
+{
+  const input = emptyInput();
+  input.intakeFiles = [{ path: "Intake/note.md", name: "note.md", ageDays: 10 }];
+  input.journalFiles = [{ path: "Wiki/Journal/x.md", name: "x.md", ingested: false }];
+  input.projectSlugs = ["known-proj"];
+  input.tasks = [
+    { path: "t1", title: "wip", status: "in-progress", declaredStatus: null, project: null, ageDays: 8 },
+    { path: "t2", title: "open", status: "open", declaredStatus: null, project: null, ageDays: 50 },
+    { path: "t3", title: "orphan", status: "open", declaredStatus: null, project: "ghost", ageDays: 1 },
+    {
+      path: "Operations/tasks/open/tsk-4.md",
+      title: "mismatched",
+      status: "open",
+      declaredStatus: "done",
+      project: null,
+      ageDays: 1,
+    },
+  ];
+  input.unresolvedLinks = [{ source: "Wiki/notes/a.md", target: "Missing", count: 1 }];
+  const tiles = computeHealth(input);
+  const byKey = Object.fromEntries(tiles.map((t) => [t.key, t]));
+  assert.equal(byKey["intake"].prompt, HEALTH_TILE_PROMPTS["intake"], "intake tile carries its canned prompt");
+  assert.equal(
+    byKey["journal-unmined"].prompt,
+    HEALTH_TILE_PROMPTS["journal-unmined"],
+    "journal-unmined tile carries its canned prompt"
+  );
+  assert.equal(
+    byKey["stale-in-progress"].prompt,
+    byKey["stale-open"].prompt,
+    "the two stale-task tiles share the same reconcile prompt"
+  );
+  assert.equal(
+    byKey["orphan-tasks"].prompt,
+    byKey["status-mismatch"].prompt,
+    "the two consistency tiles share the same fix prompt"
+  );
+  assert.equal(
+    byKey["broken-links"].prompt,
+    HEALTH_TILE_PROMPTS["broken-links"],
+    "broken-links tile carries its canned prompt"
+  );
+  for (const tile of tiles) {
+    assert.ok(typeof tile.prompt === "string" && tile.prompt.length > 0, `${tile.key} tile has a non-empty prompt`);
+  }
 }
 
 console.log("healthModel: all assertions passed");

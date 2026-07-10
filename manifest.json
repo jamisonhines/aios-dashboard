@@ -1,7 +1,7 @@
 {
   "id": "aios-dashboard",
   "name": "AIOS Dashboard",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "minAppVersion": "1.4.0",
   "description": "Live, interactive project and task dashboard for AIOS. Reads Operations/tasks and Projects hubs, renders a bespoke dark dashboard, and writes task changes back to the files.",
   "author": "Jamison Hines",
