@@ -22,9 +22,36 @@ function buildInnerShellCommandNoCd(claudeBinary, prompt) {
   return parts.join(" ");
 }
 
-function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder, autoSession) {
+function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder, autoSession, sessionTarget, newSessionCommand) {
   if (mode === "app") {
     const appName = ideAppName || "Antigravity";
+    if (autoSession && sessionTarget === "extension") {
+      const paletteCmd = newSessionCommand || "Claude Code: New Session";
+      let script =
+        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
+        `delay 1.5\n` +
+        `tell application "System Events"\n` +
+        `keystroke "p" using {command down, shift down}\n` +
+        `end tell\n` +
+        `delay 0.5\n` +
+        `set the clipboard to "${escapeAppleScriptString(paletteCmd)}"\n` +
+        `tell application "System Events"\n` +
+        `keystroke "v" using {command down}\n` +
+        `delay 0.4\n` +
+        `key code 36\n` +
+        `end tell\n` +
+        `delay 1.5\n`;
+      if (prompt != null) {
+        script +=
+          `set the clipboard to "${escapeAppleScriptString(prompt)}"\n` +
+          `tell application "System Events"\n` +
+          `keystroke "v" using {command down}\n` +
+          `delay 0.3\n` +
+          `key code 36\n` +
+          `end tell`;
+      }
+      return ["osascript", "-e", script.trimEnd()];
+    }
     if (autoSession) {
       const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
       const script =
@@ -190,6 +217,22 @@ function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand
   const unescaped = clipLine.slice('set the clipboard to "'.length, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
   assert.equal(unescaped, buildInnerShellCommandNoCd("claude", "fix the 'intake' pile"), "clipboard carries the exact shell-quoted claude command");
   assert.ok(script.includes("key code 36"), "presses return");
+}
+
+
+// --- app mode, extension target: palette-driven Claude Code session ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/v", "mine the journal", "", "Antigravity IDE", false, true, "extension", "Claude Code: New Session");
+  const script = argv[2];
+  assert.ok(script.includes('keystroke "p" using {command down, shift down}'), "opens the command palette");
+  assert.ok(script.includes('set the clipboard to "Claude Code: New Session"'), "pastes the palette command");
+  assert.ok(script.includes('set the clipboard to "mine the journal"'), "pastes the prompt");
+}
+
+// --- extension target with null prompt: opens the session, sends nothing ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/v", null, "", "X", false, true, "extension", "Claude Code: New Session");
+  assert.ok(!argv[2].includes("delay 0.3"), "no prompt paste block when prompt is null");
 }
 
 console.log("launchModel: all assertions passed");

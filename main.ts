@@ -131,6 +131,8 @@ interface AiosDashboardSettings {
   ideAppName: string; // macOS app name for the "app" launch mode (open -a)
   ideOpenVaultFolder: boolean; // pass the vault path to the app (may spawn a new window)
   ideAutoSession: boolean; // auto-open a terminal in the IDE and paste-run the claude command
+  ideSessionTarget: "terminal" | "extension"; // where auto-session runs: integrated terminal (claude CLI) or the Claude Code extension panel
+  ideNewSessionCommand: string; // command-palette entry used for the extension target
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -152,6 +154,8 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideAppName: "Antigravity",
   ideOpenVaultFolder: false,
   ideAutoSession: false,
+  ideSessionTarget: "terminal",
+  ideNewSessionCommand: "Claude Code: New Session",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -889,7 +893,9 @@ function buildLaunchCommand(
   customCommand: string,
   ideAppName?: string,
   openVaultFolder?: boolean,
-  autoSession?: boolean
+  autoSession?: boolean,
+  sessionTarget?: "terminal" | "extension",
+  newSessionCommand?: string
 ): string[] {
   // "app" activates a macOS app (IDE) via open -a; no CLI on PATH required.
   // By default it does NOT pass the vault path: VS Code forks treat a folder
@@ -902,6 +908,35 @@ function buildLaunchCommand(
   // the claude command with the prompt: the true one-click flow.
   if (mode === "app") {
     const appName = ideAppName || "Antigravity";
+    if (autoSession && sessionTarget === "extension") {
+      // Drive the command palette to open a fresh Claude Code extension
+      // session, then paste the prompt into its input and send it.
+      const paletteCmd = newSessionCommand || "Claude Code: New Session";
+      let script =
+        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
+        `delay 1.5\n` +
+        `tell application "System Events"\n` +
+        `keystroke "p" using {command down, shift down}\n` +
+        `end tell\n` +
+        `delay 0.5\n` +
+        `set the clipboard to "${escapeAppleScriptString(paletteCmd)}"\n` +
+        `tell application "System Events"\n` +
+        `keystroke "v" using {command down}\n` +
+        `delay 0.4\n` +
+        `key code 36\n` +
+        `end tell\n` +
+        `delay 1.5\n`;
+      if (prompt != null) {
+        script +=
+          `set the clipboard to "${escapeAppleScriptString(prompt)}"\n` +
+          `tell application "System Events"\n` +
+          `keystroke "v" using {command down}\n` +
+          `delay 0.3\n` +
+          `key code 36\n` +
+          `end tell`;
+      }
+      return ["osascript", "-e", script.trimEnd()];
+    }
     if (autoSession) {
       const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
       const script =
@@ -994,7 +1029,9 @@ function launchDispatch(
       settings.customCommand,
       settings.ideAppName,
       settings.ideOpenVaultFolder,
-      settings.ideAutoSession
+      settings.ideAutoSession,
+      settings.ideSessionTarget,
+      settings.ideNewSessionCommand
     );
     const cwd = settings.launchMode === "custom" ? vaultAbsolutePath : undefined;
     runLaunchCommand(argv, cwd);
@@ -2113,6 +2150,37 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           this.plugin.settings.ideAutoSession = v;
           await save();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("IDE: session target")
+      .setDesc(
+        "Where the auto-started session runs: a new integrated terminal running the claude CLI, or a new session in the Claude Code extension panel (driven via the command palette)."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("terminal", "Integrated terminal (claude CLI)")
+          .addOption("extension", "Claude Code extension panel")
+          .setValue(this.plugin.settings.ideSessionTarget)
+          .onChange(async (v) => {
+            this.plugin.settings.ideSessionTarget = v as "terminal" | "extension";
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("IDE: new-session palette command")
+      .setDesc(
+        "Exact command-palette entry used to open a fresh extension session. Check your IDE's palette (Cmd+Shift+P, type Claude) and copy the wording if it differs."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.ideNewSessionCommand)
+          .setValue(this.plugin.settings.ideNewSessionCommand)
+          .onChange(async (v) => {
+            this.plugin.settings.ideNewSessionCommand = v.trim() || DEFAULT_SETTINGS.ideNewSessionCommand;
+            await save();
+          })
       );
 
     new Setting(containerEl)
