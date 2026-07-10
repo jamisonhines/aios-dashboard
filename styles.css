@@ -698,3 +698,162 @@
   padding-bottom: 12px;
   border-bottom: 1px solid var(--aios-border);
 }
+
+/* Usage tab: cost/token dashboard. Per-family hues derived from the existing
+   palette (grad ramp + accent + p-scale) so the chart never clashes with the
+   rest of the dashboard's color system. */
+.aios-dashboard-root {
+  --aios-usage-fable: var(--aios-p1);
+  --aios-usage-opus: var(--aios-purple);
+  --aios-usage-sonnet: var(--aios-grad-3);
+  --aios-usage-haiku: var(--aios-grad-2);
+  --aios-usage-other: var(--aios-dim);
+}
+
+.aios-dashboard-root .aios-usage-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.aios-dashboard-root .aios-usage-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.aios-dashboard-root .aios-usage-tile {
+  cursor: default;
+  padding: 8px 14px;
+}
+.aios-dashboard-root .aios-usage-tile:hover {
+  border-color: var(--aios-border);
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-usage-tile .aios-health-tile-label {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-usage-tile .aios-health-tile-count {
+  color: var(--aios-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aios-dashboard-root .aios-usage-chart-wrap {
+  border: 1px solid var(--aios-border);
+  background: var(--aios-panel);
+  padding: 10px 6px 4px;
+}
+.aios-usage-svg {
+  display: block;
+}
+.aios-usage-gridline {
+  stroke: var(--aios-border);
+  stroke-width: 1;
+}
+.aios-usage-axis-label {
+  fill: var(--aios-dim);
+  font-size: 9px;
+}
+.aios-usage-bar-empty {
+  fill: transparent;
+}
+.aios-usage-bar-fable {
+  fill: var(--aios-usage-fable);
+}
+.aios-usage-bar-opus {
+  fill: var(--aios-usage-opus);
+}
+.aios-usage-bar-sonnet {
+  fill: var(--aios-usage-sonnet);
+}
+.aios-usage-bar-haiku {
+  fill: var(--aios-usage-haiku);
+}
+.aios-usage-bar-other {
+  fill: var(--aios-usage-other);
+}
+
+.aios-dashboard-root .aios-usage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-usage-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.aios-dashboard-root .aios-usage-legend-label {
+  color: var(--aios-text);
+}
+.aios-dashboard-root .aios-usage-legend-cost {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-usage-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.aios-dashboard-root .aios-usage-dot-fable {
+  background: var(--aios-usage-fable);
+}
+.aios-dashboard-root .aios-usage-dot-opus {
+  background: var(--aios-usage-opus);
+}
+.aios-dashboard-root .aios-usage-dot-sonnet {
+  background: var(--aios-usage-sonnet);
+}
+.aios-dashboard-root .aios-usage-dot-haiku {
+  background: var(--aios-usage-haiku);
+}
+.aios-dashboard-root .aios-usage-dot-other {
+  background: var(--aios-usage-other);
+}
+
+.aios-dashboard-root .aios-usage-subhead {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--aios-dim);
+  margin-top: 4px;
+}
+
+.aios-dashboard-root .aios-usage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.aios-dashboard-root .aios-usage-table th,
+.aios-dashboard-root .aios-usage-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-usage-table th {
+  color: var(--aios-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  background: var(--aios-panel);
+}
+.aios-dashboard-root .aios-usage-table td {
+  color: var(--aios-text);
+  font-variant-numeric: tabular-nums;
+}
+.aios-dashboard-root .aios-usage-table tr:last-child td {
+  border-bottom: none;
+}
+.aios-dashboard-root .aios-usage-table-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

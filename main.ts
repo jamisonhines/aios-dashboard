@@ -133,6 +133,7 @@ interface AiosDashboardSettings {
   ideAutoSession: boolean; // auto-open a terminal in the IDE and paste-run the claude command
   ideSessionTarget: "terminal" | "extension"; // where auto-session runs: integrated terminal (claude CLI) or the Claude Code extension panel
   ideNewSessionCommand: string; // command-palette entry used for the extension target
+  usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -156,6 +157,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideAutoSession: false,
   ideSessionTarget: "terminal",
   ideNewSessionCommand: "Claude Code: New Session",
+  usageStatsPath: "Operations/usage/usage-stats.json",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -203,7 +205,7 @@ interface Progress {
 // Per-view UI state that must survive the debounced live re-render (v1 was stateless).
 // Not persisted to disk: resets to defaults when Obsidian restarts.
 interface ViewState {
-  activeTab: "projects" | "tasks";
+  activeTab: "projects" | "tasks" | "usage";
   activeStatus: string | null; // null = first non-empty status group
   activeCategory: string; // "all" | bucket slug | "inbox"
   expanded: Set<string>; // keys of expanded project cards and phase cards
@@ -697,6 +699,249 @@ function computeHealth(input: HealthInput): HealthTile[] {
   }
 
   return tiles;
+}
+
+// ---------------------------------------------------------------------------
+// Usage model (pure: no Obsidian deps; unit-tested in usageModel.test.mjs).
+// renderUsageTab (below, in the Renderers section) is the impure half that
+// reads usage-stats.json off disk and turns it into this plain-data shape.
+// ---------------------------------------------------------------------------
+
+interface UsageFamilyBucket {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  messages: number;
+  costUsd: number;
+}
+
+interface UsageDay {
+  date: string;
+  models: Record<string, UsageFamilyBucket>;
+  totalCostUsd: number;
+  totalOutputTokens: number;
+}
+
+interface UsageProjectStat {
+  name: string;
+  costUsd: number;
+  outputTokens: number;
+  messages: number;
+}
+
+interface UsageStats {
+  generatedAt: string;
+  windowDays: number;
+  days: UsageDay[];
+  projects: UsageProjectStat[];
+  totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
+}
+
+interface UsageChartSegment {
+  family: string;
+  costUsd: number;
+  heightFraction: number;
+}
+
+interface UsageChartDay {
+  date: string;
+  totalCostUsd: number;
+  totalFraction: number;
+  segments: UsageChartSegment[];
+}
+
+interface UsageGridline {
+  fraction: number;
+  value: number;
+  label: string;
+}
+
+interface UsageChart {
+  days: UsageChartDay[];
+  maxCost: number;
+  gridlines: UsageGridline[];
+  xLabelIndices: number[];
+}
+
+interface UsageLegendItem {
+  family: string;
+  label: string;
+  costUsd: number;
+}
+
+interface UsageTableRow {
+  family: string;
+  label: string;
+  messages: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+
+interface UsageProjectRow {
+  name: string;
+  costUsd: number;
+  outputTokens: number;
+}
+
+interface UsageView {
+  hasData: boolean;
+  tiles: {
+    todayCostUsd: number;
+    last7DaysCostUsd: number;
+    last30DaysCostUsd: number;
+    last30DaysOutputTokensCompact: string;
+  };
+  chart: UsageChart;
+  legend: UsageLegendItem[];
+  table: UsageTableRow[];
+  projects: UsageProjectRow[];
+}
+
+// Fixed family order: drives stacking order, legend order, and table order so
+// the three views never disagree with each other.
+const USAGE_FAMILY_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
+const USAGE_FAMILY_LABELS: Record<string, string> = {
+  fable: "Fable",
+  opus: "Opus",
+  sonnet: "Sonnet",
+  haiku: "Haiku",
+  other: "Other",
+};
+
+function usagePad2(n: number): string {
+  return n < 10 ? "0" + n : "" + n;
+}
+
+// Local (not UTC) calendar-day key, matching the exporter's per-day bucketing.
+function usageLocalDayKey(d: Date): string {
+  return d.getFullYear() + "-" + usagePad2(d.getMonth() + 1) + "-" + usagePad2(d.getDate());
+}
+
+function usageEmptyBucket(): UsageFamilyBucket {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 0, costUsd: 0 };
+}
+
+// Compact number formatting for token counts: 1.2k, 3.4M, 4.2M, 1.5B. Plain
+// integers stay plain below 1000. MIRRORED in usageModel.test.mjs.
+function formatCompactNumber(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return sign + (abs / 1e9).toFixed(1) + "B";
+  if (abs >= 1e6) return sign + (abs / 1e6).toFixed(1) + "M";
+  if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + "k";
+  return sign + Math.round(abs).toString();
+}
+
+function formatUsd(n: number): string {
+  return "$" + n.toFixed(2);
+}
+
+// Pure view-model function: turns the exporter's usage-stats.json shape plus
+// "now" into everything the Usage tab renders (tiles, chart, legend, table,
+// projects). `nowDate` is passed in (not read from the clock) so the tile
+// math (today/7d/30d boundaries) and the always-30-entries chart window are
+// unit-testable without mocking time. MIRRORED in usageModel.test.mjs.
+function computeUsageView(stats: UsageStats, nowDate: Date): UsageView {
+  const dayByDate = new Map(stats.days.map((d) => [d.date, d]));
+
+  // A continuous 30-calendar-day window ending today. Days with no transcript
+  // activity are zero-cost placeholders, not omitted, so the chart always has
+  // exactly 30 bars.
+  const windowDays: UsageDay[] = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - i);
+    const key = usageLocalDayKey(d);
+    windowDays.push(dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
+  }
+
+  const todayKey = usageLocalDayKey(nowDate);
+  const todayCostUsd = dayByDate.get(todayKey)?.totalCostUsd || 0;
+  const last7DaysCostUsd = windowDays.slice(-7).reduce((s, d) => s + d.totalCostUsd, 0);
+  const last30DaysCostUsd = windowDays.reduce((s, d) => s + d.totalCostUsd, 0);
+  const last30DaysOutputTokens = windowDays.reduce((s, d) => s + d.totalOutputTokens, 0);
+
+  const maxCost = Math.max(0, ...windowDays.map((d) => d.totalCostUsd));
+  const safeMax = maxCost > 0 ? maxCost : 1;
+
+  const chartDays: UsageChartDay[] = windowDays.map((d) => {
+    const segments: UsageChartSegment[] = [];
+    for (const fam of USAGE_FAMILY_ORDER) {
+      const bucket = d.models[fam];
+      if (!bucket || bucket.costUsd <= 0) continue;
+      segments.push({ family: fam, costUsd: bucket.costUsd, heightFraction: bucket.costUsd / safeMax });
+    }
+    return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
+  });
+
+  const gridlines: UsageGridline[] = [1, 0.5, 0].map((frac) => ({
+    fraction: frac,
+    value: maxCost * frac,
+    label: formatUsd(maxCost * frac),
+  }));
+
+  const xLabelIndices: number[] = [];
+  for (let i = 0; i < windowDays.length; i += 7) xLabelIndices.push(i);
+  if (xLabelIndices[xLabelIndices.length - 1] !== windowDays.length - 1) {
+    xLabelIndices.push(windowDays.length - 1);
+  }
+
+  // 30d per-family totals, feeding both the legend and the breakdown table.
+  const famTotals = new Map<string, UsageFamilyBucket>();
+  for (const d of windowDays) {
+    for (const fam of Object.keys(d.models)) {
+      const b = d.models[fam];
+      const acc = famTotals.get(fam) || usageEmptyBucket();
+      acc.inputTokens += b.inputTokens;
+      acc.outputTokens += b.outputTokens;
+      acc.cacheReadTokens += b.cacheReadTokens;
+      acc.cacheWriteTokens += b.cacheWriteTokens;
+      acc.messages += b.messages;
+      acc.costUsd += b.costUsd;
+      famTotals.set(fam, acc);
+    }
+  }
+
+  const legend: UsageLegendItem[] = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => ({
+    family: f,
+    label: USAGE_FAMILY_LABELS[f],
+    costUsd: famTotals.get(f)!.costUsd,
+  }));
+
+  const table: UsageTableRow[] = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
+    const b = famTotals.get(f)!;
+    return {
+      family: f,
+      label: USAGE_FAMILY_LABELS[f],
+      messages: b.messages,
+      inputTokens: b.inputTokens,
+      outputTokens: b.outputTokens,
+      cacheReadTokens: b.cacheReadTokens,
+      costUsd: b.costUsd,
+    };
+  });
+
+  const projects: UsageProjectRow[] = stats.projects
+    .slice()
+    .sort((a, b) => b.costUsd - a.costUsd)
+    .slice(0, 8)
+    .map((p) => ({ name: p.name, costUsd: p.costUsd, outputTokens: p.outputTokens }));
+
+  return {
+    hasData: stats.days.length > 0,
+    tiles: {
+      todayCostUsd,
+      last7DaysCostUsd,
+      last30DaysCostUsd,
+      last30DaysOutputTokensCompact: formatCompactNumber(last30DaysOutputTokens),
+    },
+    chart: { days: chartDays, maxCost, gridlines, xLabelIndices },
+    legend,
+    table,
+    projects,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1787,6 +2032,240 @@ function renderHealthStrip(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Usage tab: gather (impure, async) + render.
+// ---------------------------------------------------------------------------
+
+// Reads and defensively parses usage-stats.json off the vault adapter. Returns
+// null on any failure (missing file, malformed JSON, unexpected shape) so the
+// caller can fall back to the "no usage data yet" hint instead of throwing.
+async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats | null> {
+  try {
+    const exists = await app.vault.adapter.exists(statsPath);
+    if (!exists) return null;
+    const raw = await app.vault.adapter.read(statsPath);
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.days) || !Array.isArray(parsed.projects)) return null;
+    return parsed as UsageStats;
+  } catch {
+    return null;
+  }
+}
+
+function renderUsageTiles(container: HTMLElement, view: UsageView) {
+  const row = container.createDiv({ cls: "aios-usage-tiles" });
+  const mk = (label: string, value: string) => {
+    const tile = row.createDiv({ cls: "aios-health-tile aios-usage-tile" });
+    tile.createSpan({ cls: "aios-health-tile-label", text: label });
+    tile.createSpan({ cls: "aios-health-tile-count", text: value });
+  };
+  mk("Today", formatUsd(view.tiles.todayCostUsd));
+  mk("Last 7 days", formatUsd(view.tiles.last7DaysCostUsd));
+  mk("Last 30 days", formatUsd(view.tiles.last30DaysCostUsd));
+  mk("Output tokens (30d)", view.tiles.last30DaysOutputTokensCompact);
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl<K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  attrs: Record<string, string>
+): SVGElementTagNameMap[K] {
+  const el = document.createElementNS(SVG_NS, tag) as SVGElementTagNameMap[K];
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+// "YYYY-MM-DD: $X.XX (fable $a, opus $b, ...)" tooltip text for a chart bar.
+function usageDayTooltip(day: UsageChartDay): string {
+  const parts = day.segments.map((s) => `${s.family} $${s.costUsd.toFixed(2)}`).join(", ");
+  return `${day.date}: ${formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
+}
+
+// Inline SVG stacked bar chart: one bar per day (always 30, see computeUsageView),
+// segments stacked by model family. Built with DOM APIs, width 100% via viewBox.
+function renderUsageChart(container: HTMLElement, chart: UsageChart) {
+  const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
+  const width = 600;
+  const height = 160;
+  const marginLeft = 44;
+  const marginBottom = 16;
+  const plotWidth = width - marginLeft - 4;
+  const plotHeight = height - marginBottom - 6;
+  const baselineY = height - marginBottom;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "160" });
+  svg.setAttribute("role", "img");
+  svg.setAttribute(
+    "aria-label",
+    "Daily API-equivalent cost over the last 30 days, stacked by model family"
+  );
+  svg.classList.add("aios-usage-svg");
+
+  // Y gridlines + $ labels.
+  for (const g of chart.gridlines) {
+    const y = baselineY - g.fraction * plotHeight;
+    const line = svgEl("line", {
+      x1: String(marginLeft),
+      x2: String(width - 4),
+      y1: String(y),
+      y2: String(y),
+      class: "aios-usage-gridline",
+    });
+    svg.appendChild(line);
+    const label = svgEl("text", {
+      x: String(marginLeft - 6),
+      y: String(y + 3),
+      class: "aios-usage-axis-label",
+      "text-anchor": "end",
+    });
+    label.textContent = g.label;
+    svg.appendChild(label);
+  }
+
+  // Stacked bars.
+  const n = chart.days.length || 1;
+  const slot = plotWidth / n;
+  const barWidth = Math.max(1, slot * 0.7);
+  chart.days.forEach((day, i) => {
+    const x = marginLeft + i * slot + (slot - barWidth) / 2;
+    const g = svgEl("g", { class: "aios-usage-bar-group" });
+    const title = svgEl("title", {});
+    title.textContent = usageDayTooltip(day);
+    g.appendChild(title);
+
+    let yCursor = baselineY;
+    for (const seg of day.segments) {
+      const segHeight = Math.max(0, seg.heightFraction * plotHeight);
+      const y = yCursor - segHeight;
+      const rect = svgEl("rect", {
+        x: String(x),
+        y: String(y),
+        width: String(barWidth),
+        height: String(segHeight),
+        class: "aios-usage-bar aios-usage-bar-" + seg.family,
+      });
+      g.appendChild(rect);
+      yCursor = y;
+    }
+    if (day.segments.length === 0) {
+      // Invisible full-height hit target so empty days still show a tooltip on hover.
+      const hit = svgEl("rect", {
+        x: String(x),
+        y: String(baselineY - 2),
+        width: String(barWidth),
+        height: "2",
+        class: "aios-usage-bar-empty",
+      });
+      g.appendChild(hit);
+    }
+    svg.appendChild(g);
+  });
+
+  // Sparse X date labels (every 7th day).
+  for (const idx of chart.xLabelIndices) {
+    const day = chart.days[idx];
+    if (!day) continue;
+    const x = marginLeft + idx * slot + slot / 2;
+    const label = svgEl("text", {
+      x: String(x),
+      y: String(height - 2),
+      class: "aios-usage-axis-label",
+      "text-anchor": "middle",
+    });
+    label.textContent = day.date.slice(5); // MM-DD
+    svg.appendChild(label);
+  }
+
+  wrap.appendChild(svg);
+}
+
+function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
+  const row = container.createDiv({ cls: "aios-usage-legend" });
+  for (const item of legend) {
+    const pill = row.createDiv({ cls: "aios-usage-legend-item" });
+    pill.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + item.family });
+    pill.createSpan({ cls: "aios-usage-legend-label", text: item.label });
+    pill.createSpan({ cls: "aios-usage-legend-cost", text: formatUsd(item.costUsd) });
+  }
+}
+
+function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
+  if (table.length === 0) {
+    container.createDiv({ cls: "aios-empty", text: "No model usage in the last 30 days." });
+    return;
+  }
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", { cls: "aios-usage-table" });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of ["Model", "Messages", "Input", "Output", "Cache read", "Est. cost"]) {
+    headRow.createEl("th", { text: h });
+  }
+  const tbody = el.createEl("tbody");
+  for (const row of table) {
+    const tr = tbody.createEl("tr");
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    nameCell.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + row.family });
+    nameCell.createSpan({ text: " " + row.label });
+    tr.createEl("td", { text: String(row.messages) });
+    tr.createEl("td", { text: formatCompactNumber(row.inputTokens) });
+    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
+    tr.createEl("td", { text: formatCompactNumber(row.cacheReadTokens) });
+    tr.createEl("td", { text: formatUsd(row.costUsd) });
+  }
+}
+
+function renderUsageProjectsTable(container: HTMLElement, projects: UsageProjectRow[]) {
+  if (projects.length === 0) return;
+  container.createDiv({ cls: "aios-usage-subhead", text: "Top projects" });
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", { cls: "aios-usage-table" });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of ["Project", "Cost", "Output tokens"]) headRow.createEl("th", { text: h });
+  const tbody = el.createEl("tbody");
+  for (const p of projects) {
+    const tr = tbody.createEl("tr");
+    tr.createEl("td", { text: p.name });
+    tr.createEl("td", { text: formatUsd(p.costUsd) });
+    tr.createEl("td", { text: formatCompactNumber(p.outputTokens) });
+  }
+}
+
+function renderUsageView(container: HTMLElement, view: UsageView) {
+  renderUsageTiles(container, view);
+  renderUsageChart(container, view.chart);
+  renderUsageLegend(container, view.legend);
+  container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
+  renderUsageTable(container, view.table);
+  renderUsageProjectsTable(container, view.projects);
+  container.createDiv({
+    cls: "aios-foot",
+    text: "API-equivalent value at standard rates; subscription billing differs.",
+  });
+}
+
+// Usage tab: async load + render. Renders a hint when the exporter has not
+// run yet (no usage-stats.json at settings.usageStatsPath).
+function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboardSettings) {
+  const wrap = container.createDiv({ cls: "aios-usage-tab" });
+  wrap.createDiv({ cls: "aios-empty", text: "Loading usage data..." });
+  loadUsageStats(app, settings.usageStatsPath).then((stats) => {
+    wrap.empty();
+    if (!stats) {
+      wrap.createDiv({
+        cls: "aios-empty",
+        text:
+          "No usage data yet. The exporter runs at session start, or run: node Operations/scripts/export-usage-stats.mjs",
+      });
+      return;
+    }
+    const view = computeUsageView(stats, new Date());
+    renderUsageView(wrap, view);
+  });
+}
+
 function renderDashboard(
   app: App,
   root: HTMLElement,
@@ -1843,7 +2322,7 @@ function renderDashboard(
 
   // ----- Tab bar -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
-  const mkTab = (id: "projects" | "tasks", label: string) => {
+  const mkTab = (id: "projects" | "tasks" | "usage", label: string) => {
     const t = tabs.createEl("button", {
       cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
       text: label,
@@ -1855,11 +2334,14 @@ function renderDashboard(
   };
   mkTab("projects", "Projects");
   mkTab("tasks", "Tasks");
+  mkTab("usage", "Usage");
 
   // ----- Tab body -----
   const body = root.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
+  } else if (viewState.activeTab === "usage") {
+    renderUsageTab(app, body, settings);
   } else {
     renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm);
   }
@@ -2071,6 +2553,23 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.linkCheckExcludes)
           .onChange(async (v) => {
             this.plugin.settings.linkCheckExcludes = v;
+            await save();
+          })
+      );
+
+    containerEl.createEl("h2", { text: "Usage" });
+
+    new Setting(containerEl)
+      .setName("Usage stats path")
+      .setDesc(
+        "Vault-relative path to the exporter's usage-stats.json (see node Operations/scripts/export-usage-stats.mjs)."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.usageStatsPath)
+          .setValue(this.plugin.settings.usageStatsPath)
+          .onChange(async (v) => {
+            this.plugin.settings.usageStatsPath = v.trim() || DEFAULT_SETTINGS.usageStatsPath;
             await save();
           })
       );
