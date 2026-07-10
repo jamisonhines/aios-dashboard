@@ -1049,6 +1049,7 @@ interface OpsMapNode {
   description?: string;
   path: string;
   external?: boolean;
+  registered?: boolean; // skill listed in Operations/skill-registry.md
 }
 
 interface OpsMapEdge {
@@ -1138,8 +1139,9 @@ function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?:
   const nodes = manifest?.nodes || [];
   const edges = manifest?.edges || [];
 
-  // Skill visibility rule: a skill is shown individually only when it has at
-  // least one edge to/from a NON-skill node (agent, sop, workflow, guideline).
+  // Skill visibility rule: a skill is shown individually when it is flagged
+  // registered (listed in Operations/skill-registry.md) OR has at least one
+  // edge to/from a NON-skill node (agent, sop, workflow, guideline).
   // Skill-pack-internal cross-references (skill->skill only) collapse into the
   // "+N other skills" summary so third-party packs don't swamp the ops map.
   const typeById = new Map<string, OpsMapNodeType>();
@@ -1163,8 +1165,9 @@ function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?:
 
     let collapsedNames: string[] = [];
     if (col.type === "skill") {
-      const collapsed = colNodes.filter((n) => !opsConnected.has(n.id));
-      colNodes = colNodes.filter((n) => opsConnected.has(n.id));
+      const isVisible = (n: OpsMapNode) => n.registered === true || opsConnected.has(n.id);
+      const collapsed = colNodes.filter((n) => !isVisible(n));
+      colNodes = colNodes.filter(isVisible);
       collapsedNames = collapsed.map((n) => n.label).sort((a, b) => a.localeCompare(b));
     }
 

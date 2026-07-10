@@ -48,8 +48,9 @@ function computeOpsMapLayout(manifest, opts) {
 
     let collapsedNames = [];
     if (col.type === "skill") {
-      const collapsed = colNodes.filter((n) => !opsConnected.has(n.id));
-      colNodes = colNodes.filter((n) => opsConnected.has(n.id));
+      const isVisible = (n) => n.registered === true || opsConnected.has(n.id);
+      const collapsed = colNodes.filter((n) => !isVisible(n));
+      colNodes = colNodes.filter(isVisible);
       collapsedNames = collapsed.map((n) => n.label).sort((a, b) => a.localeCompare(b));
     }
 
@@ -228,6 +229,27 @@ function computeOpsMapLayout(manifest, opts) {
     "skill->skill edge to a collapsed skill is dropped"
   );
   assert.equal(layout.edges.length, 3, "capture->brief, capture->scope, brief->scope survive");
+}
+
+// --- visibility rule: registered skill with ZERO edges still renders individually ---
+{
+  const manifest = {
+    nodes: [
+      { id: "vgb-email-router", type: "skill", label: "vgb-email-router", path: "/skills/vgb-email-router", registered: true },
+      { id: "blog-audio", type: "skill", label: "blog-audio", path: "/skills/blog-audio" },
+    ],
+    edges: [],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const skillNodes = layout.nodes.filter((n) => n.column === 4);
+  assert.ok(
+    skillNodes.some((n) => n.id === "vgb-email-router" && n.type === "skill"),
+    "registered-but-unconnected skill stays visible"
+  );
+  const summary = skillNodes.find((n) => n.type === "skill-summary");
+  assert.ok(summary, "unregistered zero-edge skill still collapses");
+  assert.deepEqual(summary.collapsedNames, ["blog-audio"], "only the unregistered skill collapses");
+  assert.equal(layout.columns[4].count, 1, "column count includes only the visible skill");
 }
 
 // --- collapse rule: all skills without ops edges -> all collapse, none individual ---

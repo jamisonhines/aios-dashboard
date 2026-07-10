@@ -34,10 +34,12 @@ function extractAgentRefs(body, agentIds) {
   return found;
 }
 
+// Skill refs require a backtick or forward slash immediately before the name
+// (real refs are always written as `skill-name` or /skill-name).
 function extractSkillRefs(body, skillIds) {
   const found = new Set();
   for (const id of skillIds) {
-    const re = new RegExp(`\\b${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    const re = new RegExp(`[\`/]${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
     if (re.test(body)) found.add(id);
   }
   return found;
@@ -100,19 +102,30 @@ function dedupeEdges(edges) {
   assert.equal(found.size, 0, "word-boundary match does not fire inside a longer word");
 }
 
-// --- skill refs: exact word-boundary match (hyphens count as boundaries,
-// so a shorter skill id can still match inside a longer hyphenated one --
-// accepted per spec: "word boundary", not "whole token") ---
+// --- skill refs: context-scoped matcher (backtick or slash required) ---
 {
-  const skillIds = ["blog-write", "blog"];
-  const found = extractSkillRefs("Use blog-write for full posts.", skillIds);
-  assert.ok(found.has("blog-write"), "exact skill id matches");
-  assert.ok(found.has("blog"), "hyphen-adjacent skill id also matches (word-boundary semantics)");
+  const skillIds = ["blog-write", "scope"];
+  const found = extractSkillRefs("Call `blog-write` to generate the post.", skillIds);
+  assert.ok(found.has("blog-write"), "backticked skill name matches");
+  assert.ok(!found.has("scope"), "unmentioned skill is not found");
+}
+{
+  const skillIds = ["vgb-email-router"];
+  const found = extractSkillRefs("Invoke /vgb-email-router on schedule.", skillIds);
+  assert.ok(found.has("vgb-email-router"), "slash-command form matches");
+}
+{
+  const skillIds = ["scope", "brief"];
+  const found = extractSkillRefs(
+    "The scope of this brief is limited to plain prose mentions.",
+    skillIds
+  );
+  assert.equal(found.size, 0, "plain-prose word mentions do NOT match without backtick/slash context");
 }
 {
   const skillIds = ["blog"];
-  const found = extractSkillRefs("This mentions blogging in passing.", skillIds);
-  assert.equal(found.size, 0, "skill id does not match inside a longer non-hyphenated word");
+  const found = extractSkillRefs("See `blogging` for details.", skillIds);
+  assert.equal(found.size, 0, "backticked longer word does not match a shorter skill id (trailing boundary)");
 }
 
 // --- dedupe: drops self-edges, dedupes from/to pairs, preserves first occurrence ---
