@@ -130,6 +130,7 @@ interface AiosDashboardSettings {
   claudeBinary: string;
   ideAppName: string; // macOS app name for the "app" launch mode (open -a)
   ideOpenVaultFolder: boolean; // pass the vault path to the app (may spawn a new window)
+  ideAutoSession: boolean; // auto-open a terminal in the IDE and paste-run the claude command
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -150,6 +151,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   claudeBinary: "claude",
   ideAppName: "Antigravity",
   ideOpenVaultFolder: false,
+  ideAutoSession: false,
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -856,6 +858,14 @@ function escapeAppleScriptString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+// Like buildInnerShellCommand but without the cd: the IDE's integrated
+// terminal already opens in the workspace folder.
+function buildInnerShellCommandNoCd(claudeBinary: string, prompt: string | null): string {
+  const parts = [shellQuoteSingle(claudeBinary)];
+  if (prompt != null) parts.push(shellQuoteSingle(prompt));
+  return parts.join(" ");
+}
+
 // The shell command run inside the terminal: cd into the vault, then run the
 // claude binary with the prompt as a single trailing argument (omitted when
 // prompt is null, giving a plain interactive session).
@@ -878,7 +888,8 @@ function buildLaunchCommand(
   prompt: string | null,
   customCommand: string,
   ideAppName?: string,
-  openVaultFolder?: boolean
+  openVaultFolder?: boolean,
+  autoSession?: boolean
 ): string[] {
   // "app" activates a macOS app (IDE) via open -a; no CLI on PATH required.
   // By default it does NOT pass the vault path: VS Code forks treat a folder
@@ -886,8 +897,29 @@ function buildLaunchCommand(
   // the window their Claude session already lives in. Activate-only brings the
   // last-used window forward instead. The prompt cannot be injected into an
   // IDE session, so the caller copies it to the clipboard (see launchDispatch).
+  // With autoSession, a System Events script (needs Accessibility permission
+  // for Obsidian) opens a fresh integrated terminal in the IDE and paste-runs
+  // the claude command with the prompt: the true one-click flow.
   if (mode === "app") {
-    const argv = ["open", "-a", ideAppName || "Antigravity"];
+    const appName = ideAppName || "Antigravity";
+    if (autoSession) {
+      const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
+      const script =
+        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
+        `delay 1.5\n` +
+        `tell application "System Events"\n` +
+        `keystroke "\`" using {control down, shift down}\n` +
+        `end tell\n` +
+        `delay 1.2\n` +
+        `set the clipboard to "${escapeAppleScriptString(shellCmd)}"\n` +
+        `tell application "System Events"\n` +
+        `keystroke "v" using {command down}\n` +
+        `delay 0.3\n` +
+        `key code 36\n` +
+        `end tell`;
+      return ["osascript", "-e", script];
+    }
+    const argv = ["open", "-a", appName];
     if (openVaultFolder) argv.push(vaultPath);
     return argv;
   }
@@ -961,10 +993,17 @@ function launchDispatch(
       prompt,
       settings.customCommand,
       settings.ideAppName,
-      settings.ideOpenVaultFolder
+      settings.ideOpenVaultFolder,
+      settings.ideAutoSession
     );
     const cwd = settings.launchMode === "custom" ? vaultAbsolutePath : undefined;
     runLaunchCommand(argv, cwd);
+    if (settings.launchMode === "app" && settings.ideAutoSession) {
+      new Notice(
+        "AIOS: launching a Claude session in the IDE. If nothing types, grant Obsidian Accessibility permission (System Settings > Privacy & Security > Accessibility)."
+      );
+      return;
+    }
     // An IDE can't receive the prompt as an argument; hand it over via clipboard.
     if (settings.launchMode === "app" && prompt != null) {
       navigator.clipboard
@@ -2060,6 +2099,18 @@ class AiosDashboardSettingTab extends PluginSettingTab {
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.ideOpenVaultFolder).onChange(async (v) => {
           this.plugin.settings.ideOpenVaultFolder = v;
+          await save();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("IDE: auto-start Claude session")
+      .setDesc(
+        "Opens a new integrated terminal in the IDE and runs the claude command with the prompt automatically. Requires macOS Accessibility permission for Obsidian (it types keystrokes). Uses the IDE's new-terminal shortcut Ctrl+Shift+`."
+      )
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.ideAutoSession).onChange(async (v) => {
+          this.plugin.settings.ideAutoSession = v;
           await save();
         })
       );

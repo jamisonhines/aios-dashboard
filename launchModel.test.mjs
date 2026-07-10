@@ -16,9 +16,33 @@ function buildInnerShellCommand(claudeBinary, vaultPath, prompt) {
   return parts.join(" ");
 }
 
-function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder) {
+function buildInnerShellCommandNoCd(claudeBinary, prompt) {
+  const parts = [shellQuoteSingle(claudeBinary)];
+  if (prompt != null) parts.push(shellQuoteSingle(prompt));
+  return parts.join(" ");
+}
+
+function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder, autoSession) {
   if (mode === "app") {
-    const argv = ["open", "-a", ideAppName || "Antigravity"];
+    const appName = ideAppName || "Antigravity";
+    if (autoSession) {
+      const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
+      const script =
+        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
+        `delay 1.5\n` +
+        `tell application "System Events"\n` +
+        `keystroke "\`" using {control down, shift down}\n` +
+        `end tell\n` +
+        `delay 1.2\n` +
+        `set the clipboard to "${escapeAppleScriptString(shellCmd)}"\n` +
+        `tell application "System Events"\n` +
+        `keystroke "v" using {command down}\n` +
+        `delay 0.3\n` +
+        `key code 36\n` +
+        `end tell`;
+      return ["osascript", "-e", script];
+    }
+    const argv = ["open", "-a", appName];
     if (openVaultFolder) argv.push(vaultPath);
     return argv;
   }
@@ -151,6 +175,21 @@ function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand
 {
   const argv = buildLaunchCommand("app", "claude", "/v", null, "", "");
   assert.equal(argv[2], "Antigravity", "empty app name falls back to the default");
+}
+
+
+// --- app mode with autoSession: osascript drives the IDE terminal ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/v", "fix the 'intake' pile", "", "Antigravity IDE", false, true);
+  assert.equal(argv[0], "osascript", "autoSession uses osascript");
+  const script = argv[2];
+  assert.ok(script.includes('tell application "Antigravity IDE" to activate'), "activates the right app");
+  const clipLine = script.split("\n").find((l) => l.startsWith("set the clipboard to "));
+  assert.ok(clipLine, "script sets the clipboard");
+  // round-trip: unescape the AppleScript literal and check the shell command
+  const unescaped = clipLine.slice('set the clipboard to "'.length, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  assert.equal(unescaped, buildInnerShellCommandNoCd("claude", "fix the 'intake' pile"), "clipboard carries the exact shell-quoted claude command");
+  assert.ok(script.includes("key code 36"), "presses return");
 }
 
 console.log("launchModel: all assertions passed");
