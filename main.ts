@@ -1,0 +1,1284 @@
+import {
+  App,
+  ItemView,
+  Menu,
+  Modal,
+  Notice,
+  Plugin,
+  Setting,
+  TFile,
+  WorkspaceLeaf,
+  normalizePath,
+} from "obsidian";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const VIEW_TYPE = "aios-dashboard";
+
+// Default standalone-task buckets (used when the Dashboard note declares none).
+const DEFAULT_BUCKETS: { slug: string; label: string }[] = [
+  { slug: "identity", label: "Identity" },
+  { slug: "work", label: "Work" },
+  { slug: "family", label: "Family" },
+  { slug: "health", label: "Health" },
+  { slug: "growth", label: "Growth" },
+  { slug: "money", label: "Money" },
+  { slug: "ai", label: "AI" },
+  { slug: "web-design", label: "Web Design" },
+  { slug: "georgian", label: "Georgian" },
+];
+
+// Resolve buckets from the host note's frontmatter `dashboard_buckets:` (array of
+// {slug,label}); fall back to DEFAULT_BUCKETS. Keeps the plugin config-driven so
+// each fork sets its own buckets without editing code.
+function resolveBuckets(
+  fm: Record<string, unknown> | undefined
+): { slug: string; label: string }[] {
+  const raw = fm?.["dashboard_buckets"];
+  if (Array.isArray(raw) && raw.length > 0) {
+    const parsed = raw
+      .filter(
+        (b): b is { slug: string; label: string } =>
+          !!b &&
+          typeof (b as Record<string, unknown>).slug === "string" &&
+          typeof (b as Record<string, unknown>).label === "string"
+      )
+      .map((b) => ({
+        slug: (b as Record<string, unknown>).slug as string,
+        label: (b as Record<string, unknown>).label as string,
+      }));
+    if (parsed.length > 0) return parsed;
+  }
+  return DEFAULT_BUCKETS;
+}
+
+// Project hub status sections. Rendered top-to-bottom in THIS fixed order; each
+// section is collapsible and empty sections are not rendered at all. `open` is the
+// default expand state (active work expanded, the done/archived graveyard collapsed).
+// A module default that resolveStatusSections() can override from frontmatter, so a
+// fork tunes labels/order/defaults as data, not code (fork-playbook: variation is data).
+interface StatusSection {
+  slug: string;
+  label: string;
+  open: boolean;
+}
+
+const DEFAULT_STATUS_SECTIONS: StatusSection[] = [
+  { slug: "active", label: "Active", open: true },
+  { slug: "planning", label: "Planning", open: true },
+  { slug: "paused", label: "Paused", open: true },
+  { slug: "done", label: "Done", open: false },
+  { slug: "archived", label: "Archived", open: false },
+];
+
+// Resolve status sections from the host note's `dashboard_project_statuses:` (array of
+// {slug,label,open?}); fall back to DEFAULT_STATUS_SECTIONS. `open` defaults true unless
+// explicitly false. Mirrors resolveBuckets so forks configure sectioning without code edits.
+function resolveStatusSections(
+  fm: Record<string, unknown> | undefined
+): StatusSection[] {
+  const raw = fm?.["dashboard_project_statuses"];
+  if (Array.isArray(raw) && raw.length > 0) {
+    const parsed = raw
+      .filter(
+        (b): b is Record<string, unknown> =>
+          !!b &&
+          typeof (b as Record<string, unknown>).slug === "string" &&
+          typeof (b as Record<string, unknown>).label === "string"
+      )
+      .map((b) => ({
+        slug: b.slug as string,
+        label: b.label as string,
+        open: (b as Record<string, unknown>).open !== false,
+      }));
+    if (parsed.length > 0) return parsed;
+  }
+  return DEFAULT_STATUS_SECTIONS;
+}
+
+const OPEN_STATUSES = ["open", "in-progress"];
+// Statuses that count toward a progress denominator (cancelled work is excluded).
+const PROGRESS_STATUSES = ["open", "in-progress", "done"];
+
+const TASKS_ROOT = "Operations/tasks";
+
+// The note whose frontmatter supplies `dashboard_buckets` when the dashboard is
+// opened as a standalone view (ribbon / command) or re-rendered on a vault change,
+// i.e. any path that has no inline `sourcePath`. Each fork standardizes on this
+// note, so the ItemView reads the fork's buckets instead of falling back to the
+// hardcoded personal defaults.
+const DASHBOARD_NOTE = "Projects/Dashboard.md";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface TaskItem {
+  path: string;
+  id: string;
+  title: string;
+  status: string;
+  priority: number | null;
+  project: string | null;
+  phase: string | null;
+  lifeAreas: string[];
+  due: string | null;
+  updated: string | null;
+}
+
+interface ProjectItem {
+  path: string;
+  slug: string;
+  name: string;
+  status: string;
+  venture: string | null;
+  keyElement: string | null;
+  targetDate: string | null;
+  phases: string[]; // declared phase order from the hub frontmatter (may be empty)
+}
+
+interface Progress {
+  done: number;
+  total: number;
+  pct: number; // 0-100, 0 when total is 0
+}
+
+// Per-view UI state that must survive the debounced live re-render (v1 was stateless).
+// Not persisted to disk: resets to defaults when Obsidian restarts.
+interface ViewState {
+  activeTab: "projects" | "tasks";
+  activeStatus: string | null; // null = first non-empty status group
+  activeCategory: string; // "all" | bucket slug | "inbox"
+  expanded: Set<string>; // keys of expanded project cards and phase cards
+  openOff: Set<string>; // project slugs whose Open toggle is OFF (default: Open ON)
+  completeOn: Set<string>; // project slugs whose Complete toggle is ON (default: Complete OFF)
+}
+
+function makeViewState(): ViewState {
+  return {
+    activeTab: "projects",
+    activeStatus: null,
+    activeCategory: "all",
+    expanded: new Set(),
+    openOff: new Set(),
+    completeOn: new Set(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+function pad(n: number): string {
+  return n < 10 ? "0" + n : "" + n;
+}
+
+function nowIso(): string {
+  const d = new Date();
+  return (
+    d.getUTCFullYear() +
+    "-" +
+    pad(d.getUTCMonth() + 1) +
+    "-" +
+    pad(d.getUTCDate()) +
+    "T" +
+    pad(d.getUTCHours()) +
+    ":" +
+    pad(d.getUTCMinutes()) +
+    ":" +
+    pad(d.getUTCSeconds()) +
+    "Z"
+  );
+}
+
+function isoDate(): string {
+  const d = new Date();
+  return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
+}
+
+function yearMonth(): { y: string; m: string } {
+  const d = new Date();
+  return { y: "" + d.getUTCFullYear(), m: pad(d.getUTCMonth() + 1) };
+}
+
+function slugify(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50)
+    .replace(/-+$/g, "");
+}
+
+function asArray(v: any): string[] {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v.filter((x) => x != null).map((x) => ("" + x).trim());
+  return [("" + v).trim()];
+}
+
+function isNull(v: any): boolean {
+  return v == null || v === "null" || v === "";
+}
+
+function computeProgress(tasks: TaskItem[]): Progress {
+  const counted = tasks.filter((t) => PROGRESS_STATUSES.includes(t.status));
+  const done = counted.filter((t) => t.status === "done").length;
+  const total = counted.length;
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  return { done, total, pct };
+}
+
+// ---------------------------------------------------------------------------
+// Readers
+// ---------------------------------------------------------------------------
+
+function inferStatusFromPath(path: string): string {
+  if (path.includes("/done/")) return "done";
+  if (path.includes("/cancelled/")) return "cancelled";
+  if (path.includes("/in-progress/")) return "in-progress";
+  return "open";
+}
+
+function readTasks(app: App): TaskItem[] {
+  const out: TaskItem[] = [];
+  for (const file of app.vault.getMarkdownFiles()) {
+    if (!file.path.startsWith(TASKS_ROOT + "/")) continue;
+    if (!file.basename.startsWith("tsk-")) continue;
+    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const status = fm.status ? ("" + fm.status) : inferStatusFromPath(file.path);
+    const priority =
+      fm.priority != null && fm.priority !== "" ? Number(fm.priority) : null;
+    out.push({
+      path: file.path,
+      id: fm.id ? "" + fm.id : file.basename,
+      title: fm.title ? ("" + fm.title) : file.basename,
+      status,
+      priority: isNaN(priority as number) ? null : priority,
+      project: isNull(fm.project) ? null : ("" + fm.project).trim(),
+      phase: isNull(fm.phase) ? null : ("" + fm.phase).trim(),
+      lifeAreas: asArray(fm.linked_my_life),
+      due: isNull(fm.due) ? null : "" + fm.due,
+      updated: isNull(fm.updated) ? null : "" + fm.updated,
+    });
+  }
+  return out;
+}
+
+function readProjects(app: App): ProjectItem[] {
+  const out: ProjectItem[] = [];
+  for (const file of app.vault.getMarkdownFiles()) {
+    const parts = file.path.split("/");
+    // Projects/<slug>/<slug>.md
+    if (parts.length !== 3) continue;
+    if (parts[0] !== "Projects") continue;
+    if (parts[2] !== parts[1] + ".md") continue;
+    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
+    out.push({
+      path: file.path,
+      slug: parts[1],
+      name: fm.name ? ("" + fm.name) : parts[1],
+      status: fm.status ? ("" + fm.status) : "active",
+      venture: isNull(fm.venture) ? null : "" + fm.venture,
+      keyElement: isNull(fm.key_element) ? null : "" + fm.key_element,
+      targetDate: isNull(fm.target_date) ? null : "" + fm.target_date,
+      phases: asArray(fm.phases),
+    });
+  }
+  return out;
+}
+
+// Resolve the ordered phase list for a project: declared phases first (in order),
+// then any phases found on its tasks that weren't declared, in first-seen order.
+function resolvePhaseOrder(project: ProjectItem, projectTasks: TaskItem[]): string[] {
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const p of project.phases) {
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      order.push(p);
+    }
+  }
+  for (const t of projectTasks) {
+    if (t.phase && !seen.has(t.phase)) {
+      seen.add(t.phase);
+      order.push(t.phase);
+    }
+  }
+  return order;
+}
+
+interface ProjectStatusGroup {
+  slug: string;
+  label: string;
+  open: boolean;
+  projects: ProjectItem[];
+}
+
+// Bucket projects into ordered status groups. Returns ONLY non-empty groups, in the
+// order of `sections`; projects whose status is outside the configured set are collected
+// into a trailing "Other" group so drift is surfaced, never silently dropped. Projects
+// inside a group are sorted by name.
+function groupProjectsByStatus(
+  projects: ProjectItem[],
+  sections: StatusSection[]
+): ProjectStatusGroup[] {
+  const known = new Set(sections.map((s) => s.slug));
+  // Sort by display name, tie-broken by the unique slug so ordering is deterministic
+  // across machines even when two projects share a name (readProjects order is FS-dependent).
+  const byName = (a: ProjectItem, b: ProjectItem) =>
+    a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug);
+  const out: ProjectStatusGroup[] = [];
+  for (const sec of sections) {
+    const inSec = projects.filter((p) => p.status === sec.slug).sort(byName);
+    if (inSec.length > 0) {
+      out.push({ slug: sec.slug, label: sec.label, open: sec.open, projects: inSec });
+    }
+  }
+  const drift = projects.filter((p) => !known.has(p.status)).sort(byName);
+  if (drift.length > 0) {
+    out.push({ slug: "other", label: "Other", open: true, projects: drift });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// View-model helpers (pure: no Obsidian deps; unit-tested in viewModel.test.mjs)
+// ---------------------------------------------------------------------------
+
+interface Chip {
+  slug: string;
+  label: string;
+  count: number;
+}
+
+// Projects-tab status chips: one per non-empty status group, label + count, order preserved
+// (Other stays last). Derived from groupProjectsByStatus output so the two never disagree.
+function statusChipsFromGroups(groups: ProjectStatusGroup[]): Chip[] {
+  return groups.map((g) => ({ slug: g.slug, label: g.label, count: g.projects.length }));
+}
+
+interface SplitTasks {
+  doing: TaskItem[];
+  open: TaskItem[];
+  done: TaskItem[];
+}
+
+// Partition a project's tasks (caller passes non-cancelled tasks) into in-progress / open /
+// done buckets. Unknown statuses are ignored. Caller sorts each bucket for display.
+function splitProjectTasks(tasks: TaskItem[]): SplitTasks {
+  return {
+    doing: tasks.filter((t) => t.status === "in-progress"),
+    open: tasks.filter((t) => t.status === "open"),
+    done: tasks.filter((t) => t.status === "done"),
+  };
+}
+
+// Tasks-tab category chips: one per bucket with >=1 standalone task, plus an `inbox` entry
+// when any standalone task has no recognized life-area. The renderer prepends an "All" chip.
+function categoryChipsFromTasks(
+  standaloneTasks: TaskItem[],
+  buckets: { slug: string; label: string }[]
+): Chip[] {
+  const out: Chip[] = [];
+  for (const b of buckets) {
+    const count = standaloneTasks.filter((t) => t.lifeAreas.includes(b.slug)).length;
+    if (count > 0) out.push({ slug: b.slug, label: b.label, count });
+  }
+  const known = buckets.map((b) => b.slug);
+  const inboxCount = standaloneTasks.filter(
+    (t) => !t.lifeAreas.some((a) => known.includes(a))
+  ).length;
+  if (inboxCount > 0) out.push({ slug: "inbox", label: "Inbox", count: inboxCount });
+  return out;
+}
+
+// The single category pill shown on a standalone task row: the first recognized life-area
+// (in bucket order), else Inbox.
+function tagForTask(
+  task: TaskItem,
+  buckets: { slug: string; label: string }[]
+): { slug: string; label: string } {
+  for (const b of buckets) {
+    if (task.lifeAreas.includes(b.slug)) return { slug: b.slug, label: b.label };
+  }
+  return { slug: "inbox", label: "Inbox" };
+}
+
+// Filter the flat standalone list by the selected category chip. `all` = passthrough,
+// `inbox` = tasks with no recognized life-area, otherwise tasks tagged with that slug.
+function filterStandaloneByCategory(
+  standaloneTasks: TaskItem[],
+  categorySlug: string,
+  buckets: { slug: string; label: string }[]
+): TaskItem[] {
+  if (categorySlug === "all") return standaloneTasks;
+  if (categorySlug === "inbox") {
+    const known = buckets.map((b) => b.slug);
+    return standaloneTasks.filter((t) => !t.lifeAreas.some((a) => known.includes(a)));
+  }
+  return standaloneTasks.filter((t) => t.lifeAreas.includes(categorySlug));
+}
+
+// ---------------------------------------------------------------------------
+// Writers (the interactive half)
+// ---------------------------------------------------------------------------
+
+async function ensureFolder(app: App, path: string): Promise<void> {
+  const parts = normalizePath(path).split("/");
+  let cur = "";
+  for (const p of parts) {
+    cur = cur ? cur + "/" + p : p;
+    const exists = await app.vault.adapter.exists(cur);
+    if (!exists) {
+      try {
+        await app.vault.createFolder(cur);
+      } catch (e) {
+        /* race: another create won; ignore */
+      }
+    }
+  }
+}
+
+function folderForStatus(status: string): string {
+  if (status === "done") {
+    const { y, m } = yearMonth();
+    return `${TASKS_ROOT}/done/${y}/${m}`;
+  }
+  if (status === "cancelled") {
+    const { y, m } = yearMonth();
+    return `${TASKS_ROOT}/cancelled/${y}/${m}`;
+  }
+  if (status === "in-progress") return `${TASKS_ROOT}/in-progress`;
+  return `${TASKS_ROOT}/open`;
+}
+
+// Set a task's status, stamp `updated`, and move the file to the folder that
+// mirrors the new status (per the AIOS task lifecycle, SOP-close-task).
+async function setTaskStatus(app: App, path: string, newStatus: string): Promise<void> {
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!(file instanceof TFile)) {
+    new Notice("AIOS: task file not found: " + path);
+    return;
+  }
+  await app.fileManager.processFrontMatter(file, (fm: any) => {
+    fm.status = newStatus;
+    fm.updated = nowIso();
+    if (newStatus === "done" || newStatus === "cancelled") {
+      if ("blocked_reason" in fm) fm.blocked_reason = null;
+      if ("blocked_by" in fm) fm.blocked_by = null;
+    }
+  });
+  const destFolder = folderForStatus(newStatus);
+  await ensureFolder(app, destFolder);
+  const newPath = `${destFolder}/${file.name}`;
+  if (file.path !== newPath) {
+    try {
+      await app.fileManager.renameFile(file, newPath);
+    } catch (e) {
+      new Notice("AIOS: could not move task file. " + (e?.message || e));
+    }
+  }
+}
+
+async function nextTaskId(app: App, day: string): Promise<string> {
+  let max = 0;
+  const prefix = "tsk-" + day + "-";
+  for (const file of app.vault.getMarkdownFiles()) {
+    if (!file.basename.startsWith(prefix)) continue;
+    const rest = file.basename.slice(prefix.length);
+    const num = parseInt(rest.slice(0, 3), 10);
+    if (!isNaN(num) && num > max) max = num;
+  }
+  return prefix + pad3(max + 1);
+}
+
+function pad3(n: number): string {
+  let s = "" + n;
+  while (s.length < 3) s = "0" + s;
+  return s;
+}
+
+// Phase names and titles routinely contain ": " (e.g. "Phase 0: Storefront"),
+// which is illegal in an unquoted YAML scalar and silently breaks the
+// metadata cache. Always emit a double-quoted, escaped scalar.
+function yamlQuote(value: string): string {
+  return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+async function createQuickTask(
+  app: App,
+  opts: { title: string; project: string | null; phase: string | null; keyElement: string | null }
+): Promise<void> {
+  const title = opts.title.trim();
+  if (!title) return;
+  const day = isoDate();
+  const id = await nextTaskId(app, day);
+  const slug = slugify(title) || "task";
+  const folder = `${TASKS_ROOT}/open`;
+  await ensureFolder(app, folder);
+  const path = `${folder}/${id}-${slug}.md`;
+  const now = nowIso();
+  const phaseLine =
+    opts.project != null && opts.phase ? `phase: ${yamlQuote(opts.phase)}\n` : "";
+  const lifeLine =
+    opts.project == null && opts.keyElement
+      ? `linked_my_life: [${yamlQuote(opts.keyElement)}]\n`
+      : "";
+  const projectVal = opts.project == null ? "null" : opts.project;
+  const content =
+    `---\n` +
+    `id: ${id}\n` +
+    `title: ${yamlQuote(title)}\n` +
+    `status: open\n` +
+    `project: ${projectVal}\n` +
+    phaseLine +
+    lifeLine +
+    `created: ${now}\n` +
+    `updated: ${now}\n` +
+    `tags: [quick]\n` +
+    `---\n\n` +
+    `# ${title}\n\n` +
+    `## What this is\n` +
+    `Quick task created from the AIOS Dashboard. Enrich later if it grows (see [[SOP-create-task]]).\n\n` +
+    `## Updates\n` +
+    `- ${day} (dashboard) - created\n`;
+  try {
+    await app.vault.create(path, content);
+    new Notice("AIOS: added task " + id);
+  } catch (e) {
+    new Notice("AIOS: could not create task. " + (e?.message || e));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quick-add modal
+// ---------------------------------------------------------------------------
+
+class AddTaskModal extends Modal {
+  private title = "";
+  private category: string | null = null; // null = Inbox / none
+  private contextLabel: string;
+  private buckets: { slug: string; label: string }[];
+  private onSubmit: (title: string, category: string | null) => void;
+
+  constructor(
+    app: App,
+    contextLabel: string,
+    buckets: { slug: string; label: string }[],
+    onSubmit: (title: string, category: string | null) => void
+  ) {
+    super(app);
+    this.contextLabel = contextLabel;
+    this.buckets = buckets;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("aios-modal");
+    contentEl.createEl("h3", { text: "New task" });
+    contentEl.createEl("div", {
+      cls: "aios-modal-context",
+      text: this.contextLabel,
+    });
+
+    const setting = new Setting(contentEl).setName("Title").addText((t) => {
+      t.setPlaceholder("What needs doing?");
+      t.onChange((v) => (this.title = v));
+      t.inputEl.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          this.submit();
+        }
+      });
+      window.setTimeout(() => t.inputEl.focus(), 0);
+    });
+    setting.settingEl.addClass("aios-modal-setting");
+
+    // Category picker only when buckets are offered (standalone add). Project/phase adds
+    // pass an empty buckets array and skip it.
+    if (this.buckets.length > 0) {
+      new Setting(contentEl).setName("Category").addDropdown((d) => {
+        d.addOption("", "Inbox / none");
+        for (const b of this.buckets) d.addOption(b.slug, b.label);
+        d.setValue("");
+        d.onChange((v) => (this.category = v === "" ? null : v));
+      });
+    }
+
+    new Setting(contentEl).addButton((b) =>
+      b
+        .setButtonText("Add task")
+        .setCta()
+        .onClick(() => this.submit())
+    );
+  }
+
+  private submit() {
+    const t = this.title.trim();
+    if (!t) {
+      new Notice("AIOS: a task needs a title.");
+      return;
+    }
+    this.onSubmit(t, this.category);
+    this.close();
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared renderer (used by both the ItemView and the inline code block)
+// ---------------------------------------------------------------------------
+
+function priorityMeta(p: number | null): { label: string; cls: string } {
+  switch (p) {
+    case 1:
+      return { label: "P1", cls: "aios-p1" };
+    case 2:
+      return { label: "P2", cls: "aios-p2" };
+    case 3:
+      return { label: "P3", cls: "aios-p3" };
+    case 4:
+      return { label: "P4", cls: "aios-p4" };
+    default:
+      return { label: "", cls: "" };
+  }
+}
+
+function sortTasks(a: TaskItem, b: TaskItem): number {
+  const pa = a.priority ?? 5;
+  const pb = b.priority ?? 5;
+  if (pa !== pb) return pa - pb;
+  const da = a.due || "9999";
+  const db = b.due || "9999";
+  if (da !== db) return da < db ? -1 : 1;
+  return a.title.localeCompare(b.title);
+}
+
+// Tasks to show inside a phase given the two per-project toggles. Open shows when showOpen,
+// done shows when showComplete; in-progress lives in the DOING NOW strip and cancelled is
+// never shown. Sorted by the shared sortTasks order so open and done interleave in sequence.
+// MIRRORED in viewModel.test.mjs; keep the two in sync.
+function visiblePhaseTasks(
+  phaseTasks: TaskItem[],
+  showOpen: boolean,
+  showComplete: boolean
+): TaskItem[] {
+  return phaseTasks
+    .filter(
+      (t) => (t.status === "open" && showOpen) || (t.status === "done" && showComplete)
+    )
+    .sort(sortTasks);
+}
+
+// A progress bar: a multi-color gradient (red -> amber -> green) revealed up to pct,
+// plus a "done/total · pct%" label. Calculated, honest (0 when empty). The fill width
+// is driven by the --aios-pct CSS var; the empty portion is masked in CSS.
+function renderProgressBar(container: HTMLElement, p: Progress, extraCls?: string) {
+  const wrap = container.createDiv({ cls: "aios-bar-wrap" + (extraCls ? " " + extraCls : "") });
+  const track = wrap.createDiv({ cls: "aios-bar" });
+  track.style.setProperty("--aios-pct", p.pct + "%");
+  if (p.pct === 100 && p.total > 0) track.addClass("aios-bar-complete");
+  wrap.createSpan({
+    cls: "aios-bar-label",
+    text: p.total === 0 ? "no tasks yet" : `${p.done}/${p.total} · ${p.pct}%`,
+  });
+}
+
+// Visual meta for a task's current status: the control pill label + class.
+function statusCtlMeta(status: string): { label: string; cls: string } {
+  switch (status) {
+    case "in-progress":
+      return { label: "In progress", cls: "aios-ctl-inprogress" };
+    case "done":
+      return { label: "Done", cls: "aios-ctl-done" };
+    case "cancelled":
+      return { label: "Cancelled", cls: "aios-ctl-cancelled" };
+    default:
+      return { label: "Open", cls: "aios-ctl-open" };
+  }
+}
+
+// The per-task status control: a pill button that opens a menu of valid transitions.
+// Replaces the v1 checkbox + Start button. Every transition calls setTaskStatus, shows a
+// toast, and (for Done) offers Undo back to the prior status. Deliberate menu selection
+// means no single mis-tap can complete or lose a task.
+function renderStatusDropdown(
+  app: App,
+  row: HTMLElement,
+  task: TaskItem,
+  refresh: () => void
+) {
+  const meta = statusCtlMeta(task.status);
+  const btn = row.createEl("button", { cls: "aios-status-ctl " + meta.cls });
+  btn.createSpan({ cls: "aios-ctl-label", text: meta.label });
+  btn.createSpan({ cls: "aios-ctl-caret", text: "▾" });
+  btn.setAttr("aria-label", "Change task status");
+
+  const apply = async (newStatus: string, verb: string, undoTo: string | null) => {
+    await setTaskStatus(app, task.path, newStatus);
+    const n = new Notice("", 6000);
+    n.noticeEl.createSpan({ text: `${verb}: ${task.title}` });
+    if (undoTo) {
+      const undo = n.noticeEl.createEl("a", { cls: "aios-undo", text: "  Undo" });
+      undo.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        await setTaskStatus(app, task.path, undoTo);
+        n.hide();
+        refresh();
+      });
+    }
+    refresh();
+  };
+
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const menu = new Menu();
+    if (task.status === "open") {
+      menu.addItem((i) =>
+        i.setTitle("Start (in progress)").setIcon("play").onClick(() => apply("in-progress", "Started", null))
+      );
+      menu.addItem((i) =>
+        i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed", "open"))
+      );
+      menu.addItem((i) =>
+        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled", "open"))
+      );
+    } else if (task.status === "in-progress") {
+      menu.addItem((i) =>
+        i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed", "in-progress"))
+      );
+      menu.addItem((i) =>
+        i.setTitle("Back to open").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened", null))
+      );
+      menu.addItem((i) =>
+        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled", "in-progress"))
+      );
+    } else {
+      // done or any other terminal state: allow reopening.
+      menu.addItem((i) =>
+        i.setTitle("Reopen").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened", null))
+      );
+    }
+    menu.showAtMouseEvent(ev as MouseEvent);
+  });
+}
+
+function renderTaskRow(
+  app: App,
+  container: HTMLElement,
+  task: TaskItem,
+  refresh: () => void,
+  tag?: { slug: string; label: string } | null
+) {
+  const row = container.createDiv({ cls: "aios-task" });
+  if (task.status === "in-progress") row.addClass("aios-task-inprogress");
+  if (task.status === "done") row.addClass("aios-task-done");
+
+  const main = row.createDiv({ cls: "aios-task-main" });
+  const titleEl = main.createDiv({ cls: "aios-task-title", text: task.title });
+  titleEl.addEventListener("click", () => {
+    app.workspace.openLinkText(task.path, "", false);
+  });
+
+  const meta = main.createDiv({ cls: "aios-task-meta" });
+  if (tag) meta.createSpan({ cls: "aios-pill aios-tag", text: tag.label });
+  const pm = priorityMeta(task.priority);
+  if (pm.label) meta.createSpan({ cls: "aios-pill " + pm.cls, text: pm.label });
+  if (task.due) {
+    const overdue = task.due < isoDate();
+    meta.createSpan({
+      cls: "aios-pill aios-due" + (overdue ? " aios-overdue" : ""),
+      text: "due " + task.due,
+    });
+  }
+
+  renderStatusDropdown(app, row, task, refresh);
+}
+
+function addButton(
+  container: HTMLElement,
+  app: App,
+  contextLabel: string,
+  project: string | null,
+  phase: string | null,
+  keyElement: string | null,
+  refresh: () => void
+) {
+  const btn = container.createEl("button", { cls: "aios-add", text: "+ Add task" });
+  btn.addEventListener("click", () => {
+    // Project/phase adds do not offer a category picker (buckets = []).
+    new AddTaskModal(app, contextLabel, [], async (title, _category) => {
+      await createQuickTask(app, { title, project, phase, keyElement });
+      refresh();
+    }).open();
+  });
+}
+
+// Two per-project view toggles in the card header. Open shows open tasks, Complete shows
+// done tasks (both off = neither; both on = interleaved). State is in-memory in ViewState.
+// stopPropagation so clicking a toggle does not also collapse the card head.
+function renderProjectToggles(
+  container: HTMLElement,
+  proj: ProjectItem,
+  viewState: ViewState,
+  refresh: () => void
+) {
+  const row = container.createDiv({ cls: "aios-toggles" });
+  const mk = (label: string, on: boolean, flip: () => void) => {
+    const b = row.createEl("button", {
+      cls: "aios-toggle" + (on ? " aios-toggle-on" : ""),
+      text: label,
+    });
+    b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      flip();
+      refresh();
+    });
+  };
+  mk("Open", !viewState.openOff.has(proj.slug), () => {
+    if (viewState.openOff.has(proj.slug)) viewState.openOff.delete(proj.slug);
+    else viewState.openOff.add(proj.slug);
+  });
+  mk("Complete", viewState.completeOn.has(proj.slug), () => {
+    if (viewState.completeOn.has(proj.slug)) viewState.completeOn.delete(proj.slug);
+    else viewState.completeOn.add(proj.slug);
+  });
+}
+
+function renderProjectCard(
+  app: App,
+  section: HTMLElement,
+  proj: ProjectItem,
+  allTasks: TaskItem[],
+  viewState: ViewState,
+  refresh: () => void
+) {
+  // All non-cancelled tasks for this project (drives progress + display).
+  const projTasks = allTasks.filter(
+    (t) => t.project === proj.slug && t.status !== "cancelled"
+  );
+
+  const card = section.createDiv({ cls: "aios-card aios-proj-card" });
+  const expandKey = "proj:" + proj.slug;
+  if (viewState.expanded.has(expandKey)) card.addClass("aios-expanded");
+
+  // Collapsed head: chevron + name (+ open-note) on the left, overall bar on the right.
+  const head = card.createDiv({ cls: "aios-card-head aios-proj-head" });
+  const left = head.createDiv({ cls: "aios-head-left" });
+  left.createSpan({ cls: "aios-chevron", text: "▸" });
+  const nameBlock = left.createDiv({ cls: "aios-name-block" });
+  const nameRow = nameBlock.createDiv({ cls: "aios-name-row" });
+  nameRow.createSpan({ cls: "aios-card-title", text: proj.name });
+  const open = nameRow.createSpan({ cls: "aios-open-note", text: "↗" });
+  open.setAttr("aria-label", "Open project note");
+  open.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    app.workspace.openLinkText(proj.path, "", false);
+  });
+  const tag = proj.venture || proj.keyElement;
+  nameBlock.createDiv({ cls: "aios-card-sub" }).setText(
+    [proj.status, tag].filter(Boolean).join(" · ")
+  );
+
+  const right = head.createDiv({ cls: "aios-head-right" });
+  renderProgressBar(right, computeProgress(projTasks), "aios-bar-project");
+  renderProjectToggles(right, proj, viewState, refresh);
+
+  head.addEventListener("click", () => {
+    const nowExpanded = card.classList.toggle("aios-expanded");
+    if (nowExpanded) viewState.expanded.add(expandKey);
+    else viewState.expanded.delete(expandKey);
+  });
+
+  // Collapsible body.
+  const body = card.createDiv({ cls: "aios-card-body" });
+  const split = splitProjectTasks(projTasks);
+
+  // Doing now strip: in-progress tasks pinned at the top with an accent.
+  if (split.doing.length > 0) {
+    const strip = body.createDiv({ cls: "aios-doing" });
+    strip.createDiv({ cls: "aios-doing-label", text: "DOING NOW" });
+    const list = strip.createDiv({ cls: "aios-list" });
+    for (const t of split.doing.slice().sort(sortTasks)) renderTaskRow(app, list, t, refresh);
+  }
+
+  // Per-project view toggles: Open shows open tasks, Complete shows done tasks. In-progress
+  // lives in the DOING NOW strip above; cancelled is never shown.
+  const showOpen = !viewState.openOff.has(proj.slug);
+  const showComplete = viewState.completeOn.has(proj.slug);
+
+  // A phase rendered as a collapsible card. Head (name + project-style bar + chevron) is
+  // always visible; body (the toggle-filtered task list + add button) shows only when the
+  // phase card is expanded. Default collapsed: expanded only when its key is in viewState.
+  const renderPhaseCard = (
+    phaseName: string | null,
+    phaseTasks: TaskItem[],
+    addCtxLabel: string
+  ) => {
+    const pcard = body.createDiv({ cls: "aios-card aios-phase-card" });
+    const pkey = "phase:" + proj.slug + ":" + (phaseName ?? "__none__");
+    if (viewState.expanded.has(pkey)) pcard.addClass("aios-expanded");
+
+    const phead = pcard.createDiv({ cls: "aios-card-head aios-phase-head" });
+    const pleft = phead.createDiv({ cls: "aios-head-left" });
+    pleft.createSpan({ cls: "aios-chevron", text: "▸" });
+    pleft.createSpan({ cls: "aios-phase-name", text: phaseName ?? "No phase" });
+    const pright = phead.createDiv({ cls: "aios-head-right" });
+    renderProgressBar(pright, computeProgress(phaseTasks), "aios-bar-project");
+    phead.addEventListener("click", () => {
+      const nowOpen = pcard.classList.toggle("aios-expanded");
+      if (nowOpen) viewState.expanded.add(pkey);
+      else viewState.expanded.delete(pkey);
+    });
+
+    const pbody = pcard.createDiv({ cls: "aios-card-body" });
+    const list = pbody.createDiv({ cls: "aios-list" });
+    const visible = visiblePhaseTasks(phaseTasks, showOpen, showComplete);
+    if (visible.length === 0) {
+      list.createDiv({ cls: "aios-empty", text: "No tasks match the current view." });
+    } else {
+      for (const t of visible) renderTaskRow(app, list, t, refresh);
+    }
+    addButton(pbody, app, addCtxLabel, proj.slug, phaseName, null, refresh);
+  };
+
+  const phaseOrder = resolvePhaseOrder(proj, projTasks);
+  const hasPhases = phaseOrder.length > 0 && projTasks.some((t) => t.phase);
+
+  if (hasPhases) {
+    for (const phase of phaseOrder) {
+      const phaseTasks = projTasks.filter((t) => t.phase === phase);
+      if (phaseTasks.length === 0) continue;
+      renderPhaseCard(phase, phaseTasks, `${proj.name} - ${phase}`);
+    }
+    const unphased = projTasks.filter((t) => !t.phase);
+    if (unphased.length > 0) renderPhaseCard(null, unphased, `${proj.name} - unphased`);
+  } else {
+    renderPhaseCard(null, projTasks, `Project: ${proj.name}`);
+  }
+}
+
+// A single-select chip row. One engine for both the status chips (Projects tab) and the
+// category chips (Tasks tab): variation is data, not code.
+function renderChips(
+  container: HTMLElement,
+  chips: Chip[],
+  activeSlug: string,
+  onPick: (slug: string) => void
+) {
+  const row = container.createDiv({ cls: "aios-chips" });
+  for (const c of chips) {
+    const chip = row.createEl("button", {
+      cls: "aios-chip" + (c.slug === activeSlug ? " aios-chip-active" : ""),
+    });
+    chip.createSpan({ cls: "aios-chip-label", text: c.label });
+    chip.createSpan({ cls: "aios-chip-count", text: String(c.count) });
+    chip.addEventListener("click", () => onPick(c.slug));
+  }
+}
+
+// Projects tab: status filter chips + the cards for the selected status. Empty statuses
+// produce no chip. Selection persists in viewState across live re-renders.
+function renderProjectsTab(
+  app: App,
+  container: HTMLElement,
+  projects: ProjectItem[],
+  tasks: TaskItem[],
+  viewState: ViewState,
+  refresh: () => void,
+  hostFm: Record<string, unknown> | undefined
+) {
+  const statusSections = resolveStatusSections(hostFm);
+  const groups = groupProjectsByStatus(projects, statusSections);
+
+  if (groups.length === 0) {
+    container.createDiv({ cls: "aios-empty", text: "No projects yet." });
+    return;
+  }
+
+  const chips = statusChipsFromGroups(groups);
+  // Keep the selection if it still has projects, else fall back to the first group.
+  let active = viewState.activeStatus;
+  if (!active || !groups.some((g) => g.slug === active)) {
+    active = groups[0].slug;
+    viewState.activeStatus = active;
+  }
+  renderChips(container, chips, active, (slug) => {
+    viewState.activeStatus = slug;
+    refresh();
+  });
+
+  const group = groups.find((g) => g.slug === active);
+  if (!group) return;
+  for (const proj of group.projects) {
+    renderProjectCard(app, container, proj, tasks, viewState, refresh);
+  }
+}
+
+// Tasks tab: one flat list of standalone tasks, each tagged with its category pill, with
+// category filter chips and a single Add button (category chosen in the modal). A Completed
+// dropdown holds recently-done standalone tasks.
+function renderTasksTab(
+  app: App,
+  container: HTMLElement,
+  tasks: TaskItem[],
+  buckets: { slug: string; label: string }[],
+  viewState: ViewState,
+  refresh: () => void
+) {
+  const standaloneOpen = tasks.filter(
+    (t) => t.project == null && OPEN_STATUSES.includes(t.status)
+  );
+
+  const catChips = categoryChipsFromTasks(standaloneOpen, buckets);
+  const allChips: Chip[] = [
+    { slug: "all", label: "All", count: standaloneOpen.length },
+    ...catChips,
+  ];
+
+  // Keep the selection if it still has tasks, else fall back to "all".
+  let active = viewState.activeCategory || "all";
+  if (active !== "all" && !catChips.some((c) => c.slug === active)) {
+    active = "all";
+    viewState.activeCategory = "all";
+  }
+
+  // Bar: chips on the left, the single Add button on the right.
+  const bar = container.createDiv({ cls: "aios-tasks-bar" });
+  renderChips(bar, allChips, active, (slug) => {
+    viewState.activeCategory = slug;
+    refresh();
+  });
+  const addWrap = bar.createDiv({ cls: "aios-tasks-add" });
+  const addBtn = addWrap.createEl("button", { cls: "aios-add", text: "+ Add task" });
+  addBtn.addEventListener("click", () => {
+    new AddTaskModal(app, "New standalone task", buckets, async (title, categorySlug) => {
+      await createQuickTask(app, { title, project: null, phase: null, keyElement: categorySlug });
+      refresh();
+    }).open();
+  });
+
+  // Flat tagged list.
+  const filtered = filterStandaloneByCategory(standaloneOpen, active, buckets).slice().sort(sortTasks);
+  const list = container.createDiv({ cls: "aios-list aios-tasks-list" });
+  if (filtered.length === 0) {
+    list.createDiv({ cls: "aios-empty", text: "Nothing here." });
+  } else {
+    for (const t of filtered) renderTaskRow(app, list, t, refresh, tagForTask(t, buckets));
+  }
+
+  // Completed (standalone, last 7 days).
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const done = tasks
+    .filter(
+      (t) =>
+        t.project == null &&
+        t.status === "done" &&
+        t.updated &&
+        Date.parse(t.updated) >= cutoff
+    )
+    .sort((a, b) => (b.updated || "").localeCompare(a.updated || ""));
+  if (done.length > 0) {
+    const dKey = "done:standalone";
+    const det = container.createEl("details", { cls: "aios-completed" });
+    if (viewState.expanded.has(dKey)) det.setAttr("open", "");
+    const sum = det.createEl("summary", { cls: "aios-completed-summary" });
+    sum.createSpan({ cls: "aios-done-check", text: "✓" });
+    sum.createSpan({ text: ` Completed (${done.length})` });
+    det.addEventListener("toggle", () => {
+      if (det.open) viewState.expanded.add(dKey);
+      else viewState.expanded.delete(dKey);
+    });
+    const dlist = det.createDiv({ cls: "aios-list" });
+    for (const t of done) renderTaskRow(app, dlist, t, refresh, tagForTask(t, buckets));
+  }
+}
+
+function renderDashboard(
+  app: App,
+  root: HTMLElement,
+  refresh: () => void,
+  viewState: ViewState,
+  sourcePath?: string
+) {
+  root.empty();
+  root.addClass("aios-dashboard-root");
+
+  // Resolve config from the host note's frontmatter (config-driven per fork). No sourcePath
+  // (standalone view or refresh re-render) falls back to the canonical DASHBOARD_NOTE.
+  const hostFile = app.vault.getAbstractFileByPath(sourcePath ?? DASHBOARD_NOTE);
+  const hostFm =
+    hostFile instanceof TFile
+      ? (app.metadataCache.getFileCache(hostFile)?.frontmatter as
+          | Record<string, unknown>
+          | undefined)
+      : undefined;
+  const buckets = resolveBuckets(hostFm);
+
+  const tasks = readTasks(app);
+  const projects = readProjects(app);
+  const openTasks = tasks.filter((t) => OPEN_STATUSES.includes(t.status));
+
+  // ----- Header -----
+  const header = root.createDiv({ cls: "aios-header" });
+  header.createEl("h1", { text: "AIOS" });
+  const stat = header.createDiv({ cls: "aios-stat" });
+  const activeCount = projects.filter((p) => p.status === "active").length;
+  stat.setText(`${openTasks.length} open · ${activeCount} active`);
+  const refreshBtn = header.createEl("button", { cls: "aios-refresh", text: "Refresh" });
+  refreshBtn.addEventListener("click", () => refresh());
+
+  // ----- Tab bar -----
+  const tabs = root.createDiv({ cls: "aios-tabs" });
+  const mkTab = (id: "projects" | "tasks", label: string) => {
+    const t = tabs.createEl("button", {
+      cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
+      text: label,
+    });
+    t.addEventListener("click", () => {
+      viewState.activeTab = id;
+      refresh();
+    });
+  };
+  mkTab("projects", "Projects");
+  mkTab("tasks", "Tasks");
+
+  // ----- Tab body -----
+  const body = root.createDiv({ cls: "aios-tab-body" });
+  if (viewState.activeTab === "tasks") {
+    renderTasksTab(app, body, tasks, buckets, viewState, refresh);
+  } else {
+    renderProjectsTab(app, body, projects, tasks, viewState, refresh, hostFm);
+  }
+
+  root.createDiv({ cls: "aios-foot" }).setText(
+    "Live view, computed from Operations/tasks and Projects. Progress bars are calculated from task completion - nothing is hand-entered."
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The dashboard view
+// ---------------------------------------------------------------------------
+
+class DashboardView extends ItemView {
+  private viewState: ViewState = makeViewState();
+
+  constructor(leaf: WorkspaceLeaf) {
+    super(leaf);
+  }
+
+  getViewType(): string {
+    return VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return "AIOS Dashboard";
+  }
+
+  getIcon(): string {
+    return "layout-dashboard";
+  }
+
+  async onOpen() {
+    this.render();
+  }
+
+  render() {
+    const container = this.containerEl.children[1] as HTMLElement;
+    renderDashboard(this.app, container, () => this.render(), this.viewState);
+  }
+
+  async onClose() {
+    /* nothing to clean up */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
+
+export default class AiosDashboardPlugin extends Plugin {
+  private inlineHosts: Set<HTMLElement> = new Set();
+  private inlineState: WeakMap<HTMLElement, ViewState> = new WeakMap();
+  private refreshTimer: number | null = null;
+
+  private stateFor(host: HTMLElement): ViewState {
+    let s = this.inlineState.get(host);
+    if (!s) {
+      s = makeViewState();
+      this.inlineState.set(host, s);
+    }
+    return s;
+  }
+
+  async onload() {
+    this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf));
+
+    this.addRibbonIcon("layout-dashboard", "Open AIOS Dashboard", () => {
+      this.activateView();
+    });
+
+    this.addCommand({
+      id: "open-aios-dashboard",
+      name: "Open AIOS Dashboard",
+      callback: () => this.activateView(),
+    });
+
+    // Inline rendering inside Projects/Dashboard.md
+    this.registerMarkdownCodeBlockProcessor("aios-dashboard", (_src, el, ctx) => {
+      const host = el.createDiv();
+      this.inlineHosts.add(host);
+      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host), ctx.sourcePath);
+      this.register(() => this.inlineHosts.delete(host));
+    });
+
+    // Live refresh: re-render when the vault or metadata changes.
+    const onChange = () => this.scheduleRefresh();
+    this.registerEvent(this.app.vault.on("create", onChange));
+    this.registerEvent(this.app.vault.on("delete", onChange));
+    this.registerEvent(this.app.vault.on("rename", onChange));
+    this.registerEvent(this.app.vault.on("modify", onChange));
+    this.registerEvent(this.app.metadataCache.on("changed", onChange));
+    this.registerEvent(this.app.metadataCache.on("resolved", onChange));
+  }
+
+  onunload() {
+    if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
+    this.inlineHosts.clear();
+  }
+
+  private scheduleRefresh() {
+    if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => this.refreshAll(), 200);
+  }
+
+  private refreshAll() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof DashboardView) view.render();
+    }
+    for (const host of Array.from(this.inlineHosts)) {
+      if (!host.isConnected) {
+        this.inlineHosts.delete(host);
+        continue;
+      }
+      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host));
+    }
+  }
+
+  async activateView() {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getLeaf(true);
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+}

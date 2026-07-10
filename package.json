@@ -1,0 +1,25 @@
+{
+  "name": "aios-dashboard",
+  "version": "2.0.1",
+  "description": "AIOS project + task dashboard plugin for Obsidian",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "test": "node resolveBuckets.test.mjs && node groupProjects.test.mjs && node viewModel.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "aios",
+    "dashboard",
+    "tasks"
+  ],
+  "author": "Jamison Hines",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "0.20.2",
+    "obsidian": "latest",
+    "typescript": "5.4.5"
+  }
+}
