@@ -1138,11 +1138,19 @@ function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?:
   const nodes = manifest?.nodes || [];
   const edges = manifest?.edges || [];
 
-  // Which node ids are touched by at least one edge (either side).
-  const referenced = new Set<string>();
+  // Skill visibility rule: a skill is shown individually only when it has at
+  // least one edge to/from a NON-skill node (agent, sop, workflow, guideline).
+  // Skill-pack-internal cross-references (skill->skill only) collapse into the
+  // "+N other skills" summary so third-party packs don't swamp the ops map.
+  const typeById = new Map<string, OpsMapNodeType>();
+  for (const n of nodes) typeById.set(n.id, n.type);
+  const opsConnected = new Set<string>();
   for (const e of edges) {
-    referenced.add(e.from);
-    referenced.add(e.to);
+    const fromType = typeById.get(e.from);
+    const toType = typeById.get(e.to);
+    if (fromType === undefined || toType === undefined) continue;
+    if (fromType === "skill" && toType !== "skill") opsConnected.add(e.from);
+    if (toType === "skill" && fromType !== "skill") opsConnected.add(e.to);
   }
 
   const columns: OpsMapColumnHeader[] = [];
@@ -1155,9 +1163,9 @@ function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?:
 
     let collapsedNames: string[] = [];
     if (col.type === "skill") {
-      const unreferenced = colNodes.filter((n) => !referenced.has(n.id));
-      colNodes = colNodes.filter((n) => referenced.has(n.id));
-      collapsedNames = unreferenced.map((n) => n.label).sort((a, b) => a.localeCompare(b));
+      const collapsed = colNodes.filter((n) => !opsConnected.has(n.id));
+      colNodes = colNodes.filter((n) => opsConnected.has(n.id));
+      collapsedNames = collapsed.map((n) => n.label).sort((a, b) => a.localeCompare(b));
     }
 
     // Deterministic ordering: sort nodes by id within column.
@@ -1187,7 +1195,7 @@ function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?:
       const summary: OpsMapPositionedNode = {
         id: OPS_MAP_SKILL_SUMMARY_ID,
         type: "skill-summary",
-        label: `+${collapsedNames.length} unreferenced skills`,
+        label: `+${collapsedNames.length} other skills`,
         column: columnIndex,
         x: colX,
         y: o.paddingY + rowIndex * o.rowHeight,

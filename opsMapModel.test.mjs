@@ -27,10 +27,15 @@ function computeOpsMapLayout(manifest, opts) {
   const nodes = manifest?.nodes || [];
   const edges = manifest?.edges || [];
 
-  const referenced = new Set();
+  const typeById = new Map();
+  for (const n of nodes) typeById.set(n.id, n.type);
+  const opsConnected = new Set();
   for (const e of edges) {
-    referenced.add(e.from);
-    referenced.add(e.to);
+    const fromType = typeById.get(e.from);
+    const toType = typeById.get(e.to);
+    if (fromType === undefined || toType === undefined) continue;
+    if (fromType === "skill" && toType !== "skill") opsConnected.add(e.from);
+    if (toType === "skill" && fromType !== "skill") opsConnected.add(e.to);
   }
 
   const columns = [];
@@ -43,9 +48,9 @@ function computeOpsMapLayout(manifest, opts) {
 
     let collapsedNames = [];
     if (col.type === "skill") {
-      const unreferenced = colNodes.filter((n) => !referenced.has(n.id));
-      colNodes = colNodes.filter((n) => referenced.has(n.id));
-      collapsedNames = unreferenced.map((n) => n.label).sort((a, b) => a.localeCompare(b));
+      const collapsed = colNodes.filter((n) => !opsConnected.has(n.id));
+      colNodes = colNodes.filter((n) => opsConnected.has(n.id));
+      collapsedNames = collapsed.map((n) => n.label).sort((a, b) => a.localeCompare(b));
     }
 
     colNodes = [...colNodes].sort((a, b) => a.id.localeCompare(b.id));
@@ -74,7 +79,7 @@ function computeOpsMapLayout(manifest, opts) {
       const summary = {
         id: OPS_MAP_SKILL_SUMMARY_ID,
         type: "skill-summary",
-        label: `+${collapsedNames.length} unreferenced skills`,
+        label: `+${collapsedNames.length} other skills`,
         column: columnIndex,
         x: colX,
         y: o.paddingY + rowIndex * o.rowHeight,
@@ -149,7 +154,7 @@ function computeOpsMapLayout(manifest, opts) {
   assert.equal(layout.edges[0].to, "WS-001-daily-journaling");
 }
 
-// --- collapse rule: zero-edge skills collapse into one summary node ---
+// --- visibility rule: only ops-connected skills stay individual ---
 {
   const manifest = {
     nodes: [
@@ -161,16 +166,71 @@ function computeOpsMapLayout(manifest, opts) {
   };
   const layout = computeOpsMapLayout(manifest);
   const skillNodes = layout.nodes.filter((n) => n.column === 4);
-  // blog-write has an edge -> stays individual. blog-outline has none -> collapses.
-  assert.ok(skillNodes.some((n) => n.id === "blog-write"), "referenced skill stays as its own node");
+  // blog-write has an agent edge -> stays individual. blog-outline has none -> collapses.
+  assert.ok(skillNodes.some((n) => n.id === "blog-write"), "ops-connected skill stays as its own node");
   const summary = skillNodes.find((n) => n.type === "skill-summary");
-  assert.ok(summary, "unreferenced skill collapses into a summary node");
-  assert.equal(summary.label, "+1 unreferenced skills", "summary label counts the collapsed skills");
+  assert.ok(summary, "non-ops-connected skill collapses into a summary node");
+  assert.equal(summary.label, "+1 other skills", "summary label counts the collapsed skills");
   assert.deepEqual(summary.collapsedNames, ["blog-outline"], "summary lists the collapsed skill names");
   assert.equal(layout.columns[4].count, 1, "column count reflects only the individually-shown skill");
 }
 
-// --- collapse rule: all skills unreferenced -> all collapse, none individual ---
+// --- visibility rule: skill->skill edges alone do NOT make a skill visible ---
+{
+  const manifest = {
+    nodes: [
+      { id: "blog-write", type: "skill", label: "blog-write", path: "/skills/blog-write" },
+      { id: "blog-outline", type: "skill", label: "blog-outline", path: "/skills/blog-outline" },
+      { id: "blog-brief", type: "skill", label: "blog-brief", path: "/skills/blog-brief" },
+    ],
+    edges: [
+      { from: "blog-write", to: "blog-outline", viaType: "skill" },
+      { from: "blog-outline", to: "blog-brief", viaType: "skill" },
+    ],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const skillNodes = layout.nodes.filter((n) => n.column === 4);
+  assert.equal(skillNodes.length, 1, "skill-pack-only skills all collapse: only the summary node is shown");
+  assert.equal(skillNodes[0].type, "skill-summary");
+  assert.deepEqual(
+    skillNodes[0].collapsedNames,
+    ["blog-brief", "blog-outline", "blog-write"],
+    "collapsed names sorted alphabetically"
+  );
+  assert.equal(layout.edges.length, 0, "skill->skill edges among collapsed skills are dropped");
+}
+
+// --- edge rule: skill->skill edge drawn only when BOTH endpoints are visible ---
+{
+  const manifest = {
+    nodes: [
+      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "brief", type: "skill", label: "brief", path: "/skills/brief" },
+      { id: "scope", type: "skill", label: "scope", path: "/skills/scope" },
+      { id: "humanizer", type: "skill", label: "humanizer", path: "/skills/humanizer" },
+    ],
+    edges: [
+      { from: "capture", to: "brief", viaType: "skill" }, // brief visible
+      { from: "capture", to: "scope", viaType: "skill" }, // scope visible
+      { from: "brief", to: "scope", viaType: "skill" }, // both visible -> kept
+      { from: "brief", to: "humanizer", viaType: "skill" }, // humanizer collapses -> dropped
+    ],
+  };
+  const layout = computeOpsMapLayout(manifest);
+  const skillIds = layout.nodes.filter((n) => n.column === 4 && n.type === "skill").map((n) => n.id);
+  assert.deepEqual(skillIds, ["brief", "scope"], "only ops-connected skills shown individually");
+  assert.ok(
+    layout.edges.some((e) => e.from === "brief" && e.to === "scope"),
+    "skill->skill edge between two visible skills is kept"
+  );
+  assert.ok(
+    !layout.edges.some((e) => e.to === "humanizer" || e.from === "humanizer"),
+    "skill->skill edge to a collapsed skill is dropped"
+  );
+  assert.equal(layout.edges.length, 3, "capture->brief, capture->scope, brief->scope survive");
+}
+
+// --- collapse rule: all skills without ops edges -> all collapse, none individual ---
 {
   const manifest = {
     nodes: [
