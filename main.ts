@@ -129,6 +129,7 @@ interface AiosDashboardSettings {
   customCommand: string; // shell template, {vault} and {prompt} placeholders
   claudeBinary: string;
   ideAppName: string; // macOS app name for the "app" launch mode (open -a)
+  ideOpenVaultFolder: boolean; // pass the vault path to the app (may spawn a new window)
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -148,6 +149,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   customCommand: "",
   claudeBinary: "claude",
   ideAppName: "Antigravity",
+  ideOpenVaultFolder: false,
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -875,13 +877,19 @@ function buildLaunchCommand(
   vaultPath: string,
   prompt: string | null,
   customCommand: string,
-  ideAppName?: string
+  ideAppName?: string,
+  openVaultFolder?: boolean
 ): string[] {
-  // "app" opens the vault folder in a macOS app (IDE) via open -a; no CLI on
-  // PATH required. The prompt cannot be injected into an IDE session, so the
-  // caller copies it to the clipboard instead (see launchDispatch).
+  // "app" activates a macOS app (IDE) via open -a; no CLI on PATH required.
+  // By default it does NOT pass the vault path: VS Code forks treat a folder
+  // argument as "open a new workspace window", which yanks the user away from
+  // the window their Claude session already lives in. Activate-only brings the
+  // last-used window forward instead. The prompt cannot be injected into an
+  // IDE session, so the caller copies it to the clipboard (see launchDispatch).
   if (mode === "app") {
-    return ["open", "-a", ideAppName || "Antigravity", vaultPath];
+    const argv = ["open", "-a", ideAppName || "Antigravity"];
+    if (openVaultFolder) argv.push(vaultPath);
+    return argv;
   }
   if (mode === "custom") {
     const vaultArg = shellQuoteSingle(vaultPath);
@@ -952,7 +960,8 @@ function launchDispatch(
       vaultAbsolutePath,
       prompt,
       settings.customCommand,
-      settings.ideAppName
+      settings.ideAppName,
+      settings.ideOpenVaultFolder
     );
     const cwd = settings.launchMode === "custom" ? vaultAbsolutePath : undefined;
     runLaunchCommand(argv, cwd);
@@ -2041,6 +2050,18 @@ class AiosDashboardSettingTab extends PluginSettingTab {
             this.plugin.settings.ideAppName = v.trim() || DEFAULT_SETTINGS.ideAppName;
             await save();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("IDE: open vault folder")
+      .setDesc(
+        "Off (default): just bring the IDE's current window forward, where your Claude session already is. On: pass the vault path, which may open a new workspace window."
+      )
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.ideOpenVaultFolder).onChange(async (v) => {
+          this.plugin.settings.ideOpenVaultFolder = v;
+          await save();
+        })
       );
 
     new Setting(containerEl)

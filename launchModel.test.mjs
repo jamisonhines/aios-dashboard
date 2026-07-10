@@ -16,9 +16,11 @@ function buildInnerShellCommand(claudeBinary, vaultPath, prompt) {
   return parts.join(" ");
 }
 
-function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName) {
+function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder) {
   if (mode === "app") {
-    return ["open", "-a", ideAppName || "Antigravity", vaultPath];
+    const argv = ["open", "-a", ideAppName || "Antigravity"];
+    if (openVaultFolder) argv.push(vaultPath);
+    return argv;
   }
   if (mode === "custom") {
     const vaultArg = shellQuoteSingle(vaultPath);
@@ -136,7 +138,13 @@ function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand
 // --- app mode: open -a with the app name and raw vault path (no shell quoting needed, argv form) ---
 {
   const argv = buildLaunchCommand("app", "claude", "/Users/x/My Vault", "some prompt", "", "Antigravity");
-  assert.deepEqual(argv, ["open", "-a", "Antigravity", "/Users/x/My Vault"], "app mode opens the vault in the named app");
+  assert.deepEqual(argv, ["open", "-a", "Antigravity"], "app mode default: activate only, no folder argument");
+}
+
+// --- app mode with openVaultFolder: passes the vault path (may spawn a new window) ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/Users/x/My Vault", null, "", "Antigravity", true);
+  assert.deepEqual(argv, ["open", "-a", "Antigravity", "/Users/x/My Vault"], "openVaultFolder adds the path");
 }
 
 // --- app mode: falls back to Antigravity when no app name given ---

@@ -1,6 +1,6 @@
 {
   "name": "aios-dashboard",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "AIOS project + task dashboard plugin for Obsidian",
   "main": "main.js",
   "scripts": {
