@@ -5,8 +5,10 @@ import {
   Modal,
   Notice,
   Plugin,
+  PluginSettingTab,
   Setting,
   TFile,
+  TFolder,
   WorkspaceLeaf,
   normalizePath,
 } from "obsidian";
@@ -102,14 +104,48 @@ const OPEN_STATUSES = ["open", "in-progress"];
 // Statuses that count toward a progress denominator (cancelled work is excluded).
 const PROGRESS_STATUSES = ["open", "in-progress", "done"];
 
-const TASKS_ROOT = "Operations/tasks";
+// ---------------------------------------------------------------------------
+// Settings (PluginSettingTab + loadData/saveData). Every fork sets its own
+// roots and note paths here instead of editing code; frontmatter overrides on
+// the Dashboard note (dashboard_buckets, dashboard_project_statuses) still take
+// precedence over these where both exist.
+// ---------------------------------------------------------------------------
 
-// The note whose frontmatter supplies `dashboard_buckets` when the dashboard is
-// opened as a standalone view (ribbon / command) or re-rendered on a vault change,
-// i.e. any path that has no inline `sourcePath`. Each fork standardizes on this
-// note, so the ItemView reads the fork's buckets instead of falling back to the
-// hardcoded personal defaults.
-const DASHBOARD_NOTE = "Projects/Dashboard.md";
+interface AiosDashboardSettings {
+  tasksRoot: string;
+  projectsRoot: string;
+  dashboardNote: string;
+  headerTitle: string;
+  intakeFolder: string;
+  journalFolder: string;
+  showHealthStrip: boolean;
+  intakeWarnDays: number;
+  inProgressStaleDays: number;
+  openStaleDays: number;
+  linkCheckExcludes: string; // comma-separated list
+}
+
+const DEFAULT_SETTINGS: AiosDashboardSettings = {
+  tasksRoot: "Operations/tasks",
+  projectsRoot: "Projects",
+  dashboardNote: "Projects/Dashboard.md",
+  headerTitle: "AIOS",
+  intakeFolder: "Intake",
+  journalFolder: "Wiki/Journal",
+  showHealthStrip: true,
+  intakeWarnDays: 7,
+  inProgressStaleDays: 7,
+  openStaleDays: 45,
+  linkCheckExcludes: "Wiki/daily, Wiki/finances, Wiki/ea, Operations/Templates, _archive",
+};
+
+// Parse the comma list into trimmed, non-empty path prefixes.
+function parseExcludeList(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -241,10 +277,10 @@ function inferStatusFromPath(path: string): string {
   return "open";
 }
 
-function readTasks(app: App): TaskItem[] {
+function readTasks(app: App, tasksRoot: string): TaskItem[] {
   const out: TaskItem[] = [];
   for (const file of app.vault.getMarkdownFiles()) {
-    if (!file.path.startsWith(TASKS_ROOT + "/")) continue;
+    if (!file.path.startsWith(tasksRoot + "/")) continue;
     if (!file.basename.startsWith("tsk-")) continue;
     const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
     const status = fm.status ? ("" + fm.status) : inferStatusFromPath(file.path);
@@ -266,19 +302,21 @@ function readTasks(app: App): TaskItem[] {
   return out;
 }
 
-function readProjects(app: App): ProjectItem[] {
+function readProjects(app: App, projectsRoot: string): ProjectItem[] {
   const out: ProjectItem[] = [];
+  const rootParts = projectsRoot.split("/").filter(Boolean);
   for (const file of app.vault.getMarkdownFiles()) {
     const parts = file.path.split("/");
-    // Projects/<slug>/<slug>.md
-    if (parts.length !== 3) continue;
-    if (parts[0] !== "Projects") continue;
-    if (parts[2] !== parts[1] + ".md") continue;
+    // <projectsRoot>/<slug>/<slug>.md
+    if (parts.length !== rootParts.length + 2) continue;
+    if (!rootParts.every((p, i) => parts[i] === p)) continue;
+    const slug = parts[rootParts.length];
+    if (parts[rootParts.length + 1] !== slug + ".md") continue;
     const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
     out.push({
       path: file.path,
-      slug: parts[1],
-      name: fm.name ? ("" + fm.name) : parts[1],
+      slug,
+      name: fm.name ? ("" + fm.name) : slug,
       status: fm.status ? ("" + fm.status) : "active",
       venture: isNull(fm.venture) ? null : "" + fm.venture,
       keyElement: isNull(fm.key_element) ? null : "" + fm.key_element,
@@ -422,6 +460,198 @@ function filterStandaloneByCategory(
 }
 
 // ---------------------------------------------------------------------------
+// Health model (pure: no Obsidian deps; unit-tested in healthModel.test.mjs).
+// gatherHealthInput (below, in the Renderers section) is the impure half that
+// turns live vault/metadataCache state into this plain-data shape.
+// ---------------------------------------------------------------------------
+
+interface HealthItem {
+  path: string;
+  label: string;
+  detail: string;
+}
+
+interface HealthTile {
+  key: string;
+  label: string;
+  count: number;
+  summary: string;
+  warn: boolean;
+  items: HealthItem[];
+}
+
+interface HealthTaskInput {
+  path: string;
+  title: string;
+  status: string; // effective status (frontmatter or folder-inferred)
+  declaredStatus: string | null; // raw frontmatter status, null when absent
+  project: string | null;
+  ageDays: number; // days since `updated` (fallback: file mtime)
+}
+
+interface HealthInput {
+  intakeFiles: { path: string; name: string; ageDays: number }[];
+  journalFiles: { path: string; name: string; ingested: boolean }[];
+  tasks: HealthTaskInput[];
+  projectSlugs: string[];
+  unresolvedLinks: { source: string; target: string; count: number }[];
+  linkCheckExcludes: string[];
+  thresholds: {
+    intakeWarnDays: number;
+    inProgressStaleDays: number;
+    openStaleDays: number;
+  };
+}
+
+// Same rule main.ts uses to derive a task's status from its folder location.
+// Mirrored here (not reused) so the health model stays a standalone pure unit,
+// matching the pattern of the other MIRRORED functions in the test suite.
+function healthInferStatusFromPath(path: string): string {
+  if (path.includes("/done/")) return "done";
+  if (path.includes("/cancelled/")) return "cancelled";
+  if (path.includes("/in-progress/")) return "in-progress";
+  return "open";
+}
+
+function excludedBySource(source: string, excludes: string[]): boolean {
+  return excludes.some((ex) => source === ex || source.startsWith(ex + "/"));
+}
+
+// Compute the health tiles from plain, pre-gathered data. Tiles whose count is
+// zero are omitted entirely (calm when healthy). No Obsidian API calls here.
+function computeHealth(input: HealthInput): HealthTile[] {
+  const tiles: HealthTile[] = [];
+
+  // 1. Intake backlog: exclude README.md and dotfiles.
+  const intake = input.intakeFiles.filter(
+    (f) => f.name !== "README.md" && !f.name.startsWith(".")
+  );
+  if (intake.length > 0) {
+    const sorted = intake.slice().sort((a, b) => b.ageDays - a.ageDays);
+    const oldest = sorted[0].ageDays;
+    tiles.push({
+      key: "intake",
+      label: "Intake backlog",
+      count: intake.length,
+      summary: `${intake.length} · oldest ${oldest}d`,
+      warn: oldest > input.thresholds.intakeWarnDays,
+      items: sorted.map((f) => ({ path: f.path, label: f.name, detail: `${f.ageDays}d old` })),
+    });
+  }
+
+  // 2. Stale in-progress tasks.
+  const staleInProgress = input.tasks.filter(
+    (t) => t.status === "in-progress" && t.ageDays > input.thresholds.inProgressStaleDays
+  );
+  if (staleInProgress.length > 0) {
+    tiles.push({
+      key: "stale-in-progress",
+      label: "Stale in-progress",
+      count: staleInProgress.length,
+      summary: `${staleInProgress.length}`,
+      warn: true,
+      items: staleInProgress
+        .slice()
+        .sort((a, b) => b.ageDays - a.ageDays)
+        .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+    });
+  }
+
+  // 3. Stale open tasks.
+  const staleOpen = input.tasks.filter(
+    (t) => t.status === "open" && t.ageDays > input.thresholds.openStaleDays
+  );
+  if (staleOpen.length > 0) {
+    tiles.push({
+      key: "stale-open",
+      label: "Stale open",
+      count: staleOpen.length,
+      summary: `${staleOpen.length}`,
+      warn: true,
+      items: staleOpen
+        .slice()
+        .sort((a, b) => b.ageDays - a.ageDays)
+        .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
+    });
+  }
+
+  // 4. Un-mined journal entries (excludes INDEX.md).
+  const unmined = input.journalFiles.filter((f) => f.name !== "INDEX.md" && !f.ingested);
+  if (unmined.length > 0) {
+    tiles.push({
+      key: "journal-unmined",
+      label: "journal not mined",
+      count: unmined.length,
+      summary: `${unmined.length}`,
+      warn: false,
+      items: unmined.map((f) => ({ path: f.path, label: f.name, detail: "not ingested" })),
+    });
+  }
+
+  // 5. Orphan tasks: project set but not a known project slug.
+  const knownSlugs = new Set(input.projectSlugs);
+  const orphans = input.tasks.filter((t) => t.project != null && !knownSlugs.has(t.project));
+  if (orphans.length > 0) {
+    tiles.push({
+      key: "orphan-tasks",
+      label: "Orphan tasks",
+      count: orphans.length,
+      summary: `${orphans.length}`,
+      warn: true,
+      items: orphans.map((t) => ({
+        path: t.path,
+        label: t.title,
+        detail: `project: ${t.project}`,
+      })),
+    });
+  }
+
+  // 6. Status/folder mismatch: declared frontmatter status disagrees with folder.
+  const mismatches = input.tasks.filter(
+    (t) => t.declaredStatus != null && t.declaredStatus !== healthInferStatusFromPath(t.path)
+  );
+  if (mismatches.length > 0) {
+    tiles.push({
+      key: "status-mismatch",
+      label: "Status/folder mismatch",
+      count: mismatches.length,
+      summary: `${mismatches.length}`,
+      warn: true,
+      items: mismatches.map((t) => ({
+        path: t.path,
+        label: t.title,
+        detail: `status: ${t.declaredStatus}, folder: ${healthInferStatusFromPath(t.path)}`,
+      })),
+    });
+  }
+
+  // 7. Broken links: unresolved wikilinks, excluding sources under linkCheckExcludes.
+  const links = input.unresolvedLinks.filter((l) => !excludedBySource(l.source, input.linkCheckExcludes));
+  const brokenTotal = links.reduce((sum, l) => sum + l.count, 0);
+  if (brokenTotal > 0) {
+    const bySource = new Map<string, number>();
+    for (const l of links) bySource.set(l.source, (bySource.get(l.source) || 0) + l.count);
+    const items = Array.from(bySource.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([source, count]) => ({
+        path: source,
+        label: source,
+        detail: `${count} broken link${count === 1 ? "" : "s"}`,
+      }));
+    tiles.push({
+      key: "broken-links",
+      label: "Broken links",
+      count: brokenTotal,
+      summary: `${brokenTotal}`,
+      warn: true,
+      items,
+    });
+  }
+
+  return tiles;
+}
+
+// ---------------------------------------------------------------------------
 // Writers (the interactive half)
 // ---------------------------------------------------------------------------
 
@@ -441,22 +671,27 @@ async function ensureFolder(app: App, path: string): Promise<void> {
   }
 }
 
-function folderForStatus(status: string): string {
+function folderForStatus(tasksRoot: string, status: string): string {
   if (status === "done") {
     const { y, m } = yearMonth();
-    return `${TASKS_ROOT}/done/${y}/${m}`;
+    return `${tasksRoot}/done/${y}/${m}`;
   }
   if (status === "cancelled") {
     const { y, m } = yearMonth();
-    return `${TASKS_ROOT}/cancelled/${y}/${m}`;
+    return `${tasksRoot}/cancelled/${y}/${m}`;
   }
-  if (status === "in-progress") return `${TASKS_ROOT}/in-progress`;
-  return `${TASKS_ROOT}/open`;
+  if (status === "in-progress") return `${tasksRoot}/in-progress`;
+  return `${tasksRoot}/open`;
 }
 
 // Set a task's status, stamp `updated`, and move the file to the folder that
 // mirrors the new status (per the AIOS task lifecycle, SOP-close-task).
-async function setTaskStatus(app: App, path: string, newStatus: string): Promise<void> {
+async function setTaskStatus(
+  app: App,
+  tasksRoot: string,
+  path: string,
+  newStatus: string
+): Promise<void> {
   const file = app.vault.getAbstractFileByPath(path);
   if (!(file instanceof TFile)) {
     new Notice("AIOS: task file not found: " + path);
@@ -470,7 +705,7 @@ async function setTaskStatus(app: App, path: string, newStatus: string): Promise
       if ("blocked_by" in fm) fm.blocked_by = null;
     }
   });
-  const destFolder = folderForStatus(newStatus);
+  const destFolder = folderForStatus(tasksRoot, newStatus);
   await ensureFolder(app, destFolder);
   const newPath = `${destFolder}/${file.name}`;
   if (file.path !== newPath) {
@@ -509,6 +744,7 @@ function yamlQuote(value: string): string {
 
 async function createQuickTask(
   app: App,
+  tasksRoot: string,
   opts: { title: string; project: string | null; phase: string | null; keyElement: string | null }
 ): Promise<void> {
   const title = opts.title.trim();
@@ -516,7 +752,7 @@ async function createQuickTask(
   const day = isoDate();
   const id = await nextTaskId(app, day);
   const slug = slugify(title) || "task";
-  const folder = `${TASKS_ROOT}/open`;
+  const folder = `${tasksRoot}/open`;
   await ensureFolder(app, folder);
   const path = `${folder}/${id}-${slug}.md`;
   const now = nowIso();
@@ -710,6 +946,7 @@ function statusCtlMeta(status: string): { label: string; cls: string } {
 // means no single mis-tap can complete or lose a task.
 function renderStatusDropdown(
   app: App,
+  tasksRoot: string,
   row: HTMLElement,
   task: TaskItem,
   refresh: () => void
@@ -721,14 +958,14 @@ function renderStatusDropdown(
   btn.setAttr("aria-label", "Change task status");
 
   const apply = async (newStatus: string, verb: string, undoTo: string | null) => {
-    await setTaskStatus(app, task.path, newStatus);
+    await setTaskStatus(app, tasksRoot, task.path, newStatus);
     const n = new Notice("", 6000);
     n.noticeEl.createSpan({ text: `${verb}: ${task.title}` });
     if (undoTo) {
       const undo = n.noticeEl.createEl("a", { cls: "aios-undo", text: "  Undo" });
       undo.addEventListener("click", async (ev) => {
         ev.preventDefault();
-        await setTaskStatus(app, task.path, undoTo);
+        await setTaskStatus(app, tasksRoot, task.path, undoTo);
         n.hide();
         refresh();
       });
@@ -771,6 +1008,7 @@ function renderStatusDropdown(
 
 function renderTaskRow(
   app: App,
+  tasksRoot: string,
   container: HTMLElement,
   task: TaskItem,
   refresh: () => void,
@@ -798,12 +1036,13 @@ function renderTaskRow(
     });
   }
 
-  renderStatusDropdown(app, row, task, refresh);
+  renderStatusDropdown(app, tasksRoot, row, task, refresh);
 }
 
 function addButton(
   container: HTMLElement,
   app: App,
+  tasksRoot: string,
   contextLabel: string,
   project: string | null,
   phase: string | null,
@@ -814,7 +1053,7 @@ function addButton(
   btn.addEventListener("click", () => {
     // Project/phase adds do not offer a category picker (buckets = []).
     new AddTaskModal(app, contextLabel, [], async (title, _category) => {
-      await createQuickTask(app, { title, project, phase, keyElement });
+      await createQuickTask(app, tasksRoot, { title, project, phase, keyElement });
       refresh();
     }).open();
   });
@@ -853,6 +1092,7 @@ function renderProjectToggles(
 
 function renderProjectCard(
   app: App,
+  tasksRoot: string,
   section: HTMLElement,
   proj: ProjectItem,
   allTasks: TaskItem[],
@@ -905,7 +1145,7 @@ function renderProjectCard(
     const strip = body.createDiv({ cls: "aios-doing" });
     strip.createDiv({ cls: "aios-doing-label", text: "DOING NOW" });
     const list = strip.createDiv({ cls: "aios-list" });
-    for (const t of split.doing.slice().sort(sortTasks)) renderTaskRow(app, list, t, refresh);
+    for (const t of split.doing.slice().sort(sortTasks)) renderTaskRow(app, tasksRoot, list, t, refresh);
   }
 
   // Per-project view toggles: Open shows open tasks, Complete shows done tasks. In-progress
@@ -943,9 +1183,9 @@ function renderProjectCard(
     if (visible.length === 0) {
       list.createDiv({ cls: "aios-empty", text: "No tasks match the current view." });
     } else {
-      for (const t of visible) renderTaskRow(app, list, t, refresh);
+      for (const t of visible) renderTaskRow(app, tasksRoot, list, t, refresh);
     }
-    addButton(pbody, app, addCtxLabel, proj.slug, phaseName, null, refresh);
+    addButton(pbody, app, tasksRoot, addCtxLabel, proj.slug, phaseName, null, refresh);
   };
 
   const phaseOrder = resolvePhaseOrder(proj, projTasks);
@@ -987,6 +1227,7 @@ function renderChips(
 // produce no chip. Selection persists in viewState across live re-renders.
 function renderProjectsTab(
   app: App,
+  tasksRoot: string,
   container: HTMLElement,
   projects: ProjectItem[],
   tasks: TaskItem[],
@@ -1017,7 +1258,7 @@ function renderProjectsTab(
   const group = groups.find((g) => g.slug === active);
   if (!group) return;
   for (const proj of group.projects) {
-    renderProjectCard(app, container, proj, tasks, viewState, refresh);
+    renderProjectCard(app, tasksRoot, container, proj, tasks, viewState, refresh);
   }
 }
 
@@ -1026,6 +1267,7 @@ function renderProjectsTab(
 // dropdown holds recently-done standalone tasks.
 function renderTasksTab(
   app: App,
+  tasksRoot: string,
   container: HTMLElement,
   tasks: TaskItem[],
   buckets: { slug: string; label: string }[],
@@ -1059,7 +1301,7 @@ function renderTasksTab(
   const addBtn = addWrap.createEl("button", { cls: "aios-add", text: "+ Add task" });
   addBtn.addEventListener("click", () => {
     new AddTaskModal(app, "New standalone task", buckets, async (title, categorySlug) => {
-      await createQuickTask(app, { title, project: null, phase: null, keyElement: categorySlug });
+      await createQuickTask(app, tasksRoot, { title, project: null, phase: null, keyElement: categorySlug });
       refresh();
     }).open();
   });
@@ -1070,7 +1312,7 @@ function renderTasksTab(
   if (filtered.length === 0) {
     list.createDiv({ cls: "aios-empty", text: "Nothing here." });
   } else {
-    for (const t of filtered) renderTaskRow(app, list, t, refresh, tagForTask(t, buckets));
+    for (const t of filtered) renderTaskRow(app, tasksRoot, list, t, refresh, tagForTask(t, buckets));
   }
 
   // Completed (standalone, last 7 days).
@@ -1096,7 +1338,140 @@ function renderTasksTab(
       else viewState.expanded.delete(dKey);
     });
     const dlist = det.createDiv({ cls: "aios-list" });
-    for (const t of done) renderTaskRow(app, dlist, t, refresh, tagForTask(t, buckets));
+    for (const t of done) renderTaskRow(app, tasksRoot, dlist, t, refresh, tagForTask(t, buckets));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Health strip: gather (impure) + render + modal.
+// ---------------------------------------------------------------------------
+
+// Days between `iso` (or a file's mtime when iso is absent) and now.
+function ageDaysFor(app: App, path: string, iso: string | null): number {
+  let ms = iso ? Date.parse(iso) : NaN;
+  if (isNaN(ms)) {
+    const file = app.vault.getAbstractFileByPath(path);
+    ms = file instanceof TFile ? file.stat.mtime : Date.now();
+  }
+  return Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+}
+
+// Direct-child files of a folder (not recursive). Returns [] when the folder
+// does not exist, so a missing intake/journal folder degrades to "no data"
+// instead of an error.
+function directChildFiles(app: App, folderPath: string): TFile[] {
+  const folder = app.vault.getAbstractFileByPath(normalizePath(folderPath));
+  if (!(folder instanceof TFolder)) return [];
+  return folder.children.filter((c): c is TFile => c instanceof TFile);
+}
+
+// Builds the plain-data HealthInput from live vault/metadataCache state. Reuses
+// the tasks/projects already read for the main dashboard render (no extra
+// vault-wide scan) and adds one direct-child listing each for the intake and
+// journal folders, plus the metadataCache's existing unresolvedLinks map.
+function gatherHealthInput(
+  app: App,
+  settings: AiosDashboardSettings,
+  tasks: TaskItem[],
+  projects: ProjectItem[]
+): HealthInput {
+  const intakeFiles = directChildFiles(app, settings.intakeFolder).map((f) => ({
+    path: f.path,
+    name: f.name,
+    ageDays: ageDaysFor(app, f.path, null),
+  }));
+
+  const journalFiles = directChildFiles(app, settings.journalFolder)
+    .filter((f) => f.extension === "md")
+    .map((f) => {
+      const fm = app.metadataCache.getFileCache(f)?.frontmatter;
+      return { path: f.path, name: f.name, ingested: fm?.ingested === true };
+    });
+
+  const healthTasks: HealthTaskInput[] = tasks.map((t) => {
+    const file = app.vault.getAbstractFileByPath(t.path);
+    const fm =
+      file instanceof TFile ? app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+    const declaredStatus = fm?.status ? "" + fm.status : null;
+    return {
+      path: t.path,
+      title: t.title,
+      status: t.status,
+      declaredStatus,
+      project: t.project,
+      ageDays: ageDaysFor(app, t.path, t.updated),
+    };
+  });
+
+  const unresolvedLinks: { source: string; target: string; count: number }[] = [];
+  const raw = app.metadataCache.unresolvedLinks || {};
+  for (const source of Object.keys(raw)) {
+    const targets = raw[source] || {};
+    for (const target of Object.keys(targets)) {
+      const count = targets[target];
+      if (count > 0) unresolvedLinks.push({ source, target, count });
+    }
+  }
+
+  return {
+    intakeFiles,
+    journalFiles,
+    tasks: healthTasks,
+    projectSlugs: projects.map((p) => p.slug),
+    unresolvedLinks,
+    linkCheckExcludes: parseExcludeList(settings.linkCheckExcludes),
+    thresholds: {
+      intakeWarnDays: settings.intakeWarnDays,
+      inProgressStaleDays: settings.inProgressStaleDays,
+      openStaleDays: settings.openStaleDays,
+    },
+  };
+}
+
+// Lists the offending files for one health tile; click a row to open it.
+class HealthDetailModal extends Modal {
+  private tile: HealthTile;
+
+  constructor(app: App, tile: HealthTile) {
+    super(app);
+    this.tile = tile;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("aios-modal");
+    contentEl.createEl("h3", { text: this.tile.label });
+    const list = contentEl.createDiv({ cls: "aios-health-modal-list" });
+    for (const item of this.tile.items) {
+      const row = list.createDiv({ cls: "aios-health-modal-row" });
+      const link = row.createEl("a", { cls: "aios-health-modal-link", text: item.label });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        this.app.workspace.openLinkText(item.path, "", false);
+        this.close();
+      });
+      row.createSpan({ cls: "aios-health-modal-detail", text: item.detail });
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// One row of small pills at the top of the dashboard. Tiles with a zero count
+// are omitted by computeHealth already, so an all-healthy vault renders no
+// strip at all. Click a tile to see the offending files.
+function renderHealthStrip(app: App, root: HTMLElement, tiles: HealthTile[]) {
+  if (tiles.length === 0) return;
+  const strip = root.createDiv({ cls: "aios-health-strip" });
+  for (const tile of tiles) {
+    const pill = strip.createEl("button", {
+      cls: "aios-health-tile" + (tile.warn ? " aios-health-tile-warn" : ""),
+    });
+    pill.createSpan({ cls: "aios-health-tile-label", text: tile.label });
+    pill.createSpan({ cls: "aios-health-tile-count", text: tile.summary });
+    pill.addEventListener("click", () => new HealthDetailModal(app, tile).open());
   }
 }
 
@@ -1105,14 +1480,15 @@ function renderDashboard(
   root: HTMLElement,
   refresh: () => void,
   viewState: ViewState,
+  settings: AiosDashboardSettings,
   sourcePath?: string
 ) {
   root.empty();
   root.addClass("aios-dashboard-root");
 
   // Resolve config from the host note's frontmatter (config-driven per fork). No sourcePath
-  // (standalone view or refresh re-render) falls back to the canonical DASHBOARD_NOTE.
-  const hostFile = app.vault.getAbstractFileByPath(sourcePath ?? DASHBOARD_NOTE);
+  // (standalone view or refresh re-render) falls back to the configured dashboard note.
+  const hostFile = app.vault.getAbstractFileByPath(sourcePath ?? settings.dashboardNote);
   const hostFm =
     hostFile instanceof TFile
       ? (app.metadataCache.getFileCache(hostFile)?.frontmatter as
@@ -1121,18 +1497,25 @@ function renderDashboard(
       : undefined;
   const buckets = resolveBuckets(hostFm);
 
-  const tasks = readTasks(app);
-  const projects = readProjects(app);
+  const tasks = readTasks(app, settings.tasksRoot);
+  const projects = readProjects(app, settings.projectsRoot);
   const openTasks = tasks.filter((t) => OPEN_STATUSES.includes(t.status));
 
   // ----- Header -----
   const header = root.createDiv({ cls: "aios-header" });
-  header.createEl("h1", { text: "AIOS" });
+  header.createEl("h1", { text: settings.headerTitle });
   const stat = header.createDiv({ cls: "aios-stat" });
   const activeCount = projects.filter((p) => p.status === "active").length;
   stat.setText(`${openTasks.length} open · ${activeCount} active`);
   const refreshBtn = header.createEl("button", { cls: "aios-refresh", text: "Refresh" });
   refreshBtn.addEventListener("click", () => refresh());
+
+  // ----- Health strip -----
+  if (settings.showHealthStrip) {
+    const healthInput = gatherHealthInput(app, settings, tasks, projects);
+    const tiles = computeHealth(healthInput);
+    renderHealthStrip(app, root, tiles);
+  }
 
   // ----- Tab bar -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
@@ -1152,9 +1535,9 @@ function renderDashboard(
   // ----- Tab body -----
   const body = root.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "tasks") {
-    renderTasksTab(app, body, tasks, buckets, viewState, refresh);
+    renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else {
-    renderProjectsTab(app, body, projects, tasks, viewState, refresh, hostFm);
+    renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm);
   }
 
   root.createDiv({ cls: "aios-foot" }).setText(
@@ -1168,9 +1551,11 @@ function renderDashboard(
 
 class DashboardView extends ItemView {
   private viewState: ViewState = makeViewState();
+  private plugin: AiosDashboardPlugin;
 
-  constructor(leaf: WorkspaceLeaf) {
+  constructor(leaf: WorkspaceLeaf, plugin: AiosDashboardPlugin) {
     super(leaf);
+    this.plugin = plugin;
   }
 
   getViewType(): string {
@@ -1191,7 +1576,7 @@ class DashboardView extends ItemView {
 
   render() {
     const container = this.containerEl.children[1] as HTMLElement;
-    renderDashboard(this.app, container, () => this.render(), this.viewState);
+    renderDashboard(this.app, container, () => this.render(), this.viewState, this.plugin.settings);
   }
 
   async onClose() {
@@ -1200,10 +1585,180 @@ class DashboardView extends ItemView {
 }
 
 // ---------------------------------------------------------------------------
+// Settings tab
+// ---------------------------------------------------------------------------
+
+class AiosDashboardSettingTab extends PluginSettingTab {
+  plugin: AiosDashboardPlugin;
+
+  constructor(app: App, plugin: AiosDashboardPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "AIOS Dashboard" });
+
+    const save = async () => {
+      await this.plugin.saveSettings();
+      this.plugin.refreshNow();
+    };
+
+    new Setting(containerEl)
+      .setName("Tasks root")
+      .setDesc("Folder that holds tsk-*.md task files (relative to the vault root).")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.tasksRoot)
+          .setValue(this.plugin.settings.tasksRoot)
+          .onChange(async (v) => {
+            this.plugin.settings.tasksRoot = v.trim() || DEFAULT_SETTINGS.tasksRoot;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Projects root")
+      .setDesc("Folder that holds project hubs at <root>/<slug>/<slug>.md.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.projectsRoot)
+          .setValue(this.plugin.settings.projectsRoot)
+          .onChange(async (v) => {
+            this.plugin.settings.projectsRoot = v.trim() || DEFAULT_SETTINGS.projectsRoot;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Dashboard note")
+      .setDesc("Note whose frontmatter supplies dashboard_buckets / dashboard_project_statuses when no host note is given.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.dashboardNote)
+          .setValue(this.plugin.settings.dashboardNote)
+          .onChange(async (v) => {
+            this.plugin.settings.dashboardNote = v.trim() || DEFAULT_SETTINGS.dashboardNote;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Header title")
+      .setDesc("Text shown in the dashboard header.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.headerTitle)
+          .setValue(this.plugin.settings.headerTitle)
+          .onChange(async (v) => {
+            this.plugin.settings.headerTitle = v.trim() || DEFAULT_SETTINGS.headerTitle;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Intake folder")
+      .setDesc("Folder scanned for the intake-backlog health tile.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.intakeFolder)
+          .setValue(this.plugin.settings.intakeFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.intakeFolder = v.trim() || DEFAULT_SETTINGS.intakeFolder;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Journal folder")
+      .setDesc("Folder scanned for the un-mined journal health tile (frontmatter ingested: false).")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.journalFolder)
+          .setValue(this.plugin.settings.journalFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.journalFolder = v.trim() || DEFAULT_SETTINGS.journalFolder;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Show health strip")
+      .setDesc("Show the health tiles at the top of the dashboard. Off by user choice hides it entirely.")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.showHealthStrip).onChange(async (v) => {
+          this.plugin.settings.showHealthStrip = v;
+          await save();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Intake warn days")
+      .setDesc("Warn styling when the oldest intake file is older than this many days.")
+      .addText((t) =>
+        t
+          .setPlaceholder(String(DEFAULT_SETTINGS.intakeWarnDays))
+          .setValue(String(this.plugin.settings.intakeWarnDays))
+          .onChange(async (v) => {
+            const n = Number(v);
+            this.plugin.settings.intakeWarnDays = isNaN(n) ? DEFAULT_SETTINGS.intakeWarnDays : n;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("In-progress stale days")
+      .setDesc("A task counts as stale in-progress once it has not been updated for this many days.")
+      .addText((t) =>
+        t
+          .setPlaceholder(String(DEFAULT_SETTINGS.inProgressStaleDays))
+          .setValue(String(this.plugin.settings.inProgressStaleDays))
+          .onChange(async (v) => {
+            const n = Number(v);
+            this.plugin.settings.inProgressStaleDays = isNaN(n)
+              ? DEFAULT_SETTINGS.inProgressStaleDays
+              : n;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Open stale days")
+      .setDesc("A task counts as stale open once it has not been updated for this many days.")
+      .addText((t) =>
+        t
+          .setPlaceholder(String(DEFAULT_SETTINGS.openStaleDays))
+          .setValue(String(this.plugin.settings.openStaleDays))
+          .onChange(async (v) => {
+            const n = Number(v);
+            this.plugin.settings.openStaleDays = isNaN(n) ? DEFAULT_SETTINGS.openStaleDays : n;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Broken-link check excludes")
+      .setDesc("Comma-separated path prefixes to exclude from the broken-links health tile.")
+      .addTextArea((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.linkCheckExcludes)
+          .setValue(this.plugin.settings.linkCheckExcludes)
+          .onChange(async (v) => {
+            this.plugin.settings.linkCheckExcludes = v;
+            await save();
+          })
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
 export default class AiosDashboardPlugin extends Plugin {
+  settings: AiosDashboardSettings = DEFAULT_SETTINGS;
   private inlineHosts: Set<HTMLElement> = new Set();
   private inlineState: WeakMap<HTMLElement, ViewState> = new WeakMap();
   private refreshTimer: number | null = null;
@@ -1217,8 +1772,25 @@ export default class AiosDashboardPlugin extends Plugin {
     return s;
   }
 
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  // Public hook for the settings tab: force an immediate re-render (no debounce)
+  // so field changes are visible right away.
+  refreshNow() {
+    this.refreshAll();
+  }
+
   async onload() {
-    this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf));
+    await this.loadSettings();
+    this.addSettingTab(new AiosDashboardSettingTab(this.app, this));
+
+    this.registerView(VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
 
     this.addRibbonIcon("layout-dashboard", "Open AIOS Dashboard", () => {
       this.activateView();
@@ -1234,7 +1806,14 @@ export default class AiosDashboardPlugin extends Plugin {
     this.registerMarkdownCodeBlockProcessor("aios-dashboard", (_src, el, ctx) => {
       const host = el.createDiv();
       this.inlineHosts.add(host);
-      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host), ctx.sourcePath);
+      renderDashboard(
+        this.app,
+        host,
+        () => this.scheduleRefresh(),
+        this.stateFor(host),
+        this.settings,
+        ctx.sourcePath
+      );
       this.register(() => this.inlineHosts.delete(host));
     });
 
@@ -1268,7 +1847,7 @@ export default class AiosDashboardPlugin extends Plugin {
         this.inlineHosts.delete(host);
         continue;
       }
-      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host));
+      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host), this.settings);
     }
   }
 
