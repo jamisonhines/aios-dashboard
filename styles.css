@@ -710,6 +710,58 @@
   --aios-usage-other: var(--aios-dim);
 }
 
+/* Workflow attribution colors: 8 stable slots, indexed by
+   usageWorkflowColorIndex() in main.ts so a given workflow key always lands
+   on the same color regardless of sort order. */
+.aios-dashboard-root {
+  --aios-workflow-0: var(--aios-p1);
+  --aios-workflow-1: var(--aios-p2);
+  --aios-workflow-2: var(--aios-p3);
+  --aios-workflow-3: var(--aios-purple);
+  --aios-workflow-4: var(--aios-grad-1);
+  --aios-workflow-5: var(--aios-grad-3);
+  --aios-workflow-6: var(--aios-grad-4);
+  --aios-workflow-7: var(--aios-dim);
+}
+.aios-workflow-color-0 {
+  background: var(--aios-workflow-0);
+}
+.aios-workflow-color-1 {
+  background: var(--aios-workflow-1);
+}
+.aios-workflow-color-2 {
+  background: var(--aios-workflow-2);
+}
+.aios-workflow-color-3 {
+  background: var(--aios-workflow-3);
+}
+.aios-workflow-color-4 {
+  background: var(--aios-workflow-4);
+}
+.aios-workflow-color-5 {
+  background: var(--aios-workflow-5);
+}
+.aios-workflow-color-6 {
+  background: var(--aios-workflow-6);
+}
+.aios-workflow-color-7 {
+  background: var(--aios-workflow-7);
+}
+
+.aios-dashboard-root .aios-usage-workflow-bar {
+  display: flex;
+  width: 100%;
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-usage-workflow-segment {
+  height: 100%;
+}
+.aios-dashboard-root .aios-usage-workflow-legend {
+  margin-top: 8px;
+}
+
 .aios-dashboard-root .aios-usage-tab {
   display: flex;
   flex-direction: column;

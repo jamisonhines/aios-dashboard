@@ -730,11 +730,23 @@ interface UsageProjectStat {
   messages: number;
 }
 
+interface UsageWorkflowStat {
+  key: string;
+  label: string;
+  costUsd: number;
+  outputTokens: number;
+  messages: number;
+  sessions: number;
+}
+
 interface UsageStats {
   generatedAt: string;
   windowDays: number;
   days: UsageDay[];
   projects: UsageProjectStat[];
+  // Optional: absent in JSON written before build 2.5. The Usage tab hides
+  // the workflows section entirely when this is missing.
+  workflows?: UsageWorkflowStat[];
   totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
 }
 
@@ -942,6 +954,82 @@ function computeUsageView(stats: UsageStats, nowDate: Date): UsageView {
     table,
     projects,
   };
+}
+
+// Known workflow keys in the exporter's classification order. Drives a stable
+// color index per key so the share bar, legend, and table dots never disagree
+// and colors don't shift as costs change between runs. MIRRORED in
+// usageModel.test.mjs.
+const USAGE_WORKFLOW_COLOR_ORDER = [
+  "telegram-bridge",
+  "telegram-ingest",
+  "email-router",
+  "email-followups",
+  "email-postmortem",
+  "email-other",
+  "learning-scan",
+  "interactive",
+];
+const USAGE_WORKFLOW_COLOR_COUNT = 8;
+
+// Stable color index for a workflow key: known keys map to a fixed slot;
+// any future key (added to the exporter's rule table later) falls back to a
+// deterministic hash so it still always lands on the same color.
+function usageWorkflowColorIndex(key: string): number {
+  const idx = USAGE_WORKFLOW_COLOR_ORDER.indexOf(key);
+  if (idx >= 0) return idx;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return hash % USAGE_WORKFLOW_COLOR_COUNT;
+}
+
+interface UsageWorkflowShareRow {
+  key: string;
+  label: string;
+  costUsd: number;
+  sharePercent: number;
+  colorIndex: number;
+}
+
+interface UsageWorkflowTableRow extends UsageWorkflowStat {
+  colorIndex: number;
+}
+
+interface UsageWorkflowsView {
+  hasData: boolean;
+  shareBar: UsageWorkflowShareRow[];
+  table: UsageWorkflowTableRow[];
+}
+
+// Pure view-model function: turns the exporter's optional `workflows` block
+// into the share-bar + table shapes the Usage tab renders. Missing/empty
+// `workflows` (old JSON, or a window with no transcripts) yields hasData:
+// false so the caller can hide the whole section. Order is preserved as
+// delivered by the exporter (sorted by costUsd desc). MIRRORED in
+// usageModel.test.mjs.
+function computeWorkflowsView(stats: UsageStats): UsageWorkflowsView {
+  const workflows = stats.workflows;
+  if (!Array.isArray(workflows) || workflows.length === 0) {
+    return { hasData: false, shareBar: [], table: [] };
+  }
+
+  const total = workflows.reduce((s, w) => s + w.costUsd, 0);
+  const safeTotal = total > 0 ? total : 1;
+
+  const shareBar: UsageWorkflowShareRow[] = workflows.map((w) => ({
+    key: w.key,
+    label: w.label,
+    costUsd: w.costUsd,
+    sharePercent: (w.costUsd / safeTotal) * 100,
+    colorIndex: usageWorkflowColorIndex(w.key),
+  }));
+
+  const table: UsageWorkflowTableRow[] = workflows.map((w) => ({
+    ...w,
+    colorIndex: usageWorkflowColorIndex(w.key),
+  }));
+
+  return { hasData: true, shareBar, table };
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,12 +2321,65 @@ function renderUsageProjectsTable(container: HTMLElement, projects: UsageProject
   }
 }
 
-function renderUsageView(container: HTMLElement, view: UsageView) {
+// Workflow share bar: single horizontal 100%-stacked bar, one segment per
+// workflow by costUsd share, plus a small legend (label + $) below it.
+function renderUsageWorkflowShareBar(container: HTMLElement, shareBar: UsageWorkflowShareRow[]) {
+  const bar = container.createDiv({ cls: "aios-usage-workflow-bar" });
+  for (const seg of shareBar) {
+    if (seg.sharePercent <= 0) continue;
+    const segEl = bar.createDiv({
+      cls: "aios-usage-workflow-segment aios-workflow-color-" + seg.colorIndex,
+    });
+    segEl.style.width = seg.sharePercent + "%";
+    segEl.setAttribute("title", `${seg.label}: ${formatUsd(seg.costUsd)}`);
+  }
+
+  const legend = container.createDiv({ cls: "aios-usage-legend aios-usage-workflow-legend" });
+  for (const seg of shareBar) {
+    const pill = legend.createDiv({ cls: "aios-usage-legend-item" });
+    pill.createSpan({ cls: "aios-usage-dot aios-workflow-color-" + seg.colorIndex });
+    pill.createSpan({ cls: "aios-usage-legend-label", text: seg.label });
+    pill.createSpan({ cls: "aios-usage-legend-cost", text: formatUsd(seg.costUsd) });
+  }
+}
+
+function renderUsageWorkflowTable(container: HTMLElement, table: UsageWorkflowTableRow[]) {
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", { cls: "aios-usage-table" });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of ["Workflow", "Cost", "Output tokens", "Msgs", "Sessions"]) {
+    headRow.createEl("th", { text: h });
+  }
+  const tbody = el.createEl("tbody");
+  for (const row of table) {
+    const tr = tbody.createEl("tr");
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    nameCell.createSpan({ cls: "aios-usage-dot aios-workflow-color-" + row.colorIndex });
+    nameCell.createSpan({ text: " " + row.label });
+    tr.createEl("td", { text: formatUsd(row.costUsd) });
+    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
+    tr.createEl("td", { text: String(row.messages) });
+    tr.createEl("td", { text: String(row.sessions) });
+  }
+}
+
+// Missing `workflows` field (old JSON) or an empty window renders nothing at
+// all -- no section header, no error.
+function renderUsageWorkflowsSection(container: HTMLElement, view: UsageWorkflowsView) {
+  if (!view.hasData) return;
+  container.createDiv({ cls: "aios-usage-subhead", text: "Workflows (30d)" });
+  renderUsageWorkflowShareBar(container, view.shareBar);
+  renderUsageWorkflowTable(container, view.table);
+}
+
+function renderUsageView(container: HTMLElement, view: UsageView, workflowsView: UsageWorkflowsView) {
   renderUsageTiles(container, view);
   renderUsageChart(container, view.chart);
   renderUsageLegend(container, view.legend);
   container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
   renderUsageTable(container, view.table);
+  renderUsageWorkflowsSection(container, workflowsView);
   renderUsageProjectsTable(container, view.projects);
   container.createDiv({
     cls: "aios-foot",
@@ -2262,7 +2403,8 @@ function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboar
       return;
     }
     const view = computeUsageView(stats, new Date());
-    renderUsageView(wrap, view);
+    const workflowsView = computeWorkflowsView(stats);
+    renderUsageView(wrap, view, workflowsView);
   });
 }
 

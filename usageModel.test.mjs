@@ -1,4 +1,5 @@
-// Tests for the Usage-tab data model: computeUsageView + formatCompactNumber (pure).
+// Tests for the Usage-tab data model: computeUsageView, computeWorkflowsView,
+// usageWorkflowColorIndex, and formatCompactNumber (pure).
 // Mirror of the functions under test (kept in sync with main.ts). Run: node usageModel.test.mjs
 import assert from "node:assert";
 
@@ -227,6 +228,110 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   assert.equal(view.projects.length, 8, "top 8 only");
   assert.equal(view.projects[0].name, "p9", "sorted by cost desc");
   assert.equal(view.projects[7].name, "p2", "8th place is p2 (cost 2)");
+}
+
+// --- workflows view model (mirror of computeWorkflowsView in main.ts) ---
+const USAGE_WORKFLOW_COLOR_ORDER = [
+  "telegram-bridge",
+  "telegram-ingest",
+  "email-router",
+  "email-followups",
+  "email-postmortem",
+  "email-other",
+  "learning-scan",
+  "interactive",
+];
+const USAGE_WORKFLOW_COLOR_COUNT = 8;
+
+function usageWorkflowColorIndex(key) {
+  const idx = USAGE_WORKFLOW_COLOR_ORDER.indexOf(key);
+  if (idx >= 0) return idx;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return hash % USAGE_WORKFLOW_COLOR_COUNT;
+}
+
+function computeWorkflowsView(stats) {
+  const workflows = stats.workflows;
+  if (!Array.isArray(workflows) || workflows.length === 0) {
+    return { hasData: false, shareBar: [], table: [] };
+  }
+
+  const total = workflows.reduce((s, w) => s + w.costUsd, 0);
+  const safeTotal = total > 0 ? total : 1;
+
+  const shareBar = workflows.map((w) => ({
+    key: w.key,
+    label: w.label,
+    costUsd: w.costUsd,
+    sharePercent: (w.costUsd / safeTotal) * 100,
+    colorIndex: usageWorkflowColorIndex(w.key),
+  }));
+
+  const table = workflows.map((w) => ({ ...w, colorIndex: usageWorkflowColorIndex(w.key) }));
+
+  return { hasData: true, shareBar, table };
+}
+
+// --- missing/empty `workflows` field: hasData false, no rows ---
+{
+  const view = computeWorkflowsView({ days: [], projects: [], totals: {} });
+  assert.equal(view.hasData, false, "missing workflows field -> hasData false");
+  assert.deepEqual(view.shareBar, [], "missing workflows field -> empty shareBar");
+  assert.deepEqual(view.table, [], "missing workflows field -> empty table");
+}
+{
+  const view = computeWorkflowsView({ days: [], projects: [], workflows: [], totals: {} });
+  assert.equal(view.hasData, false, "empty workflows array -> hasData false");
+}
+
+// --- share computation: percentages sum to 100 and are proportional to cost ---
+{
+  const stats = {
+    days: [],
+    projects: [],
+    totals: {},
+    workflows: [
+      { key: "email-followups", label: "Email follow-ups", costUsd: 75, outputTokens: 100, messages: 10, sessions: 2 },
+      { key: "email-router", label: "Email router", costUsd: 25, outputTokens: 50, messages: 5, sessions: 1 },
+    ],
+  };
+  const view = computeWorkflowsView(stats);
+  assert.equal(view.hasData, true, "non-empty workflows -> hasData true");
+  assert.equal(view.shareBar.length, 2, "one segment per workflow");
+  assert.equal(view.shareBar[0].sharePercent, 75, "75/100 -> 75%");
+  assert.equal(view.shareBar[1].sharePercent, 25, "25/100 -> 25%");
+  const sum = view.shareBar.reduce((s, seg) => s + seg.sharePercent, 0);
+  assert.ok(Math.abs(sum - 100) < 1e-9, "shares sum to 100%");
+  assert.deepEqual(
+    view.table.map((r) => r.key),
+    ["email-followups", "email-router"],
+    "table preserves delivered (exporter-sorted) order"
+  );
+}
+
+// --- zero-cost workflows: no division-by-zero, shares are 0 not NaN ---
+{
+  const stats = {
+    days: [],
+    projects: [],
+    totals: {},
+    workflows: [
+      { key: "interactive", label: "Interactive", costUsd: 0, outputTokens: 0, messages: 0, sessions: 1 },
+    ],
+  };
+  const view = computeWorkflowsView(stats);
+  assert.equal(view.shareBar[0].sharePercent, 0, "zero total cost -> 0% share, not NaN");
+}
+
+// --- color index: known keys map to fixed stable slots regardless of order ---
+{
+  assert.equal(usageWorkflowColorIndex("telegram-bridge"), 0, "telegram-bridge -> slot 0");
+  assert.equal(usageWorkflowColorIndex("interactive"), 7, "interactive -> slot 7");
+  const a = usageWorkflowColorIndex("some-future-workflow");
+  const b = usageWorkflowColorIndex("some-future-workflow");
+  assert.equal(a, b, "unknown key still gets a stable (deterministic) color across calls");
+  assert.ok(a >= 0 && a < USAGE_WORKFLOW_COLOR_COUNT, "fallback color index stays in palette range");
 }
 
 console.log("usageModel: all assertions passed");
