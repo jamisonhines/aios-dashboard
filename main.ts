@@ -125,9 +125,10 @@ interface AiosDashboardSettings {
   openStaleDays: number;
   linkCheckExcludes: string; // comma-separated list
   actionsEnabled: boolean;
-  launchMode: "terminal" | "iterm" | "custom";
+  launchMode: "terminal" | "iterm" | "app" | "custom";
   customCommand: string; // shell template, {vault} and {prompt} placeholders
   claudeBinary: string;
+  ideAppName: string; // macOS app name for the "app" launch mode (open -a)
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -146,6 +147,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   launchMode: "terminal",
   customCommand: "",
   claudeBinary: "claude",
+  ideAppName: "Antigravity",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -868,12 +870,19 @@ function buildInnerShellCommand(
 // Pure: returns the exact argv to spawn for a given launch mode. Never touches
 // the filesystem or a process, so it is fully unit-testable.
 function buildLaunchCommand(
-  mode: "terminal" | "iterm" | "custom",
+  mode: "terminal" | "iterm" | "app" | "custom",
   claudeBinary: string,
   vaultPath: string,
   prompt: string | null,
-  customCommand: string
+  customCommand: string,
+  ideAppName?: string
 ): string[] {
+  // "app" opens the vault folder in a macOS app (IDE) via open -a; no CLI on
+  // PATH required. The prompt cannot be injected into an IDE session, so the
+  // caller copies it to the clipboard instead (see launchDispatch).
+  if (mode === "app") {
+    return ["open", "-a", ideAppName || "Antigravity", vaultPath];
+  }
   if (mode === "custom") {
     const vaultArg = shellQuoteSingle(vaultPath);
     const promptArg = prompt != null ? shellQuoteSingle(prompt) : "";
@@ -942,10 +951,18 @@ function launchDispatch(
       settings.claudeBinary,
       vaultAbsolutePath,
       prompt,
-      settings.customCommand
+      settings.customCommand,
+      settings.ideAppName
     );
     const cwd = settings.launchMode === "custom" ? vaultAbsolutePath : undefined;
     runLaunchCommand(argv, cwd);
+    // An IDE can't receive the prompt as an argument; hand it over via clipboard.
+    if (settings.launchMode === "app" && prompt != null) {
+      navigator.clipboard
+        .writeText(prompt)
+        .then(() => new Notice("AIOS: opened IDE. Prompt copied, paste it into Claude there."))
+        .catch(() => new Notice("AIOS: opened IDE, but could not copy the prompt."));
+    }
   } catch (e) {
     new Notice("AIOS: could not launch Dispatch. " + (e?.message || e));
   }
@@ -1621,6 +1638,31 @@ class HealthDetailModal extends Modal {
     const { contentEl } = this;
     contentEl.addClass("aios-modal");
     contentEl.createEl("h3", { text: this.tile.label });
+
+    // Actions sit ABOVE the list so they never scroll out of reach on long tiles.
+    const actions = contentEl.createDiv({ cls: "aios-modal-footer aios-modal-actions" });
+    if (this.settings.actionsEnabled && Platform.isDesktop) {
+      const fixBtn = actions.createEl("button", {
+        cls: "aios-btn aios-btn-cta",
+        text: "Fix with Dispatch",
+      });
+      fixBtn.addEventListener("click", () => {
+        const base = getVaultBasePath(this.app);
+        if (!base) return;
+        launchDispatch(this.settings, base, this.tile.prompt);
+        this.close();
+      });
+    }
+    const copyBtn = actions.createEl("button", { cls: "aios-btn", text: "Copy prompt" });
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(this.tile.prompt);
+        new Notice("AIOS: prompt copied.");
+      } catch (e) {
+        new Notice("AIOS: could not copy prompt. " + (e?.message || e));
+      }
+    });
+
     const list = contentEl.createDiv({ cls: "aios-health-modal-list" });
     for (const item of this.tile.items) {
       const row = list.createDiv({ cls: "aios-health-modal-row" });
@@ -1632,29 +1674,6 @@ class HealthDetailModal extends Modal {
       });
       row.createSpan({ cls: "aios-health-modal-detail", text: item.detail });
     }
-
-    const footer = contentEl.createDiv({ cls: "aios-modal-footer" });
-    if (this.settings.actionsEnabled && Platform.isDesktop) {
-      const fixBtn = footer.createEl("button", {
-        cls: "aios-btn aios-btn-cta",
-        text: "Fix with Dispatch",
-      });
-      fixBtn.addEventListener("click", () => {
-        const base = getVaultBasePath(this.app);
-        if (!base) return;
-        launchDispatch(this.settings, base, this.tile.prompt);
-        this.close();
-      });
-    }
-    const copyBtn = footer.createEl("button", { cls: "aios-btn", text: "Copy prompt" });
-    copyBtn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(this.tile.prompt);
-        new Notice("AIOS: prompt copied.");
-      } catch (e) {
-        new Notice("AIOS: could not copy prompt. " + (e?.message || e));
-      }
-    });
   }
 
   onClose() {
@@ -2000,10 +2019,26 @@ class AiosDashboardSettingTab extends PluginSettingTab {
         d
           .addOption("terminal", "Terminal.app")
           .addOption("iterm", "iTerm2")
+          .addOption("app", "IDE app (Antigravity, VS Code...)")
           .addOption("custom", "Custom command")
           .setValue(this.plugin.settings.launchMode)
           .onChange(async (v) => {
-            this.plugin.settings.launchMode = v as "terminal" | "iterm" | "custom";
+            this.plugin.settings.launchMode = v as "terminal" | "iterm" | "app" | "custom";
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("IDE app name")
+      .setDesc(
+        "macOS application opened by the IDE launch mode (open -a). The vault opens as the folder; the prompt is copied to the clipboard to paste into Claude inside the IDE."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.ideAppName)
+          .setValue(this.plugin.settings.ideAppName)
+          .onChange(async (v) => {
+            this.plugin.settings.ideAppName = v.trim() || DEFAULT_SETTINGS.ideAppName;
             await save();
           })
       );

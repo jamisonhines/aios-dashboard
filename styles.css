@@ -688,3 +688,13 @@
   align-items: stretch;
   gap: 2px;
 }
+
+/* Actions row variant: sits above the list, so the divider goes below it. */
+.aios-modal-actions {
+  margin-top: 6px;
+  margin-bottom: 4px;
+  padding-top: 0;
+  border-top: none;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--aios-border);
+}

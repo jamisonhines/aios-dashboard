@@ -16,7 +16,10 @@ function buildInnerShellCommand(claudeBinary, vaultPath, prompt) {
   return parts.join(" ");
 }
 
-function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand) {
+function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName) {
+  if (mode === "app") {
+    return ["open", "-a", ideAppName || "Antigravity", vaultPath];
+  }
   if (mode === "custom") {
     const vaultArg = shellQuoteSingle(vaultPath);
     const promptArg = prompt != null ? shellQuoteSingle(prompt) : "";
@@ -127,6 +130,19 @@ function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand
 {
   const argv = buildLaunchCommand("custom", "claude", "/Users/jaymo/O'Brien Vault", null, "{vault}");
   assert.equal(argv[2], "'/Users/jaymo/O'\\''Brien Vault'", "vault path with an apostrophe is shell-escaped");
+}
+
+
+// --- app mode: open -a with the app name and raw vault path (no shell quoting needed, argv form) ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/Users/x/My Vault", "some prompt", "", "Antigravity");
+  assert.deepEqual(argv, ["open", "-a", "Antigravity", "/Users/x/My Vault"], "app mode opens the vault in the named app");
+}
+
+// --- app mode: falls back to Antigravity when no app name given ---
+{
+  const argv = buildLaunchCommand("app", "claude", "/v", null, "", "");
+  assert.equal(argv[2], "Antigravity", "empty app name falls back to the default");
 }
 
 console.log("launchModel: all assertions passed");
