@@ -69,6 +69,76 @@
   border-color: var(--aios-purple);
 }
 
+/* Health strip: small pills in one row, above the tab bar. Hidden entirely by
+   settings.showHealthStrip=false (no elements rendered) or when computeHealth
+   returns no tiles (all-healthy vault). */
+.aios-dashboard-root .aios-health-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.aios-dashboard-root .aios-health-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--aios-panel);
+  color: var(--aios-dim);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.aios-dashboard-root .aios-health-tile:hover {
+  color: var(--aios-text);
+  border-color: var(--aios-purple);
+}
+.aios-dashboard-root .aios-health-tile-warn {
+  color: var(--aios-p1);
+  border-color: rgba(255, 92, 92, 0.4);
+}
+.aios-dashboard-root .aios-health-tile-warn:hover {
+  border-color: var(--aios-p1);
+}
+.aios-dashboard-root .aios-health-tile-count {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+/* Health tile detail modal (offending-files list). */
+.aios-health-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.aios-health-modal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--aios-border);
+}
+.aios-health-modal-link {
+  color: var(--aios-text);
+  cursor: pointer;
+  text-decoration: none;
+}
+.aios-health-modal-link:hover {
+  color: var(--aios-purple);
+  text-decoration: underline;
+}
+.aios-health-modal-detail {
+  color: var(--aios-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* Sections */
 .aios-dashboard-root .aios-section {
   margin-bottom: 26px;

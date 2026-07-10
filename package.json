@@ -1,12 +1,12 @@
 {
   "name": "aios-dashboard",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "AIOS project + task dashboard plugin for Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "test": "node resolveBuckets.test.mjs && node groupProjects.test.mjs && node viewModel.test.mjs"
+    "test": "node resolveBuckets.test.mjs && node groupProjects.test.mjs && node viewModel.test.mjs && node healthModel.test.mjs"
   },
   "keywords": [
     "obsidian",
