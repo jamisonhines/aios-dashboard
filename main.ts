@@ -13,6 +13,25 @@ import {
   WorkspaceLeaf,
   normalizePath,
 } from "obsidian";
+import {
+  resolveBuckets,
+  resolveStatusSections,
+  groupProjectsByStatus,
+  statusChipsFromGroups,
+  splitProjectTasks,
+  categoryChipsFromTasks,
+  tagForTask,
+  filterStandaloneByCategory,
+  sortTasks,
+  visiblePhaseTasks,
+  computeHealth,
+  formatCompactNumber,
+  computeUsageView,
+  computeWorkflowsView,
+  computeOpsMapLayout,
+  OPS_MAP_DEFAULTS,
+  buildLaunchCommand,
+} from "./model.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -20,85 +39,16 @@ import {
 
 const VIEW_TYPE = "aios-dashboard";
 
-// Default standalone-task buckets (used when the Dashboard note declares none).
-const DEFAULT_BUCKETS: { slug: string; label: string }[] = [
-  { slug: "identity", label: "Identity" },
-  { slug: "work", label: "Work" },
-  { slug: "family", label: "Family" },
-  { slug: "health", label: "Health" },
-  { slug: "growth", label: "Growth" },
-  { slug: "money", label: "Money" },
-  { slug: "ai", label: "AI" },
-  { slug: "web-design", label: "Web Design" },
-  { slug: "georgian", label: "Georgian" },
-];
-
-// Resolve buckets from the host note's frontmatter `dashboard_buckets:` (array of
-// {slug,label}); fall back to DEFAULT_BUCKETS. Keeps the plugin config-driven so
-// each fork sets its own buckets without editing code.
-function resolveBuckets(
-  fm: Record<string, unknown> | undefined
-): { slug: string; label: string }[] {
-  const raw = fm?.["dashboard_buckets"];
-  if (Array.isArray(raw) && raw.length > 0) {
-    const parsed = raw
-      .filter(
-        (b): b is { slug: string; label: string } =>
-          !!b &&
-          typeof (b as Record<string, unknown>).slug === "string" &&
-          typeof (b as Record<string, unknown>).label === "string"
-      )
-      .map((b) => ({
-        slug: (b as Record<string, unknown>).slug as string,
-        label: (b as Record<string, unknown>).label as string,
-      }));
-    if (parsed.length > 0) return parsed;
-  }
-  return DEFAULT_BUCKETS;
-}
-
 // Project hub status sections. Rendered top-to-bottom in THIS fixed order; each
 // section is collapsible and empty sections are not rendered at all. `open` is the
 // default expand state (active work expanded, the done/archived graveyard collapsed).
-// A module default that resolveStatusSections() can override from frontmatter, so a
-// fork tunes labels/order/defaults as data, not code (fork-playbook: variation is data).
+// A module default that resolveStatusSections() (model.mjs) can override from
+// frontmatter, so a fork tunes labels/order/defaults as data, not code
+// (fork-playbook: variation is data).
 interface StatusSection {
   slug: string;
   label: string;
   open: boolean;
-}
-
-const DEFAULT_STATUS_SECTIONS: StatusSection[] = [
-  { slug: "active", label: "Active", open: true },
-  { slug: "planning", label: "Planning", open: true },
-  { slug: "paused", label: "Paused", open: true },
-  { slug: "done", label: "Done", open: false },
-  { slug: "archived", label: "Archived", open: false },
-];
-
-// Resolve status sections from the host note's `dashboard_project_statuses:` (array of
-// {slug,label,open?}); fall back to DEFAULT_STATUS_SECTIONS. `open` defaults true unless
-// explicitly false. Mirrors resolveBuckets so forks configure sectioning without code edits.
-function resolveStatusSections(
-  fm: Record<string, unknown> | undefined
-): StatusSection[] {
-  const raw = fm?.["dashboard_project_statuses"];
-  if (Array.isArray(raw) && raw.length > 0) {
-    const parsed = raw
-      .filter(
-        (b): b is Record<string, unknown> =>
-          !!b &&
-          typeof (b as Record<string, unknown>).slug === "string" &&
-          typeof (b as Record<string, unknown>).label === "string"
-      )
-      .map((b) => ({
-        slug: b.slug as string,
-        label: b.label as string,
-        open: (b as Record<string, unknown>).open !== false,
-      }));
-    if (parsed.length > 0) return parsed;
-  }
-  return DEFAULT_STATUS_SECTIONS;
 }
 
 const OPEN_STATUSES = ["open", "in-progress"];
@@ -377,35 +327,11 @@ interface ProjectStatusGroup {
   projects: ProjectItem[];
 }
 
-// Bucket projects into ordered status groups. Returns ONLY non-empty groups, in the
-// order of `sections`; projects whose status is outside the configured set are collected
-// into a trailing "Other" group so drift is surfaced, never silently dropped. Projects
-// inside a group are sorted by name.
-function groupProjectsByStatus(
-  projects: ProjectItem[],
-  sections: StatusSection[]
-): ProjectStatusGroup[] {
-  const known = new Set(sections.map((s) => s.slug));
-  // Sort by display name, tie-broken by the unique slug so ordering is deterministic
-  // across machines even when two projects share a name (readProjects order is FS-dependent).
-  const byName = (a: ProjectItem, b: ProjectItem) =>
-    a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug);
-  const out: ProjectStatusGroup[] = [];
-  for (const sec of sections) {
-    const inSec = projects.filter((p) => p.status === sec.slug).sort(byName);
-    if (inSec.length > 0) {
-      out.push({ slug: sec.slug, label: sec.label, open: sec.open, projects: inSec });
-    }
-  }
-  const drift = projects.filter((p) => !known.has(p.status)).sort(byName);
-  if (drift.length > 0) {
-    out.push({ slug: "other", label: "Other", open: true, projects: drift });
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
-// View-model helpers (pure: no Obsidian deps; unit-tested in viewModel.test.mjs)
+// View-model helpers (pure: no Obsidian deps; unit-tested in viewModel.test.mjs.
+// groupProjectsByStatus, statusChipsFromGroups, splitProjectTasks,
+// categoryChipsFromTasks, tagForTask, filterStandaloneByCategory now live in
+// model.mjs, imported above.)
 // ---------------------------------------------------------------------------
 
 interface Chip {
@@ -414,72 +340,10 @@ interface Chip {
   count: number;
 }
 
-// Projects-tab status chips: one per non-empty status group, label + count, order preserved
-// (Other stays last). Derived from groupProjectsByStatus output so the two never disagree.
-function statusChipsFromGroups(groups: ProjectStatusGroup[]): Chip[] {
-  return groups.map((g) => ({ slug: g.slug, label: g.label, count: g.projects.length }));
-}
-
 interface SplitTasks {
   doing: TaskItem[];
   open: TaskItem[];
   done: TaskItem[];
-}
-
-// Partition a project's tasks (caller passes non-cancelled tasks) into in-progress / open /
-// done buckets. Unknown statuses are ignored. Caller sorts each bucket for display.
-function splitProjectTasks(tasks: TaskItem[]): SplitTasks {
-  return {
-    doing: tasks.filter((t) => t.status === "in-progress"),
-    open: tasks.filter((t) => t.status === "open"),
-    done: tasks.filter((t) => t.status === "done"),
-  };
-}
-
-// Tasks-tab category chips: one per bucket with >=1 standalone task, plus an `inbox` entry
-// when any standalone task has no recognized life-area. The renderer prepends an "All" chip.
-function categoryChipsFromTasks(
-  standaloneTasks: TaskItem[],
-  buckets: { slug: string; label: string }[]
-): Chip[] {
-  const out: Chip[] = [];
-  for (const b of buckets) {
-    const count = standaloneTasks.filter((t) => t.lifeAreas.includes(b.slug)).length;
-    if (count > 0) out.push({ slug: b.slug, label: b.label, count });
-  }
-  const known = buckets.map((b) => b.slug);
-  const inboxCount = standaloneTasks.filter(
-    (t) => !t.lifeAreas.some((a) => known.includes(a))
-  ).length;
-  if (inboxCount > 0) out.push({ slug: "inbox", label: "Inbox", count: inboxCount });
-  return out;
-}
-
-// The single category pill shown on a standalone task row: the first recognized life-area
-// (in bucket order), else Inbox.
-function tagForTask(
-  task: TaskItem,
-  buckets: { slug: string; label: string }[]
-): { slug: string; label: string } {
-  for (const b of buckets) {
-    if (task.lifeAreas.includes(b.slug)) return { slug: b.slug, label: b.label };
-  }
-  return { slug: "inbox", label: "Inbox" };
-}
-
-// Filter the flat standalone list by the selected category chip. `all` = passthrough,
-// `inbox` = tasks with no recognized life-area, otherwise tasks tagged with that slug.
-function filterStandaloneByCategory(
-  standaloneTasks: TaskItem[],
-  categorySlug: string,
-  buckets: { slug: string; label: string }[]
-): TaskItem[] {
-  if (categorySlug === "all") return standaloneTasks;
-  if (categorySlug === "inbox") {
-    const known = buckets.map((b) => b.slug);
-    return standaloneTasks.filter((t) => !t.lifeAreas.some((a) => known.includes(a)));
-  }
-  return standaloneTasks.filter((t) => t.lifeAreas.includes(categorySlug));
 }
 
 // ---------------------------------------------------------------------------
@@ -504,26 +368,10 @@ interface HealthTile {
   prompt: string;
 }
 
-// Canned Dispatch prompt per health-tile key, shown as "Fix with Dispatch" in the
-// detail modal. Keyed by HealthTile.key (the internal computeHealth id, not the
+// Canned Dispatch prompt per health-tile key (HEALTH_TILE_PROMPTS) now lives in
+// model.mjs, keyed by HealthTile.key (the internal computeHealth id, not the
 // UI label). stale-in-progress and stale-open share the same reconcile prompt;
 // orphan-tasks and status-mismatch share the same consistency-fix prompt.
-const HEALTH_TILE_PROMPTS: Record<string, string> = {
-  intake:
-    "Process the Intake inbox: route each item per AGENTS.md (Capture for personal, SOP-ingest-source for external content).",
-  "journal-unmined":
-    "List journal entries with ingested: false and ingest the ones worth mining per GL-007: create derived area notes linking back, then flip ingested to true.",
-  "stale-in-progress":
-    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
-  "stale-open":
-    "Run a task reconcile pass per Dispatch's reconcile protocol: flip shipped tasks to done with evidence, cancel overtaken ones, list uncertain ones.",
-  "orphan-tasks":
-    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
-  "status-mismatch":
-    "Fix task-layer consistency: repoint or fix tasks whose project slug matches no hub and tasks whose status disagrees with their folder.",
-  "broken-links":
-    "Fix broken wikilinks per GL-001: repoint renamed targets, convert out-of-vault targets to backtick paths, strip dead ones.",
-};
 
 interface HealthTaskInput {
   path: string;
@@ -548,165 +396,16 @@ interface HealthInput {
   };
 }
 
-// Same rule main.ts uses to derive a task's status from its folder location.
-// Mirrored here (not reused) so the health model stays a standalone pure unit,
-// matching the pattern of the other MIRRORED functions in the test suite.
-function healthInferStatusFromPath(path: string): string {
-  if (path.includes("/done/")) return "done";
-  if (path.includes("/cancelled/")) return "cancelled";
-  if (path.includes("/in-progress/")) return "in-progress";
-  return "open";
-}
-
-function excludedBySource(source: string, excludes: string[]): boolean {
-  return excludes.some((ex) => source === ex || source.startsWith(ex + "/"));
-}
-
-// Compute the health tiles from plain, pre-gathered data. Tiles whose count is
-// zero are omitted entirely (calm when healthy). No Obsidian API calls here.
-function computeHealth(input: HealthInput): HealthTile[] {
-  const tiles: HealthTile[] = [];
-
-  // 1. Intake backlog: exclude README.md and dotfiles.
-  const intake = input.intakeFiles.filter(
-    (f) => f.name !== "README.md" && !f.name.startsWith(".")
-  );
-  if (intake.length > 0) {
-    const sorted = intake.slice().sort((a, b) => b.ageDays - a.ageDays);
-    const oldest = sorted[0].ageDays;
-    tiles.push({
-      key: "intake",
-      label: "Intake backlog",
-      count: intake.length,
-      summary: `${intake.length} · oldest ${oldest}d`,
-      warn: oldest > input.thresholds.intakeWarnDays,
-      items: sorted.map((f) => ({ path: f.path, label: f.name, detail: `${f.ageDays}d old` })),
-      prompt: HEALTH_TILE_PROMPTS["intake"],
-    });
-  }
-
-  // 2. Stale in-progress tasks.
-  const staleInProgress = input.tasks.filter(
-    (t) => t.status === "in-progress" && t.ageDays > input.thresholds.inProgressStaleDays
-  );
-  if (staleInProgress.length > 0) {
-    tiles.push({
-      key: "stale-in-progress",
-      label: "Stale in-progress",
-      count: staleInProgress.length,
-      summary: `${staleInProgress.length}`,
-      warn: true,
-      items: staleInProgress
-        .slice()
-        .sort((a, b) => b.ageDays - a.ageDays)
-        .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
-      prompt: HEALTH_TILE_PROMPTS["stale-in-progress"],
-    });
-  }
-
-  // 3. Stale open tasks.
-  const staleOpen = input.tasks.filter(
-    (t) => t.status === "open" && t.ageDays > input.thresholds.openStaleDays
-  );
-  if (staleOpen.length > 0) {
-    tiles.push({
-      key: "stale-open",
-      label: "Stale open",
-      count: staleOpen.length,
-      summary: `${staleOpen.length}`,
-      warn: true,
-      items: staleOpen
-        .slice()
-        .sort((a, b) => b.ageDays - a.ageDays)
-        .map((t) => ({ path: t.path, label: t.title, detail: `${t.ageDays}d since update` })),
-      prompt: HEALTH_TILE_PROMPTS["stale-open"],
-    });
-  }
-
-  // 4. Un-mined journal entries (excludes INDEX.md).
-  const unmined = input.journalFiles.filter((f) => f.name !== "INDEX.md" && !f.ingested);
-  if (unmined.length > 0) {
-    tiles.push({
-      key: "journal-unmined",
-      label: "journal not mined",
-      count: unmined.length,
-      summary: `${unmined.length}`,
-      warn: false,
-      items: unmined.map((f) => ({ path: f.path, label: f.name, detail: "not ingested" })),
-      prompt: HEALTH_TILE_PROMPTS["journal-unmined"],
-    });
-  }
-
-  // 5. Orphan tasks: project set but not a known project slug.
-  const knownSlugs = new Set(input.projectSlugs);
-  const orphans = input.tasks.filter((t) => t.project != null && !knownSlugs.has(t.project));
-  if (orphans.length > 0) {
-    tiles.push({
-      key: "orphan-tasks",
-      label: "Orphan tasks",
-      count: orphans.length,
-      summary: `${orphans.length}`,
-      warn: true,
-      items: orphans.map((t) => ({
-        path: t.path,
-        label: t.title,
-        detail: `project: ${t.project}`,
-      })),
-      prompt: HEALTH_TILE_PROMPTS["orphan-tasks"],
-    });
-  }
-
-  // 6. Status/folder mismatch: declared frontmatter status disagrees with folder.
-  const mismatches = input.tasks.filter(
-    (t) => t.declaredStatus != null && t.declaredStatus !== healthInferStatusFromPath(t.path)
-  );
-  if (mismatches.length > 0) {
-    tiles.push({
-      key: "status-mismatch",
-      label: "Status/folder mismatch",
-      count: mismatches.length,
-      summary: `${mismatches.length}`,
-      warn: true,
-      items: mismatches.map((t) => ({
-        path: t.path,
-        label: t.title,
-        detail: `status: ${t.declaredStatus}, folder: ${healthInferStatusFromPath(t.path)}`,
-      })),
-      prompt: HEALTH_TILE_PROMPTS["status-mismatch"],
-    });
-  }
-
-  // 7. Broken links: unresolved wikilinks, excluding sources under linkCheckExcludes.
-  const links = input.unresolvedLinks.filter((l) => !excludedBySource(l.source, input.linkCheckExcludes));
-  const brokenTotal = links.reduce((sum, l) => sum + l.count, 0);
-  if (brokenTotal > 0) {
-    const bySource = new Map<string, number>();
-    for (const l of links) bySource.set(l.source, (bySource.get(l.source) || 0) + l.count);
-    const items = Array.from(bySource.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([source, count]) => ({
-        path: source,
-        label: source,
-        detail: `${count} broken link${count === 1 ? "" : "s"}`,
-      }));
-    tiles.push({
-      key: "broken-links",
-      label: "Broken links",
-      count: brokenTotal,
-      summary: `${brokenTotal}`,
-      warn: true,
-      items,
-      prompt: HEALTH_TILE_PROMPTS["broken-links"],
-    });
-  }
-
-  return tiles;
-}
+// healthInferStatusFromPath, excludedBySource, and computeHealth now live in
+// model.mjs, imported above (kept as a standalone pure unit, matching the
+// pattern of the other MIRRORED functions in the test suite).
 
 // ---------------------------------------------------------------------------
 // Usage model (pure: no Obsidian deps; unit-tested in usageModel.test.mjs).
 // renderUsageTab (below, in the Renderers section) is the impure half that
 // reads usage-stats.json off disk and turns it into this plain-data shape.
+// computeUsageView, computeWorkflowsView, formatCompactNumber, and their
+// supporting constants/helpers now live in model.mjs, imported above.
 // ---------------------------------------------------------------------------
 
 interface UsageFamilyBucket {
@@ -814,175 +513,12 @@ interface UsageView {
   projects: UsageProjectRow[];
 }
 
-// Fixed family order: drives stacking order, legend order, and table order so
-// the three views never disagree with each other.
-const USAGE_FAMILY_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
-const USAGE_FAMILY_LABELS: Record<string, string> = {
-  fable: "Fable",
-  opus: "Opus",
-  sonnet: "Sonnet",
-  haiku: "Haiku",
-  other: "Other",
-};
-
-function usagePad2(n: number): string {
-  return n < 10 ? "0" + n : "" + n;
-}
-
-// Local (not UTC) calendar-day key, matching the exporter's per-day bucketing.
-function usageLocalDayKey(d: Date): string {
-  return d.getFullYear() + "-" + usagePad2(d.getMonth() + 1) + "-" + usagePad2(d.getDate());
-}
-
-function usageEmptyBucket(): UsageFamilyBucket {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 0, costUsd: 0 };
-}
-
-// Compact number formatting for token counts: 1.2k, 3.4M, 4.2M, 1.5B. Plain
-// integers stay plain below 1000. MIRRORED in usageModel.test.mjs.
-function formatCompactNumber(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e9) return sign + (abs / 1e9).toFixed(1) + "B";
-  if (abs >= 1e6) return sign + (abs / 1e6).toFixed(1) + "M";
-  if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + "k";
-  return sign + Math.round(abs).toString();
-}
+// computeUsageView, computeWorkflowsView, formatCompactNumber, the family
+// order/labels, and the workflow color mapping now live in model.mjs,
+// imported above.
 
 function formatUsd(n: number): string {
   return "$" + n.toFixed(2);
-}
-
-// Pure view-model function: turns the exporter's usage-stats.json shape plus
-// "now" into everything the Usage tab renders (tiles, chart, legend, table,
-// projects). `nowDate` is passed in (not read from the clock) so the tile
-// math (today/7d/30d boundaries) and the always-30-entries chart window are
-// unit-testable without mocking time. MIRRORED in usageModel.test.mjs.
-function computeUsageView(stats: UsageStats, nowDate: Date): UsageView {
-  const dayByDate = new Map(stats.days.map((d) => [d.date, d]));
-
-  // A continuous 30-calendar-day window ending today. Days with no transcript
-  // activity are zero-cost placeholders, not omitted, so the chart always has
-  // exactly 30 bars.
-  const windowDays: UsageDay[] = [];
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - i);
-    const key = usageLocalDayKey(d);
-    windowDays.push(dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
-  }
-
-  const todayKey = usageLocalDayKey(nowDate);
-  const todayCostUsd = dayByDate.get(todayKey)?.totalCostUsd || 0;
-  const last7DaysCostUsd = windowDays.slice(-7).reduce((s, d) => s + d.totalCostUsd, 0);
-  const last30DaysCostUsd = windowDays.reduce((s, d) => s + d.totalCostUsd, 0);
-  const last30DaysOutputTokens = windowDays.reduce((s, d) => s + d.totalOutputTokens, 0);
-
-  const maxCost = Math.max(0, ...windowDays.map((d) => d.totalCostUsd));
-  const safeMax = maxCost > 0 ? maxCost : 1;
-
-  const chartDays: UsageChartDay[] = windowDays.map((d) => {
-    const segments: UsageChartSegment[] = [];
-    for (const fam of USAGE_FAMILY_ORDER) {
-      const bucket = d.models[fam];
-      if (!bucket || bucket.costUsd <= 0) continue;
-      segments.push({ family: fam, costUsd: bucket.costUsd, heightFraction: bucket.costUsd / safeMax });
-    }
-    return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
-  });
-
-  const gridlines: UsageGridline[] = [1, 0.5, 0].map((frac) => ({
-    fraction: frac,
-    value: maxCost * frac,
-    label: formatUsd(maxCost * frac),
-  }));
-
-  const xLabelIndices: number[] = [];
-  for (let i = 0; i < windowDays.length; i += 7) xLabelIndices.push(i);
-  if (xLabelIndices[xLabelIndices.length - 1] !== windowDays.length - 1) {
-    xLabelIndices.push(windowDays.length - 1);
-  }
-
-  // 30d per-family totals, feeding both the legend and the breakdown table.
-  const famTotals = new Map<string, UsageFamilyBucket>();
-  for (const d of windowDays) {
-    for (const fam of Object.keys(d.models)) {
-      const b = d.models[fam];
-      const acc = famTotals.get(fam) || usageEmptyBucket();
-      acc.inputTokens += b.inputTokens;
-      acc.outputTokens += b.outputTokens;
-      acc.cacheReadTokens += b.cacheReadTokens;
-      acc.cacheWriteTokens += b.cacheWriteTokens;
-      acc.messages += b.messages;
-      acc.costUsd += b.costUsd;
-      famTotals.set(fam, acc);
-    }
-  }
-
-  const legend: UsageLegendItem[] = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => ({
-    family: f,
-    label: USAGE_FAMILY_LABELS[f],
-    costUsd: famTotals.get(f)!.costUsd,
-  }));
-
-  const table: UsageTableRow[] = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
-    const b = famTotals.get(f)!;
-    return {
-      family: f,
-      label: USAGE_FAMILY_LABELS[f],
-      messages: b.messages,
-      inputTokens: b.inputTokens,
-      outputTokens: b.outputTokens,
-      cacheReadTokens: b.cacheReadTokens,
-      costUsd: b.costUsd,
-    };
-  });
-
-  const projects: UsageProjectRow[] = stats.projects
-    .slice()
-    .sort((a, b) => b.costUsd - a.costUsd)
-    .slice(0, 8)
-    .map((p) => ({ name: p.name, costUsd: p.costUsd, outputTokens: p.outputTokens }));
-
-  return {
-    hasData: stats.days.length > 0,
-    tiles: {
-      todayCostUsd,
-      last7DaysCostUsd,
-      last30DaysCostUsd,
-      last30DaysOutputTokensCompact: formatCompactNumber(last30DaysOutputTokens),
-    },
-    chart: { days: chartDays, maxCost, gridlines, xLabelIndices },
-    legend,
-    table,
-    projects,
-  };
-}
-
-// Known workflow keys in the exporter's classification order. Drives a stable
-// color index per key so the share bar, legend, and table dots never disagree
-// and colors don't shift as costs change between runs. MIRRORED in
-// usageModel.test.mjs.
-const USAGE_WORKFLOW_COLOR_ORDER = [
-  "telegram-bridge",
-  "telegram-ingest",
-  "email-router",
-  "email-followups",
-  "email-postmortem",
-  "email-other",
-  "learning-scan",
-  "interactive",
-];
-const USAGE_WORKFLOW_COLOR_COUNT = 8;
-
-// Stable color index for a workflow key: known keys map to a fixed slot;
-// any future key (added to the exporter's rule table later) falls back to a
-// deterministic hash so it still always lands on the same color.
-function usageWorkflowColorIndex(key: string): number {
-  const idx = USAGE_WORKFLOW_COLOR_ORDER.indexOf(key);
-  if (idx >= 0) return idx;
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
-  return hash % USAGE_WORKFLOW_COLOR_COUNT;
 }
 
 interface UsageWorkflowShareRow {
@@ -1001,37 +537,6 @@ interface UsageWorkflowsView {
   hasData: boolean;
   shareBar: UsageWorkflowShareRow[];
   table: UsageWorkflowTableRow[];
-}
-
-// Pure view-model function: turns the exporter's optional `workflows` block
-// into the share-bar + table shapes the Usage tab renders. Missing/empty
-// `workflows` (old JSON, or a window with no transcripts) yields hasData:
-// false so the caller can hide the whole section. Order is preserved as
-// delivered by the exporter (sorted by costUsd desc). MIRRORED in
-// usageModel.test.mjs.
-function computeWorkflowsView(stats: UsageStats): UsageWorkflowsView {
-  const workflows = stats.workflows;
-  if (!Array.isArray(workflows) || workflows.length === 0) {
-    return { hasData: false, shareBar: [], table: [] };
-  }
-
-  const total = workflows.reduce((s, w) => s + w.costUsd, 0);
-  const safeTotal = total > 0 ? total : 1;
-
-  const shareBar: UsageWorkflowShareRow[] = workflows.map((w) => ({
-    key: w.key,
-    label: w.label,
-    costUsd: w.costUsd,
-    sharePercent: (w.costUsd / safeTotal) * 100,
-    colorIndex: usageWorkflowColorIndex(w.key),
-  }));
-
-  const table: UsageWorkflowTableRow[] = workflows.map((w) => ({
-    ...w,
-    colorIndex: usageWorkflowColorIndex(w.key),
-  }));
-
-  return { hasData: true, shareBar, table };
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,135 +619,9 @@ interface OpsMapLayout {
   height: number;
 }
 
-const OPS_MAP_COLUMNS: { type: OpsMapNodeType; label: string }[] = [
-  { type: "agent", label: "Agents" },
-  { type: "workflow", label: "Workflows" },
-  { type: "sop", label: "SOPs" },
-  { type: "guideline", label: "Guidelines" },
-  { type: "skill", label: "Skills" },
-];
-
-const OPS_MAP_DEFAULTS: Required<OpsMapLayoutOpts> = {
-  columnWidth: 220,
-  rowHeight: 40,
-  nodeWidth: 180,
-  nodeHeight: 28,
-  paddingX: 24,
-  paddingY: 40,
-};
-
-const OPS_MAP_SKILL_SUMMARY_ID = "__skills_summary__";
-
-// MIRRORED in opsMapModel.test.mjs. Deterministic: no randomness, no wall-clock.
-function computeOpsMapLayout(manifest: OpsMapManifest | null | undefined, opts?: OpsMapLayoutOpts): OpsMapLayout {
-  const o = { ...OPS_MAP_DEFAULTS, ...(opts || {}) };
-  const nodes = manifest?.nodes || [];
-  const edges = manifest?.edges || [];
-
-  // Skill visibility rule: a skill is shown individually when it is flagged
-  // registered (listed in Operations/skill-registry.md) OR has at least one
-  // edge to/from a NON-skill node (agent, sop, workflow, guideline).
-  // Skill-pack-internal cross-references (skill->skill only) collapse into the
-  // "+N other skills" summary so third-party packs don't swamp the ops map.
-  const typeById = new Map<string, OpsMapNodeType>();
-  for (const n of nodes) typeById.set(n.id, n.type);
-  const opsConnected = new Set<string>();
-  for (const e of edges) {
-    const fromType = typeById.get(e.from);
-    const toType = typeById.get(e.to);
-    if (fromType === undefined || toType === undefined) continue;
-    if (fromType === "skill" && toType !== "skill") opsConnected.add(e.from);
-    if (toType === "skill" && fromType !== "skill") opsConnected.add(e.to);
-  }
-
-  const columns: OpsMapColumnHeader[] = [];
-  const positioned: OpsMapPositionedNode[] = [];
-  const positionById = new Map<string, OpsMapPositionedNode>();
-
-  OPS_MAP_COLUMNS.forEach((col, columnIndex) => {
-    const colX = o.paddingX + columnIndex * o.columnWidth;
-    let colNodes = nodes.filter((n) => n.type === col.type);
-
-    let collapsedNames: string[] = [];
-    if (col.type === "skill") {
-      const isVisible = (n: OpsMapNode) => n.registered === true || opsConnected.has(n.id);
-      const collapsed = colNodes.filter((n) => !isVisible(n));
-      colNodes = colNodes.filter(isVisible);
-      collapsedNames = collapsed.map((n) => n.label).sort((a, b) => a.localeCompare(b));
-    }
-
-    // Deterministic ordering: sort nodes by id within column.
-    colNodes = [...colNodes].sort((a, b) => a.id.localeCompare(b.id));
-
-    let rowIndex = 0;
-    for (const n of colNodes) {
-      const pos: OpsMapPositionedNode = {
-        id: n.id,
-        type: n.type,
-        label: n.label,
-        description: n.description,
-        path: n.path,
-        external: n.external,
-        column: columnIndex,
-        x: colX,
-        y: o.paddingY + rowIndex * o.rowHeight,
-        width: o.nodeWidth,
-        height: o.nodeHeight,
-      };
-      positioned.push(pos);
-      positionById.set(n.id, pos);
-      rowIndex += 1;
-    }
-
-    if (collapsedNames.length > 0) {
-      const summary: OpsMapPositionedNode = {
-        id: OPS_MAP_SKILL_SUMMARY_ID,
-        type: "skill-summary",
-        label: `+${collapsedNames.length} other skills`,
-        column: columnIndex,
-        x: colX,
-        y: o.paddingY + rowIndex * o.rowHeight,
-        width: o.nodeWidth,
-        height: o.nodeHeight,
-        collapsedNames,
-      };
-      positioned.push(summary);
-      rowIndex += 1;
-    }
-
-    columns.push({ type: col.type, label: col.label, count: colNodes.length, x: colX });
-  });
-
-  // Resolved edges: drop any edge whose endpoint is not a laid-out node
-  // (unknown token, or an endpoint that collapsed into the skills summary).
-  const resolvedEdges: OpsMapResolvedEdge[] = [];
-  for (const e of edges) {
-    const from = positionById.get(e.from);
-    const to = positionById.get(e.to);
-    if (!from || !to) continue;
-    resolvedEdges.push({
-      from: e.from,
-      to: e.to,
-      viaType: e.viaType,
-      x1: from.x + from.width,
-      y1: from.y + from.height / 2,
-      x2: to.x,
-      y2: to.y + to.height / 2,
-    });
-  }
-
-  const rowCounts = OPS_MAP_COLUMNS.map((col, i) => {
-    const base = columns[i].count;
-    const hasSummary = positioned.some((n) => n.type === "skill-summary" && n.column === i);
-    return base + (hasSummary ? 1 : 0);
-  });
-  const maxRows = Math.max(1, ...rowCounts);
-
-  const width = o.paddingX + OPS_MAP_COLUMNS.length * o.columnWidth;
-  const height = o.paddingY + maxRows * o.rowHeight + o.paddingY;
-
-  return { columns, nodes: positioned, edges: resolvedEdges, width, height };
-}
+// computeOpsMapLayout and its constants (OPS_MAP_COLUMNS, OPS_MAP_DEFAULTS,
+// OPS_MAP_SKILL_SUMMARY_ID) now live in model.mjs, imported above.
+// Deterministic: no randomness, no wall-clock.
 
 // ---------------------------------------------------------------------------
 // Writers (the interactive half)
@@ -1383,160 +762,9 @@ async function createQuickTask(
 
 // ---------------------------------------------------------------------------
 // Launch Dispatch: build a launch command (pure, unit-tested in
-// launchModel.test.mjs) and run it (impure, desktop-only). Three modes:
-// terminal (macOS Terminal.app via AppleScript), iterm (iTerm2 via
-// AppleScript), custom (a user shell template run directly).
-//
-// QUOTING: the inner shell command (cd into the vault, run the claude binary,
-// pass the prompt as a single argument) is built with POSIX single-quoting
-// (each argument wrapped in '...', embedded single quotes escaped as '\'').
-// That whole string is then embedded as an AppleScript double-quoted string
-// literal for terminal/iterm modes, so it needs its own escaping pass
-// (backslash and double-quote). Getting the order right (shell-quote first,
-// then AppleScript-quote the result) is what keeps prompts with quotes safe.
+// launchModel.test.mjs; buildLaunchCommand and its quoting helpers now live
+// in model.mjs, imported above) and run it (impure, desktop-only).
 // ---------------------------------------------------------------------------
-
-// Wrap a single shell argument in POSIX single quotes, escaping any embedded
-// single quotes with the standard '\'' technique.
-function shellQuoteSingle(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-// Escape a string for embedding inside an AppleScript double-quoted literal.
-function escapeAppleScriptString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-// Like buildInnerShellCommand but without the cd: the IDE's integrated
-// terminal already opens in the workspace folder.
-function buildInnerShellCommandNoCd(claudeBinary: string, prompt: string | null): string {
-  const parts = [shellQuoteSingle(claudeBinary)];
-  if (prompt != null) parts.push(shellQuoteSingle(prompt));
-  return parts.join(" ");
-}
-
-// The shell command run inside the terminal: cd into the vault, then run the
-// claude binary with the prompt as a single trailing argument (omitted when
-// prompt is null, giving a plain interactive session).
-function buildInnerShellCommand(
-  claudeBinary: string,
-  vaultPath: string,
-  prompt: string | null
-): string {
-  const parts = ["cd", shellQuoteSingle(vaultPath), "&&", shellQuoteSingle(claudeBinary)];
-  if (prompt != null) parts.push(shellQuoteSingle(prompt));
-  return parts.join(" ");
-}
-
-// Pure: returns the exact argv to spawn for a given launch mode. Never touches
-// the filesystem or a process, so it is fully unit-testable.
-function buildLaunchCommand(
-  mode: "terminal" | "iterm" | "app" | "custom",
-  claudeBinary: string,
-  vaultPath: string,
-  prompt: string | null,
-  customCommand: string,
-  ideAppName?: string,
-  openVaultFolder?: boolean,
-  autoSession?: boolean,
-  sessionTarget?: "terminal" | "extension",
-  newSessionCommand?: string
-): string[] {
-  // "app" activates a macOS app (IDE) via open -a; no CLI on PATH required.
-  // By default it does NOT pass the vault path: VS Code forks treat a folder
-  // argument as "open a new workspace window", which yanks the user away from
-  // the window their Claude session already lives in. Activate-only brings the
-  // last-used window forward instead. The prompt cannot be injected into an
-  // IDE session, so the caller copies it to the clipboard (see launchDispatch).
-  // With autoSession, a System Events script (needs Accessibility permission
-  // for Obsidian) opens a fresh integrated terminal in the IDE and paste-runs
-  // the claude command with the prompt: the true one-click flow.
-  if (mode === "app") {
-    const appName = ideAppName || "Antigravity";
-    if (autoSession && sessionTarget === "extension") {
-      // Drive the command palette to open a fresh Claude Code extension
-      // session, then paste the prompt into its input and send it.
-      const paletteCmd = newSessionCommand || "Claude Code: New Session";
-      let script =
-        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
-        `delay 1.5\n` +
-        `tell application "System Events"\n` +
-        `keystroke "p" using {command down, shift down}\n` +
-        `end tell\n` +
-        `delay 0.5\n` +
-        `set the clipboard to "${escapeAppleScriptString(paletteCmd)}"\n` +
-        `tell application "System Events"\n` +
-        `keystroke "v" using {command down}\n` +
-        `delay 0.4\n` +
-        `key code 36\n` +
-        `end tell\n` +
-        `delay 1.5\n`;
-      if (prompt != null) {
-        script +=
-          `set the clipboard to "${escapeAppleScriptString(prompt)}"\n` +
-          `tell application "System Events"\n` +
-          `keystroke "v" using {command down}\n` +
-          `delay 0.3\n` +
-          `key code 36\n` +
-          `end tell`;
-      }
-      return ["osascript", "-e", script.trimEnd()];
-    }
-    if (autoSession) {
-      const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
-      const script =
-        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
-        `delay 1.5\n` +
-        `tell application "System Events"\n` +
-        `keystroke "\`" using {control down, shift down}\n` +
-        `end tell\n` +
-        `delay 1.2\n` +
-        `set the clipboard to "${escapeAppleScriptString(shellCmd)}"\n` +
-        `tell application "System Events"\n` +
-        `keystroke "v" using {command down}\n` +
-        `delay 0.3\n` +
-        `key code 36\n` +
-        `end tell`;
-      return ["osascript", "-e", script];
-    }
-    const argv = ["open", "-a", appName];
-    if (openVaultFolder) argv.push(vaultPath);
-    return argv;
-  }
-  if (mode === "custom") {
-    const vaultArg = shellQuoteSingle(vaultPath);
-    const promptArg = prompt != null ? shellQuoteSingle(prompt) : "";
-    const substituted = customCommand
-      .split("{vault}")
-      .join(vaultArg)
-      .split("{prompt}")
-      .join(promptArg);
-    return ["/bin/sh", "-c", substituted];
-  }
-
-  const inner = buildInnerShellCommand(claudeBinary, vaultPath, prompt);
-  const escaped = escapeAppleScriptString(inner);
-
-  if (mode === "iterm") {
-    const script =
-      `tell application "iTerm2"\n` +
-      `activate\n` +
-      `create window with default profile\n` +
-      `tell current session of current window\n` +
-      `write text "${escaped}"\n` +
-      `end tell\n` +
-      `end tell`;
-    return ["osascript", "-e", script];
-  }
-
-  // terminal
-  const script =
-    `tell application "Terminal"\n` +
-    `activate\n` +
-    `do script "${escaped}"\n` +
-    `end tell`;
-  return ["osascript", "-e", script];
-}
 
 // Impure: spawns the argv built above. Detached and unref'd so the plugin does
 // not wait on (or block Obsidian on) the launched process. Never throws into
@@ -1708,31 +936,8 @@ function priorityMeta(p: number | null): { label: string; cls: string } {
   }
 }
 
-function sortTasks(a: TaskItem, b: TaskItem): number {
-  const pa = a.priority ?? 5;
-  const pb = b.priority ?? 5;
-  if (pa !== pb) return pa - pb;
-  const da = a.due || "9999";
-  const db = b.due || "9999";
-  if (da !== db) return da < db ? -1 : 1;
-  return a.title.localeCompare(b.title);
-}
-
-// Tasks to show inside a phase given the two per-project toggles. Open shows when showOpen,
-// done shows when showComplete; in-progress lives in the DOING NOW strip and cancelled is
-// never shown. Sorted by the shared sortTasks order so open and done interleave in sequence.
-// MIRRORED in viewModel.test.mjs; keep the two in sync.
-function visiblePhaseTasks(
-  phaseTasks: TaskItem[],
-  showOpen: boolean,
-  showComplete: boolean
-): TaskItem[] {
-  return phaseTasks
-    .filter(
-      (t) => (t.status === "open" && showOpen) || (t.status === "done" && showComplete)
-    )
-    .sort(sortTasks);
-}
+// sortTasks and visiblePhaseTasks now live in model.mjs, imported above
+// (unit-tested in viewModel.test.mjs).
 
 // A progress bar: a multi-color gradient (red -> amber -> green) revealed up to pct,
 // plus a "done/total · pct%" label. Calculated, honest (0 when empty). The fill width

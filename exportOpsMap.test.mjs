@@ -1,62 +1,15 @@
 // Tests for the ops-map exporter's pure parts (build 2.5 m2): token
-// extraction, agent/skill refs, and edge dedupe. Mirror of the functions in
-// ~/AIOS/Operations/scripts/export-ops-map.mjs (kept in sync manually; the
-// exporter lives in the vault, not this repo). Run: node exportOpsMap.test.mjs
+// extraction, agent/skill refs, and edge dedupe. Imports the REAL functions
+// from the repo-canonical exporter (vault-scripts/, deployed to the vault by
+// deploy.sh). Importing the exporter never starts a scan (direct-execution
+// guard). Run: node exportOpsMap.test.mjs
 import assert from "node:assert";
-
-const TOKEN_RE = /\b(SOP-\d{3}|WS-\d{3}|GL-\d{3})\b/g;
-
-function extractTokenRefs(body, nodesById) {
-  const found = new Set();
-  let m;
-  TOKEN_RE.lastIndex = 0;
-  while ((m = TOKEN_RE.exec(body))) {
-    const token = m[1];
-    for (const node of nodesById.values()) {
-      if (node.id.startsWith(token)) found.add(node.id);
-    }
-  }
-  for (const node of nodesById.values()) {
-    if (node.type !== "sop" && node.type !== "workflow" && node.type !== "guideline") continue;
-    if (/^(SOP|WS|GL)-\d+/.test(node.id)) continue;
-    const re = new RegExp(`\\b${node.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
-    if (re.test(body)) found.add(node.id);
-  }
-  return found;
-}
-
-function extractAgentRefs(body, agentIds) {
-  const found = new Set();
-  for (const slug of agentIds) {
-    const re = new RegExp(`\\b${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-    if (re.test(body)) found.add(slug);
-  }
-  return found;
-}
-
-// Skill refs require a backtick or forward slash immediately before the name
-// (real refs are always written as `skill-name` or /skill-name).
-function extractSkillRefs(body, skillIds) {
-  const found = new Set();
-  for (const id of skillIds) {
-    const re = new RegExp(`[\`/]${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
-    if (re.test(body)) found.add(id);
-  }
-  return found;
-}
-
-function dedupeEdges(edges) {
-  const seen = new Set();
-  const out = [];
-  for (const e of edges) {
-    if (e.from === e.to) continue;
-    const key = e.from + " " + e.to;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(e);
-  }
-  return out;
-}
+import {
+  extractTokenRefs,
+  extractAgentRefs,
+  extractSkillRefs,
+  dedupeEdges,
+} from "./vault-scripts/export-ops-map.mjs";
 
 // --- token refs: numbered tokens map by id prefix ---
 {

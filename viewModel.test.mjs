@@ -1,43 +1,15 @@
 // Tests for the dashboard view-model helpers (pure): statusChipsFromGroups, splitProjectTasks,
-// categoryChipsFromTasks, tagForTask, filterStandaloneByCategory. Mirrors kept in sync with
-// main.ts. Run: node viewModel.test.mjs
+// categoryChipsFromTasks, tagForTask, filterStandaloneByCategory, visiblePhaseTasks.
+// Imports the SAME module main.ts bundles (model.mjs). Run: node viewModel.test.mjs
 import assert from "node:assert";
-
-function statusChipsFromGroups(groups) {
-  return groups.map((g) => ({ slug: g.slug, label: g.label, count: g.projects.length }));
-}
-function splitProjectTasks(tasks) {
-  return {
-    doing: tasks.filter((t) => t.status === "in-progress"),
-    open: tasks.filter((t) => t.status === "open"),
-    done: tasks.filter((t) => t.status === "done"),
-  };
-}
-function categoryChipsFromTasks(standaloneTasks, buckets) {
-  const out = [];
-  for (const b of buckets) {
-    const count = standaloneTasks.filter((t) => t.lifeAreas.includes(b.slug)).length;
-    if (count > 0) out.push({ slug: b.slug, label: b.label, count });
-  }
-  const known = buckets.map((b) => b.slug);
-  const inboxCount = standaloneTasks.filter((t) => !t.lifeAreas.some((a) => known.includes(a))).length;
-  if (inboxCount > 0) out.push({ slug: "inbox", label: "Inbox", count: inboxCount });
-  return out;
-}
-function tagForTask(task, buckets) {
-  for (const b of buckets) {
-    if (task.lifeAreas.includes(b.slug)) return { slug: b.slug, label: b.label };
-  }
-  return { slug: "inbox", label: "Inbox" };
-}
-function filterStandaloneByCategory(standaloneTasks, categorySlug, buckets) {
-  if (categorySlug === "all") return standaloneTasks;
-  if (categorySlug === "inbox") {
-    const known = buckets.map((b) => b.slug);
-    return standaloneTasks.filter((t) => !t.lifeAreas.some((a) => known.includes(a)));
-  }
-  return standaloneTasks.filter((t) => t.lifeAreas.includes(categorySlug));
-}
+import {
+  statusChipsFromGroups,
+  splitProjectTasks,
+  categoryChipsFromTasks,
+  tagForTask,
+  filterStandaloneByCategory,
+  visiblePhaseTasks,
+} from "./model.mjs";
 
 const BUCKETS = [
   { slug: "work", label: "Work" },
@@ -89,24 +61,7 @@ assert.equal(filterStandaloneByCategory(standalone, "all", BUCKETS).length, 5, "
 assert.equal(filterStandaloneByCategory(standalone, "work", BUCKETS).length, 2, "work filter");
 assert.equal(filterStandaloneByCategory(standalone, "inbox", BUCKETS).length, 2, "inbox filter");
 
-// --- visiblePhaseTasks (MIRROR of main.ts; keep in sync) ---
-function sortTasks(a, b) {
-  const pa = a.priority ?? 5;
-  const pb = b.priority ?? 5;
-  if (pa !== pb) return pa - pb;
-  const da = a.due || "9999";
-  const db = b.due || "9999";
-  if (da !== db) return da < db ? -1 : 1;
-  return a.title.localeCompare(b.title);
-}
-function visiblePhaseTasks(phaseTasks, showOpen, showComplete) {
-  return phaseTasks
-    .filter(
-      (t) => (t.status === "open" && showOpen) || (t.status === "done" && showComplete)
-    )
-    .sort(sortTasks);
-}
-
+// --- visiblePhaseTasks ---
 const PT = (status, title, priority) => ({
   path: "", id: "", title, status, priority: priority ?? null,
   project: "p", phase: "Build", lifeAreas: [], due: null, updated: null,

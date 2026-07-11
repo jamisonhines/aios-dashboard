@@ -1,74 +1,14 @@
-// Tests for the exporter's workflow classifier (build 2.5 m1). Mirror of
-// buildWorkflowRules / classifyWorkflow / extractTextContent in
-// ~/AIOS/Operations/scripts/export-usage-stats.mjs (kept in sync manually;
-// the exporter lives in the vault, not this repo). Run: node exportUsageWorkflows.test.mjs
+// Tests for the exporter's workflow classifier (build 2.5 m1). Imports the
+// REAL functions from the repo-canonical exporter (vault-scripts/, deployed
+// to the vault by deploy.sh). Importing the exporter never starts a scan
+// (direct-execution guard). Run: node exportUsageWorkflows.test.mjs
 import assert from "node:assert";
-
-function extractTextContent(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((block) => (block && typeof block.text === "string" ? block.text : ""))
-      .join("");
-  }
-  return "";
-}
-
-const FIRST_COMMAND_RE = /<command-name>(\/[\w-]+)<\/command-name>/;
-
-function buildWorkflowRules(bridgeSessionIds) {
-  return [
-    {
-      key: "telegram-bridge",
-      label: "Telegram bridge",
-      match: (ctx) => bridgeSessionIds.has(ctx.sessionId),
-    },
-    {
-      key: "telegram-ingest",
-      label: "Telegram ingest (WS-004)",
-      match: (ctx) =>
-        ctx.firstUserContent.startsWith("Run WS-004") ||
-        ctx.firstUserContent.includes("ingest-and-upgrade"),
-    },
-    {
-      key: "email-router",
-      label: "Email router",
-      match: (ctx) => ctx.firstCommand === "/vgb-email-router",
-    },
-    {
-      key: "email-followups",
-      label: "Email follow-ups",
-      match: (ctx) => ctx.firstCommand === "/vgb-draft-followup",
-    },
-    {
-      key: "email-postmortem",
-      label: "Email postmortem",
-      match: (ctx) => ctx.firstCommand === "/vgb-draft-postmortem",
-    },
-    {
-      key: "email-other",
-      label: "Email automation (other)",
-      match: (ctx) => typeof ctx.firstCommand === "string" && ctx.firstCommand.startsWith("/vgb-"),
-    },
-    {
-      key: "learning-scan",
-      label: "Learning scan",
-      match: (ctx) => ctx.project.endsWith("Operations-learning-scan"),
-    },
-    {
-      key: "interactive",
-      label: "Interactive",
-      match: () => true,
-    },
-  ];
-}
-
-function classifyWorkflow(rules, ctx) {
-  for (const rule of rules) {
-    if (rule.match(ctx)) return rule;
-  }
-  return rules[rules.length - 1];
-}
+import {
+  extractTextContent,
+  FIRST_COMMAND_RE,
+  buildWorkflowRules,
+  classifyWorkflow,
+} from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
   return {

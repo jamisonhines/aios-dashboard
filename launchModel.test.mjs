@@ -1,111 +1,12 @@
 // Tests for the Dispatch-launch command builder: buildLaunchCommand (pure).
-// Mirror of the function under test (kept in sync with main.ts). Run: node launchModel.test.mjs
+// Imports the SAME module main.ts bundles (model.mjs). Run: node launchModel.test.mjs
 import assert from "node:assert";
-
-function shellQuoteSingle(value) {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-function escapeAppleScriptString(value) {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function buildInnerShellCommand(claudeBinary, vaultPath, prompt) {
-  const parts = ["cd", shellQuoteSingle(vaultPath), "&&", shellQuoteSingle(claudeBinary)];
-  if (prompt != null) parts.push(shellQuoteSingle(prompt));
-  return parts.join(" ");
-}
-
-function buildInnerShellCommandNoCd(claudeBinary, prompt) {
-  const parts = [shellQuoteSingle(claudeBinary)];
-  if (prompt != null) parts.push(shellQuoteSingle(prompt));
-  return parts.join(" ");
-}
-
-function buildLaunchCommand(mode, claudeBinary, vaultPath, prompt, customCommand, ideAppName, openVaultFolder, autoSession, sessionTarget, newSessionCommand) {
-  if (mode === "app") {
-    const appName = ideAppName || "Antigravity";
-    if (autoSession && sessionTarget === "extension") {
-      const paletteCmd = newSessionCommand || "Claude Code: New Session";
-      let script =
-        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
-        `delay 1.5\n` +
-        `tell application "System Events"\n` +
-        `keystroke "p" using {command down, shift down}\n` +
-        `end tell\n` +
-        `delay 0.5\n` +
-        `set the clipboard to "${escapeAppleScriptString(paletteCmd)}"\n` +
-        `tell application "System Events"\n` +
-        `keystroke "v" using {command down}\n` +
-        `delay 0.4\n` +
-        `key code 36\n` +
-        `end tell\n` +
-        `delay 1.5\n`;
-      if (prompt != null) {
-        script +=
-          `set the clipboard to "${escapeAppleScriptString(prompt)}"\n` +
-          `tell application "System Events"\n` +
-          `keystroke "v" using {command down}\n` +
-          `delay 0.3\n` +
-          `key code 36\n` +
-          `end tell`;
-      }
-      return ["osascript", "-e", script.trimEnd()];
-    }
-    if (autoSession) {
-      const shellCmd = buildInnerShellCommandNoCd(claudeBinary, prompt);
-      const script =
-        `tell application "${escapeAppleScriptString(appName)}" to activate\n` +
-        `delay 1.5\n` +
-        `tell application "System Events"\n` +
-        `keystroke "\`" using {control down, shift down}\n` +
-        `end tell\n` +
-        `delay 1.2\n` +
-        `set the clipboard to "${escapeAppleScriptString(shellCmd)}"\n` +
-        `tell application "System Events"\n` +
-        `keystroke "v" using {command down}\n` +
-        `delay 0.3\n` +
-        `key code 36\n` +
-        `end tell`;
-      return ["osascript", "-e", script];
-    }
-    const argv = ["open", "-a", appName];
-    if (openVaultFolder) argv.push(vaultPath);
-    return argv;
-  }
-  if (mode === "custom") {
-    const vaultArg = shellQuoteSingle(vaultPath);
-    const promptArg = prompt != null ? shellQuoteSingle(prompt) : "";
-    const substituted = customCommand
-      .split("{vault}")
-      .join(vaultArg)
-      .split("{prompt}")
-      .join(promptArg);
-    return ["/bin/sh", "-c", substituted];
-  }
-
-  const inner = buildInnerShellCommand(claudeBinary, vaultPath, prompt);
-  const escaped = escapeAppleScriptString(inner);
-
-  if (mode === "iterm") {
-    const script =
-      `tell application "iTerm2"\n` +
-      `activate\n` +
-      `create window with default profile\n` +
-      `tell current session of current window\n` +
-      `write text "${escaped}"\n` +
-      `end tell\n` +
-      `end tell`;
-    return ["osascript", "-e", script];
-  }
-
-  const script =
-    `tell application "Terminal"\n` +
-    `activate\n` +
-    `do script "${escaped}"\n` +
-    `end tell`;
-  return ["osascript", "-e", script];
-}
+import {
+  escapeAppleScriptString,
+  buildInnerShellCommand,
+  buildInnerShellCommandNoCd,
+  buildLaunchCommand,
+} from "./model.mjs";
 
 // --- terminal mode, null prompt: plain interactive session, no trailing arg ---
 {

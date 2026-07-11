@@ -1,44 +1,12 @@
 // Tests for the project status-sectioning engine: resolveStatusSections (frontmatter
 // override + fallback) and groupProjectsByStatus (fixed order, hide-empty, drift -> Other).
-// Mirrors of the functions under test (kept in sync with main.ts). Run: node groupProjects.test.mjs
+// Imports the SAME module main.ts bundles (model.mjs). Run: node groupProjects.test.mjs
 import assert from "node:assert";
-
-const DEFAULT_STATUS_SECTIONS = [
-  { slug: "active", label: "Active", open: true },
-  { slug: "planning", label: "Planning", open: true },
-  { slug: "paused", label: "Paused", open: true },
-  { slug: "done", label: "Done", open: false },
-  { slug: "archived", label: "Archived", open: false },
-];
-
-function resolveStatusSections(fm) {
-  const raw = fm?.["dashboard_project_statuses"];
-  if (Array.isArray(raw) && raw.length > 0) {
-    const parsed = raw
-      .filter((b) => b && typeof b.slug === "string" && typeof b.label === "string")
-      .map((b) => ({ slug: b.slug, label: b.label, open: b.open !== false }));
-    if (parsed.length > 0) return parsed;
-  }
-  return DEFAULT_STATUS_SECTIONS;
-}
-
-function groupProjectsByStatus(projects, sections) {
-  const known = new Set(sections.map((s) => s.slug));
-  const byName = (a, b) =>
-    a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug);
-  const out = [];
-  for (const sec of sections) {
-    const inSec = projects.filter((p) => p.status === sec.slug).sort(byName);
-    if (inSec.length > 0) {
-      out.push({ slug: sec.slug, label: sec.label, open: sec.open, projects: inSec });
-    }
-  }
-  const drift = projects.filter((p) => !known.has(p.status)).sort(byName);
-  if (drift.length > 0) {
-    out.push({ slug: "other", label: "Other", open: true, projects: drift });
-  }
-  return out;
-}
+import {
+  DEFAULT_STATUS_SECTIONS,
+  resolveStatusSections,
+  groupProjectsByStatus,
+} from "./model.mjs";
 
 // --- resolveStatusSections ---
 assert.equal(resolveStatusSections(undefined).length, 5, "undefined -> 5 defaults");
