@@ -170,6 +170,133 @@
   font-weight: 600;
 }
 
+/* Automations strip: one tile per launchd job, colored by state
+   (error/not-loaded red, overdue yellow, running accent, ok green/neutral).
+   Hidden entirely when automation-health.json is missing. */
+.aios-dashboard-root {
+  --aios-auto-error: var(--aios-p1);
+  --aios-auto-overdue: var(--aios-p2);
+  --aios-auto-running: var(--aios-p3);
+  --aios-auto-ok: var(--aios-done-color);
+}
+.aios-dashboard-root .aios-auto-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--aios-dim);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.aios-dashboard-root .aios-auto-section {
+  margin-bottom: 16px;
+}
+.aios-dashboard-root .aios-auto-strip {
+  margin-bottom: 0;
+}
+.aios-dashboard-root .aios-auto-tile-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.aios-dashboard-root .aios-auto-tile-activity {
+  font-size: 10.5px;
+  color: var(--aios-dim);
+  font-variant-numeric: tabular-nums;
+}
+.aios-dashboard-root .aios-auto-tile-unknown,
+.aios-dashboard-root .aios-auto-tile-error {
+  color: var(--aios-auto-error);
+  border-color: rgba(255, 92, 92, 0.4);
+}
+.aios-dashboard-root .aios-auto-tile-unknown:hover,
+.aios-dashboard-root .aios-auto-tile-error:hover {
+  color: var(--aios-auto-error);
+  border-color: var(--aios-auto-error);
+}
+.aios-dashboard-root .aios-auto-tile-unknown .aios-auto-tile-dot,
+.aios-dashboard-root .aios-auto-tile-error .aios-auto-tile-dot {
+  background: var(--aios-auto-error);
+}
+.aios-dashboard-root .aios-auto-tile-overdue {
+  color: var(--aios-auto-overdue);
+  border-color: rgba(255, 174, 66, 0.4);
+}
+.aios-dashboard-root .aios-auto-tile-overdue:hover {
+  color: var(--aios-auto-overdue);
+  border-color: var(--aios-auto-overdue);
+}
+.aios-dashboard-root .aios-auto-tile-overdue .aios-auto-tile-dot {
+  background: var(--aios-auto-overdue);
+}
+.aios-dashboard-root .aios-auto-tile-running {
+  color: var(--aios-auto-running);
+  border-color: rgba(91, 155, 213, 0.4);
+}
+.aios-dashboard-root .aios-auto-tile-running:hover {
+  color: var(--aios-auto-running);
+  border-color: var(--aios-auto-running);
+}
+.aios-dashboard-root .aios-auto-tile-running .aios-auto-tile-dot {
+  background: var(--aios-auto-running);
+}
+.aios-dashboard-root .aios-auto-tile-ok .aios-auto-tile-dot {
+  background: var(--aios-auto-ok);
+}
+
+/* Automation detail row (expands under the strip on tile click). */
+.aios-dashboard-root .aios-auto-detail {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--aios-panel);
+  border: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-auto-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 18px;
+}
+.aios-dashboard-root .aios-auto-detail-field {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+.aios-dashboard-root .aios-auto-detail-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--aios-dim);
+  flex: 0 0 auto;
+}
+.aios-dashboard-root .aios-auto-detail-value {
+  font-size: 12px;
+  color: var(--aios-text);
+  overflow-wrap: anywhere;
+}
+.aios-dashboard-root .aios-auto-detail .aios-modal-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+}
+.aios-dashboard-root .aios-auto-detail .aios-btn {
+  background: var(--aios-panel-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-auto-detail .aios-btn:hover {
+  border-color: var(--aios-purple);
+}
+.aios-dashboard-root .aios-auto-detail .aios-btn-cta {
+  background: var(--aios-purple);
+  border-color: var(--aios-purple);
+  color: #fff;
+  font-weight: 600;
+}
+
 /* Sections */
 .aios-dashboard-root .aios-section {
   margin-bottom: 26px;

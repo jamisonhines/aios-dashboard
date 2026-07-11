@@ -31,6 +31,7 @@ import {
   computeOpsMapLayout,
   OPS_MAP_DEFAULTS,
   buildLaunchCommand,
+  computeAutomationView,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,7 @@ interface AiosDashboardSettings {
   ideNewSessionCommand: string; // command-palette entry used for the extension target
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
+  automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -110,6 +112,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideNewSessionCommand: "Claude Code: New Session",
   usageStatsPath: "Operations/usage/usage-stats.json",
   opsMapPath: "Operations/ops-map.json",
+  automationHealthPath: "Operations/usage/automation-health.json",
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -1538,6 +1541,160 @@ function renderHealthStrip(
 }
 
 // ---------------------------------------------------------------------------
+// Automations strip: launchd job health, from automation-health.json (written
+// by vault-scripts/export-automation-health.mjs at session start). Pure view
+// model (computeAutomationView) lives in model.mjs; this is the impure half.
+// ---------------------------------------------------------------------------
+
+interface AutomationJob {
+  label: string;
+  schedule: string;
+  lastActivity: string | null;
+  lastExitStatus: number | null;
+  pid: number | null;
+  nextExpected: string | null;
+  state: string;
+  logPath: string | null;
+}
+
+interface AutomationHealth {
+  generatedAt: string;
+  jobs: AutomationJob[];
+}
+
+interface AutomationTile {
+  label: string;
+  shortLabel: string;
+  state: string;
+  stateLabel: string;
+  relativeLastActivity: string;
+  schedule: string;
+  lastExitStatus: number | null;
+  pid: number | null;
+  nextExpected: string | null;
+  nextExpectedRelative: string | null;
+  logPath: string | null;
+  prompt: string;
+}
+
+interface AutomationView {
+  tiles: AutomationTile[];
+  counts: Record<string, number>;
+}
+
+// Reads and defensively parses automation-health.json off the vault adapter.
+// Returns null on any failure (missing file, malformed JSON, unexpected
+// shape) so the caller hides the section entirely, matching the other
+// optional data files.
+async function loadAutomationHealth(
+  app: App,
+  healthPath: string
+): Promise<AutomationHealth | null> {
+  try {
+    const exists = await app.vault.adapter.exists(healthPath);
+    if (!exists) return null;
+    const raw = await app.vault.adapter.read(healthPath);
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.jobs)) return null;
+    return parsed as AutomationHealth;
+  } catch {
+    return null;
+  }
+}
+
+// One expandable detail row shared by all tiles of the strip: clicking a tile
+// populates and shows it (clicking the same tile again collapses it).
+function renderAutomationDetail(
+  app: App,
+  detail: HTMLElement,
+  tile: AutomationTile,
+  settings: AiosDashboardSettings
+) {
+  detail.empty();
+  const grid = detail.createDiv({ cls: "aios-auto-detail-grid" });
+  const mkField = (label: string, value: string) => {
+    const field = grid.createDiv({ cls: "aios-auto-detail-field" });
+    field.createSpan({ cls: "aios-auto-detail-label", text: label });
+    field.createSpan({ cls: "aios-auto-detail-value", text: value });
+  };
+  mkField("Job", tile.label);
+  mkField("Schedule", tile.schedule);
+  mkField("State", tile.stateLabel);
+  mkField("Last exit", tile.lastExitStatus != null ? String(tile.lastExitStatus) : "unknown");
+  mkField(
+    "Next expected",
+    tile.nextExpected
+      ? `${tile.nextExpected.slice(0, 16).replace("T", " ")}${tile.nextExpectedRelative ? " (" + tile.nextExpectedRelative + ")" : ""}`
+      : "n/a"
+  );
+  mkField("Log", tile.logPath || "none");
+
+  const actions = detail.createDiv({ cls: "aios-modal-footer aios-modal-actions" });
+  if (settings.actionsEnabled && Platform.isDesktop) {
+    const fixBtn = actions.createEl("button", {
+      cls: "aios-btn aios-btn-cta",
+      text: "Fix with Dispatch",
+    });
+    fixBtn.addEventListener("click", () => {
+      const base = getVaultBasePath(app);
+      if (!base) return;
+      launchDispatch(settings, base, tile.prompt);
+    });
+  }
+  const copyBtn = actions.createEl("button", { cls: "aios-btn", text: "Copy prompt" });
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(tile.prompt);
+      new Notice("AIOS: prompt copied.");
+    } catch (e) {
+      new Notice("AIOS: could not copy prompt. " + (e?.message || e));
+    }
+  });
+}
+
+// Automations section: async load + render. Hidden entirely (no elements)
+// when automation-health.json is missing, same pattern as the other optional
+// data files.
+function renderAutomationSection(app: App, root: HTMLElement, settings: AiosDashboardSettings) {
+  const section = root.createDiv({ cls: "aios-auto-section" });
+  loadAutomationHealth(app, settings.automationHealthPath).then((health) => {
+    if (!health) {
+      section.remove();
+      return;
+    }
+    const view: AutomationView = computeAutomationView(health, new Date());
+    if (view.tiles.length === 0) {
+      section.remove();
+      return;
+    }
+    section.createDiv({ cls: "aios-auto-head", text: "Automations" });
+    const strip = section.createDiv({ cls: "aios-health-strip aios-auto-strip" });
+    const detail = section.createDiv({ cls: "aios-auto-detail" });
+    detail.hide();
+    let expandedLabel: string | null = null;
+    for (const tile of view.tiles) {
+      const pill = strip.createEl("button", {
+        cls: "aios-health-tile aios-auto-tile aios-auto-tile-" + tile.state,
+      });
+      pill.createSpan({ cls: "aios-auto-tile-dot" });
+      pill.createSpan({ cls: "aios-health-tile-label", text: tile.shortLabel });
+      pill.createSpan({ cls: "aios-health-tile-count", text: tile.stateLabel });
+      pill.createSpan({ cls: "aios-auto-tile-activity", text: tile.relativeLastActivity });
+      pill.addEventListener("click", () => {
+        if (expandedLabel === tile.label) {
+          expandedLabel = null;
+          detail.hide();
+          return;
+        }
+        expandedLabel = tile.label;
+        renderAutomationDetail(app, detail, tile, settings);
+        detail.show();
+      });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Usage tab: gather (impure, async) + render.
 // ---------------------------------------------------------------------------
 
@@ -2054,6 +2211,9 @@ function renderDashboard(
     renderHealthStrip(app, root, tiles, settings);
   }
 
+  // ----- Automations strip (launchd job health; hidden when no data file) -----
+  renderAutomationSection(app, root, settings);
+
   // ----- Tab bar -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
   const mkTab = (id: "projects" | "tasks" | "usage" | "opsmap", label: string) => {
@@ -2307,6 +2467,22 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.usageStatsPath)
           .onChange(async (v) => {
             this.plugin.settings.usageStatsPath = v.trim() || DEFAULT_SETTINGS.usageStatsPath;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Automation health path")
+      .setDesc(
+        "Vault-relative path to the exporter's automation-health.json (see node Operations/scripts/export-automation-health.mjs)."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.automationHealthPath)
+          .setValue(this.plugin.settings.automationHealthPath)
+          .onChange(async (v) => {
+            this.plugin.settings.automationHealthPath =
+              v.trim() || DEFAULT_SETTINGS.automationHealthPath;
             await save();
           })
       );

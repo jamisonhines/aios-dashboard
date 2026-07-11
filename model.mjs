@@ -717,6 +717,141 @@ export function computeOpsMapLayout(manifest, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Automation model (pure). renderAutomationSection in main.ts is the impure
+// half that reads automation-health.json off disk and turns it into this
+// plain-data shape. The exporter (vault-scripts/export-automation-health.mjs)
+// already derives state per job; this side only handles presentation:
+// red-first ordering, prefix stripping, relative time, the per-job Dispatch
+// prompt, and the counts-by-state summary milestone 3 needs for the Today tab.
+// ---------------------------------------------------------------------------
+
+// Red-first order, mirrored from the exporter's STATE_ORDER (kept as its own
+// constant so the plugin never has to import the exporter).
+export const AUTOMATION_STATE_ORDER = ["unknown", "error", "overdue", "running", "ok"];
+
+// UI label per state: "unknown" means the label is missing from
+// `launchctl list`, so we surface it as "not loaded" (a red state).
+export const AUTOMATION_STATE_LABELS = {
+  unknown: "not loaded",
+  error: "error",
+  overdue: "overdue",
+  running: "running",
+  ok: "ok",
+};
+
+// Reverse-DNS prefixes stripped from tile labels. Matches the exporter's
+// DEFAULT_LABEL_PREFIXES.
+export const AUTOMATION_LABEL_PREFIXES = ["com.jaymo.", "com.aios.", "ge.vagabondadventures."];
+
+/** "com.jaymo.morning-brief" -> "morning-brief"; unknown prefixes pass through. */
+export function stripAutomationPrefix(label, prefixes = AUTOMATION_LABEL_PREFIXES) {
+  for (const p of prefixes) {
+    if (label.startsWith(p) && label.length > p.length) return label.slice(p.length);
+  }
+  return label;
+}
+
+/**
+ * Compact relative time for a tile: "just now", "5m ago", "3h ago", "2d ago".
+ * Future timestamps (clock skew) clamp to "just now". Null/invalid input
+ * renders "no activity".
+ * @param {string | null} iso
+ * @param {Date} now
+ */
+export function formatRelativeAgo(iso, now) {
+  if (!iso) return "no activity";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "no activity";
+  const diffMs = Math.max(0, now.getTime() - t);
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/** Compact relative time for a future timestamp: "in 3h", "in 2d"; past -> "now". */
+export function formatRelativeUntil(iso, now) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (isNaN(t)) return null;
+  const diffMs = t - now.getTime();
+  if (diffMs <= 0) return "now";
+  const mins = Math.ceil(diffMs / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
+/** Canned "Fix with Dispatch" prompt for one automation job. */
+export function automationFixPrompt(job) {
+  const exit = job.lastExitStatus != null ? job.lastExitStatus : "unknown";
+  const log = job.logPath || "none";
+  return (
+    `The launchd job ${job.label} is in state ${AUTOMATION_STATE_LABELS[job.state] || job.state} ` +
+    `(last exit ${exit}, log ${log}). Diagnose why and propose a fix; ` +
+    `do not restart anything without confirming the root cause first.`
+  );
+}
+
+/**
+ * Counts by state over the job list (every state key always present, zero
+ * when absent). Milestone 3's Today-tab summary consumes this.
+ * @param {{ state: string }[]} jobs
+ * @returns {{ unknown: number, error: number, overdue: number, running: number, ok: number }}
+ */
+export function automationSummaryCounts(jobs) {
+  const counts = { unknown: 0, error: 0, overdue: 0, running: 0, ok: 0 };
+  for (const j of jobs || []) {
+    if (counts[j.state] != null) counts[j.state] += 1;
+  }
+  return counts;
+}
+
+/**
+ * Turn the raw automation-health.json payload into render-ready tiles,
+ * red-first (unknown/error, overdue, running, ok), label a-z within a state.
+ * Defensive: null/malformed input yields an empty tile list.
+ * @param {{ jobs?: any[] } | null} health
+ * @param {Date} now
+ */
+export function computeAutomationView(health, now) {
+  const jobs = Array.isArray(health?.jobs) ? health.jobs : [];
+  const tiles = jobs
+    .filter((j) => j && typeof j.label === "string")
+    .map((j) => {
+      const state = AUTOMATION_STATE_ORDER.includes(j.state) ? j.state : "unknown";
+      return {
+        label: j.label,
+        shortLabel: stripAutomationPrefix(j.label),
+        state,
+        stateLabel: AUTOMATION_STATE_LABELS[state],
+        relativeLastActivity: formatRelativeAgo(j.lastActivity ?? null, now),
+        schedule: j.schedule || "unscheduled",
+        lastExitStatus: j.lastExitStatus ?? null,
+        pid: j.pid ?? null,
+        nextExpected: j.nextExpected ?? null,
+        nextExpectedRelative: formatRelativeUntil(j.nextExpected ?? null, now),
+        logPath: j.logPath ?? null,
+        prompt: automationFixPrompt({
+          label: j.label,
+          state,
+          lastExitStatus: j.lastExitStatus ?? null,
+          logPath: j.logPath ?? null,
+        }),
+      };
+    })
+    .sort(
+      (a, b) =>
+        AUTOMATION_STATE_ORDER.indexOf(a.state) - AUTOMATION_STATE_ORDER.indexOf(b.state) ||
+        a.label.localeCompare(b.label)
+    );
+  return { tiles, counts: automationSummaryCounts(tiles) };
+}
+
+// ---------------------------------------------------------------------------
 // Launch Dispatch: build a launch command. Three modes: terminal (macOS
 // Terminal.app via AppleScript), iterm (iTerm2 via AppleScript), app
 // (activate/auto-session an IDE), custom (a user shell template run
