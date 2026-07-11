@@ -1159,3 +1159,59 @@
   opacity: 0.9;
   stroke: var(--aios-purple);
 }
+
+/* Today tab (build 2.6 m3). */
+.aios-dashboard-root .aios-today-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.aios-dashboard-root .aios-today-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--aios-dim);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+/* Quick capture: one-line input + button, Enter submits. */
+.aios-dashboard-root .aios-quick-capture-row {
+  display: flex;
+  gap: 8px;
+}
+.aios-dashboard-root .aios-quick-capture-input {
+  flex: 1 1 auto;
+  background: var(--aios-panel);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.aios-dashboard-root .aios-quick-capture-input:focus {
+  outline: none;
+  border-color: var(--aios-purple);
+}
+.aios-dashboard-root .aios-quick-capture-btn {
+  margin-top: 0;
+}
+
+/* Compact stat row: today's spend, intake backlog, automation summary. */
+.aios-dashboard-root .aios-today-stats {
+  margin-bottom: 0;
+}
+.aios-dashboard-root .aios-today-auto-tile {
+  cursor: pointer;
+}
+
+/* Spend guardrail warning tile (Today tab and Usage tab). */
+.aios-dashboard-root .aios-budget-warn {
+  background: rgba(255, 92, 92, 0.12);
+  border: 1px solid rgba(255, 92, 92, 0.4);
+  color: var(--aios-p1);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}

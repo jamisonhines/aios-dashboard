@@ -1014,3 +1014,133 @@ export function buildLaunchCommand(
     `end tell`;
   return ["osascript", "-e", script];
 }
+
+// ---------------------------------------------------------------------------
+// Today tab (pure). renderTodayTab in main.ts is the impure half that gathers
+// tasks/usage-stats/automation-health and calls these. Build 2.6 m3.
+// ---------------------------------------------------------------------------
+
+/**
+ * The 3 highest-priority open/in-progress tasks: priority asc (unset -> 5,
+ * matching sortTasks' convention), then created asc (unset sorts last), then
+ * title for a fully deterministic order.
+ * @template {{ status: string, priority: number|null, created: string|null, title: string }} T
+ * @param {T[]} tasks
+ * @param {number} [limit]
+ * @returns {T[]}
+ */
+export function topTasks(tasks, limit = 3) {
+  const eligible = (tasks || []).filter(
+    (t) => t.status === "open" || t.status === "in-progress"
+  );
+  const sorted = eligible.slice().sort((a, b) => {
+    const pa = a.priority ?? 5;
+    const pb = b.priority ?? 5;
+    if (pa !== pb) return pa - pb;
+    const ca = a.created || "9999";
+    const cb = b.created || "9999";
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    return (a.title || "").localeCompare(b.title || "");
+  });
+  return sorted.slice(0, limit);
+}
+
+/** Intake backlog count, reusing the health strip's already-computed intake tile. */
+export function intakeBacklogCount(healthTiles) {
+  const tile = (healthTiles || []).find((t) => t.key === "intake");
+  return tile ? tile.count : 0;
+}
+
+/**
+ * Compact automation summary for the Today tab, e.g. "2 failing, 1 overdue,
+ * 9 ok". "failing" folds in "unknown" (not-loaded, also a red state);
+ * "ok" folds in "running" (a healthy state, not a problem to surface here).
+ * @param {{ unknown?: number, error?: number, overdue?: number, running?: number, ok?: number }} counts
+ */
+export function automationSummaryText(counts) {
+  const c = counts || {};
+  const failing = (c.error || 0) + (c.unknown || 0);
+  const overdue = c.overdue || 0;
+  const ok = (c.ok || 0) + (c.running || 0);
+  return {
+    failing,
+    overdue,
+    ok,
+    text: `${failing} failing, ${overdue} overdue, ${ok} ok`,
+    hasFailing: failing > 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Quick capture (pure). submitQuickCapture in main.ts is the impure half that
+// writes the file through the Obsidian vault API.
+// ---------------------------------------------------------------------------
+
+/**
+ * Filename stem (no extension) for a quick-capture note, from local wall-clock
+ * time: "YYYY-MM-DD-HHmm-quick-capture".
+ * @param {Date} d
+ */
+export function quickCaptureFileStem(d) {
+  const p2 = (n) => (n < 10 ? "0" + n : "" + n);
+  return (
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-` +
+    `${p2(d.getHours())}${p2(d.getMinutes())}-quick-capture`
+  );
+}
+
+/**
+ * Collision-safe filename stem: if `baseStem` is already taken, append -2,
+ * -3, ... until a free name is found.
+ * @param {string} baseStem
+ * @param {Iterable<string>} existingStems
+ */
+export function resolveCaptureFileName(baseStem, existingStems) {
+  const exists = new Set(existingStems || []);
+  if (!exists.has(baseStem)) return baseStem;
+  let n = 2;
+  while (exists.has(`${baseStem}-${n}`)) n += 1;
+  return `${baseStem}-${n}`;
+}
+
+/**
+ * Quick-capture note body: the captured text plus a `captured:` frontmatter
+ * line.
+ * @param {string} text
+ * @param {string} capturedIso
+ */
+export function buildQuickCaptureContent(text, capturedIso) {
+  const body = (text || "").trim();
+  return `---\ncaptured: ${capturedIso}\n---\n\n${body}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Spend guardrail (pure). renderTodayTab and renderUsageTab in main.ts both
+// call this with the same inputs so the two warning tiles never disagree.
+// ---------------------------------------------------------------------------
+
+/**
+ * Null when the guardrail is off (dailyBudgetUsd <= 0) or not triggered
+ * (today's cost is at or under budget); otherwise the warning payload.
+ * @param {number} todayCostUsd
+ * @param {number} dailyBudgetUsd
+ */
+export function budgetGuardrail(todayCostUsd, dailyBudgetUsd) {
+  if (!dailyBudgetUsd || dailyBudgetUsd <= 0) return null;
+  if (todayCostUsd <= dailyBudgetUsd) return null;
+  return {
+    todayCostUsd,
+    dailyBudgetUsd,
+    message: `Today $${todayCostUsd.toFixed(2)} of $${dailyBudgetUsd.toFixed(2)} budget (API-equivalent)`,
+  };
+}
+
+// Per-workflow spend-spike detection (share of last-7-days cost vs share of
+// prior-28-days cost) was SKIPPED for build 2.6 m3: usage-stats.json's
+// `workflows` array is aggregated over the whole WINDOW_DAYS window with no
+// per-day breakdown, so a workflow's 7-day and prior-28-day cost shares
+// cannot be computed from the data the exporter currently writes. Per the
+// spec's escape hatch, this was left undone rather than extending the
+// exporter. See vault-scripts/export-usage-stats.mjs: `days[]` carries
+// per-day totals and per-family model buckets, but workflow attribution is
+// only accumulated once, window-wide.

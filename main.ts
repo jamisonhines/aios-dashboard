@@ -32,6 +32,13 @@ import {
   OPS_MAP_DEFAULTS,
   buildLaunchCommand,
   computeAutomationView,
+  topTasks,
+  intakeBacklogCount,
+  automationSummaryText,
+  quickCaptureFileStem,
+  resolveCaptureFileName,
+  buildQuickCaptureContent,
+  budgetGuardrail,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +94,7 @@ interface AiosDashboardSettings {
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
+  dailyBudgetUsd: number; // spend guardrail; 0 = off
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -113,6 +121,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   usageStatsPath: "Operations/usage/usage-stats.json",
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
+  dailyBudgetUsd: 0,
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -138,6 +147,7 @@ interface TaskItem {
   lifeAreas: string[];
   due: string | null;
   updated: string | null;
+  created: string | null;
 }
 
 interface ProjectItem {
@@ -160,7 +170,7 @@ interface Progress {
 // Per-view UI state that must survive the debounced live re-render (v1 was stateless).
 // Not persisted to disk: resets to defaults when Obsidian restarts.
 interface ViewState {
-  activeTab: "projects" | "tasks" | "usage" | "opsmap";
+  activeTab: "today" | "projects" | "tasks" | "usage" | "opsmap";
   activeStatus: string | null; // null = first non-empty status group
   activeCategory: string; // "all" | bucket slug | "inbox"
   expanded: Set<string>; // keys of expanded project cards and phase cards
@@ -168,9 +178,12 @@ interface ViewState {
   completeOn: Set<string>; // project slugs whose Complete toggle is ON (default: Complete OFF)
 }
 
+// Today is the default tab on every fresh render (new ViewState instance).
+// Once the user switches tabs this session, activeTab holds their choice and
+// stays that way across live re-renders (same ViewState instance persists).
 function makeViewState(): ViewState {
   return {
-    activeTab: "projects",
+    activeTab: "today",
     activeStatus: null,
     activeCategory: "all",
     expanded: new Set(),
@@ -273,6 +286,7 @@ function readTasks(app: App, tasksRoot: string): TaskItem[] {
       lifeAreas: asArray(fm.linked_my_life),
       due: isNull(fm.due) ? null : "" + fm.due,
       updated: isNull(fm.updated) ? null : "" + fm.updated,
+      created: isNull(fm.created) ? null : "" + fm.created,
     });
   }
   return out;
@@ -1069,6 +1083,24 @@ function renderTaskRow(
   renderStatusDropdown(app, tasksRoot, row, task, refresh);
 }
 
+// Doing-now strip: in-progress tasks pinned in an accented block, sorted by
+// the shared sortTasks order. Shared by the per-project card (build 2.5) and
+// the Today tab (build 2.6 m3), which passes the full in-progress list
+// across every project instead of one project's split.doing.
+function renderDoingNowStrip(
+  app: App,
+  tasksRoot: string,
+  container: HTMLElement,
+  doingTasks: TaskItem[],
+  refresh: () => void
+) {
+  if (doingTasks.length === 0) return;
+  const strip = container.createDiv({ cls: "aios-doing" });
+  strip.createDiv({ cls: "aios-doing-label", text: "DOING NOW" });
+  const list = strip.createDiv({ cls: "aios-list" });
+  for (const t of doingTasks.slice().sort(sortTasks)) renderTaskRow(app, tasksRoot, list, t, refresh);
+}
+
 function addButton(
   container: HTMLElement,
   app: App,
@@ -1171,12 +1203,7 @@ function renderProjectCard(
   const split = splitProjectTasks(projTasks);
 
   // Doing now strip: in-progress tasks pinned at the top with an accent.
-  if (split.doing.length > 0) {
-    const strip = body.createDiv({ cls: "aios-doing" });
-    strip.createDiv({ cls: "aios-doing-label", text: "DOING NOW" });
-    const list = strip.createDiv({ cls: "aios-list" });
-    for (const t of split.doing.slice().sort(sortTasks)) renderTaskRow(app, tasksRoot, list, t, refresh);
-  }
+  renderDoingNowStrip(app, tasksRoot, body, split.doing, refresh);
 
   // Per-project view toggles: Open shows open tasks, Complete shows done tasks. In-progress
   // lives in the DOING NOW strip above; cancelled is never shown.
@@ -1947,7 +1974,24 @@ function renderUsageWorkflowsSection(container: HTMLElement, view: UsageWorkflow
   renderUsageWorkflowTable(container, view.table);
 }
 
-function renderUsageView(container: HTMLElement, view: UsageView, workflowsView: UsageWorkflowsView) {
+// Spend-guardrail warning tile, shared by the Today tab and the Usage tab so
+// the two never disagree (both call budgetGuardrail with the same inputs).
+// Renders nothing when the guardrail is off or not triggered.
+function renderBudgetWarning(
+  container: HTMLElement,
+  guardrail: { todayCostUsd: number; dailyBudgetUsd: number; message: string } | null
+) {
+  if (!guardrail) return;
+  container.createDiv({ cls: "aios-budget-warn" }).setText(guardrail.message);
+}
+
+function renderUsageView(
+  container: HTMLElement,
+  view: UsageView,
+  workflowsView: UsageWorkflowsView,
+  dailyBudgetUsd: number
+) {
+  renderBudgetWarning(container, budgetGuardrail(view.tiles.todayCostUsd, dailyBudgetUsd));
   renderUsageTiles(container, view);
   renderUsageChart(container, view.chart);
   renderUsageLegend(container, view.legend);
@@ -1978,8 +2022,160 @@ function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboar
     }
     const view = computeUsageView(stats, new Date());
     const workflowsView = computeWorkflowsView(stats);
-    renderUsageView(wrap, view, workflowsView);
+    renderUsageView(wrap, view, workflowsView, settings.dailyBudgetUsd);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Today tab: DOING NOW (global) + top 3 tasks + quick capture + a compact
+// stat row (spend, intake backlog, automation summary) + the spend-guardrail
+// warning tile. Build 2.6 m3.
+// ---------------------------------------------------------------------------
+
+// Quick-capture write: collision-safe filename via resolveCaptureFileName
+// (model.mjs, pure), existing names gathered synchronously from the
+// already-loaded vault index (no extra I/O). Notice on both success and
+// failure, matching createQuickTask's pattern. Returns true on success so
+// the caller knows whether to clear the input.
+async function submitQuickCapture(
+  app: App,
+  settings: AiosDashboardSettings,
+  rawText: string
+): Promise<boolean> {
+  const text = rawText.trim();
+  if (!text) return false;
+  try {
+    await ensureFolder(app, settings.intakeFolder);
+    const folderPath = normalizePath(settings.intakeFolder);
+    const existingStems = app.vault
+      .getFiles()
+      .filter((f) => f.parent?.path === folderPath)
+      .map((f) => f.basename);
+    const stem = resolveCaptureFileName(quickCaptureFileStem(new Date()), existingStems);
+    const path = `${settings.intakeFolder}/${stem}.md`;
+    const content = buildQuickCaptureContent(text, nowIso());
+    await app.vault.create(path, content);
+    new Notice("Captured to Intake");
+    return true;
+  } catch (e) {
+    new Notice("AIOS: could not capture. " + (e?.message || e));
+    return false;
+  }
+}
+
+function renderQuickCapture(app: App, settings: AiosDashboardSettings, container: HTMLElement) {
+  const section = container.createDiv({ cls: "aios-today-section aios-quick-capture" });
+  section.createDiv({ cls: "aios-today-section-label", text: "QUICK CAPTURE" });
+  const row = section.createDiv({ cls: "aios-quick-capture-row" });
+  const input = row.createEl("input", {
+    cls: "aios-quick-capture-input",
+    attr: { type: "text", placeholder: "Capture a thought..." },
+  }) as HTMLInputElement;
+  const btn = row.createEl("button", { cls: "aios-add aios-quick-capture-btn", text: "Capture" });
+
+  const submit = async () => {
+    const value = input.value;
+    if (!value.trim()) return;
+    const ok = await submitQuickCapture(app, settings, value);
+    if (ok) input.value = "";
+  };
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      void submit();
+    }
+  });
+}
+
+function renderTopTasksSection(
+  app: App,
+  tasksRoot: string,
+  container: HTMLElement,
+  tasks: TaskItem[],
+  refresh: () => void
+) {
+  const section = container.createDiv({ cls: "aios-today-section" });
+  section.createDiv({ cls: "aios-today-section-label", text: "TOP TASKS" });
+  const top = topTasks(tasks, 3);
+  if (top.length === 0) {
+    section.createDiv({ cls: "aios-empty", text: "No open tasks." });
+    return;
+  }
+  const list = section.createDiv({ cls: "aios-list" });
+  for (const t of top) renderTaskRow(app, tasksRoot, list, t, refresh);
+}
+
+// Compact stat row: today's spend + automation summary load async (usage-stats.json,
+// automation-health.json); intake backlog is synchronous (reuses the already-computed
+// health tiles, same source the health strip renders from). Missing data files render
+// "n/a" / hide the automations stat, same optional-data pattern as their own tabs.
+function renderTodayStatRow(
+  app: App,
+  settings: AiosDashboardSettings,
+  container: HTMLElement,
+  healthTiles: HealthTile[]
+) {
+  const row = container.createDiv({ cls: "aios-today-stats aios-usage-tiles" });
+  const guardrailSlot = container.createDiv({ cls: "aios-today-guardrail" });
+
+  const mkTile = (label: string) => {
+    const tile = row.createDiv({ cls: "aios-health-tile aios-usage-tile" });
+    tile.createSpan({ cls: "aios-health-tile-label", text: label });
+    const val = tile.createSpan({ cls: "aios-health-tile-count", text: "..." });
+    return { tile, val };
+  };
+
+  const spend = mkTile("Today's spend");
+  const intake = mkTile("Intake backlog");
+  intake.val.setText(String(intakeBacklogCount(healthTiles)));
+
+  const auto = mkTile("Automations");
+  auto.tile.addClass("aios-today-auto-tile");
+  auto.tile.addEventListener("click", () => {
+    const autoSection = container.closest(".aios-dashboard-root")?.querySelector(".aios-auto-section");
+    if (autoSection) autoSection.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  loadUsageStats(app, settings.usageStatsPath).then((stats) => {
+    if (!stats) {
+      spend.val.setText("n/a");
+      return;
+    }
+    const view = computeUsageView(stats, new Date());
+    spend.val.setText(formatUsd(view.tiles.todayCostUsd));
+    renderBudgetWarning(guardrailSlot, budgetGuardrail(view.tiles.todayCostUsd, settings.dailyBudgetUsd));
+  });
+
+  loadAutomationHealth(app, settings.automationHealthPath).then((health) => {
+    if (!health) {
+      auto.tile.remove();
+      return;
+    }
+    const view = computeAutomationView(health, new Date());
+    const summary = automationSummaryText(view.counts);
+    auto.val.setText(summary.text);
+    if (summary.hasFailing) auto.tile.addClass("aios-health-tile-warn");
+  });
+}
+
+function renderTodayTab(
+  app: App,
+  container: HTMLElement,
+  settings: AiosDashboardSettings,
+  tasksRoot: string,
+  tasks: TaskItem[],
+  healthTiles: HealthTile[],
+  refresh: () => void
+) {
+  const wrap = container.createDiv({ cls: "aios-today-tab" });
+
+  const doing = tasks.filter((t) => t.status === "in-progress");
+  renderDoingNowStrip(app, tasksRoot, wrap, doing, refresh);
+
+  renderTopTasksSection(app, tasksRoot, wrap, tasks, refresh);
+  renderQuickCapture(app, settings, wrap);
+  renderTodayStatRow(app, settings, wrap, healthTiles);
 }
 
 // ---------------------------------------------------------------------------
@@ -2205,10 +2401,13 @@ function renderDashboard(
   }
 
   // ----- Health strip -----
+  // Computed unconditionally (not gated on showHealthStrip) so the Today
+  // tab's intake-backlog stat has the same source of truth even when the
+  // strip itself is hidden by user choice.
+  const healthInput = gatherHealthInput(app, settings, tasks, projects);
+  const healthTiles = computeHealth(healthInput);
   if (settings.showHealthStrip) {
-    const healthInput = gatherHealthInput(app, settings, tasks, projects);
-    const tiles = computeHealth(healthInput);
-    renderHealthStrip(app, root, tiles, settings);
+    renderHealthStrip(app, root, healthTiles, settings);
   }
 
   // ----- Automations strip (launchd job health; hidden when no data file) -----
@@ -2216,7 +2415,7 @@ function renderDashboard(
 
   // ----- Tab bar -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
-  const mkTab = (id: "projects" | "tasks" | "usage" | "opsmap", label: string) => {
+  const mkTab = (id: "today" | "projects" | "tasks" | "usage" | "opsmap", label: string) => {
     const t = tabs.createEl("button", {
       cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
       text: label,
@@ -2226,6 +2425,7 @@ function renderDashboard(
       refresh();
     });
   };
+  mkTab("today", "Today");
   mkTab("projects", "Projects");
   mkTab("tasks", "Tasks");
   mkTab("usage", "Usage");
@@ -2233,7 +2433,9 @@ function renderDashboard(
 
   // ----- Tab body -----
   const body = root.createDiv({ cls: "aios-tab-body" });
-  if (viewState.activeTab === "tasks") {
+  if (viewState.activeTab === "today") {
+    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh);
+  } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else if (viewState.activeTab === "usage") {
     renderUsageTab(app, body, settings);
@@ -2395,6 +2597,22 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           this.plugin.settings.showHealthStrip = v;
           await save();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Daily budget (USD)")
+      .setDesc(
+        "Spend guardrail: warn on the Today and Usage tabs when today's API-equivalent cost exceeds this. 0 = off."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(String(DEFAULT_SETTINGS.dailyBudgetUsd))
+          .setValue(String(this.plugin.settings.dailyBudgetUsd))
+          .onChange(async (v) => {
+            const n = Number(v);
+            this.plugin.settings.dailyBudgetUsd = isNaN(n) ? DEFAULT_SETTINGS.dailyBudgetUsd : n;
+            await save();
+          })
       );
 
     new Setting(containerEl)
