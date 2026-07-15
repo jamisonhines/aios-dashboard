@@ -1023,6 +1023,7 @@ function renderStatusDropdown(
 ) {
   const meta = statusCtlMeta(task.status);
   const btn = row.createEl("button", { cls: "aios-status-ctl " + meta.cls });
+  btn.createSpan({ cls: "aios-ctl-dot" });
   btn.createSpan({ cls: "aios-ctl-label", text: meta.label });
   btn.createSpan({ cls: "aios-ctl-caret", text: "▾" });
   btn.setAttr("aria-label", "Change task status");
@@ -2416,7 +2417,6 @@ function renderDashboard(
   const titleBlock = header.createDiv({ cls: "aios-title-block" });
   titleBlock.createDiv({ cls: "aios-eyebrow", text: "OPERATIONS CONSOLE" });
   titleBlock.createEl("h1", { text: settings.headerTitle });
-  header.createSpan({ cls: "aios-header-dot", text: "·" });
   const stat = header.createDiv({ cls: "aios-stat" });
   const activeCount = projects.filter((p) => p.status === "active").length;
   stat.setText(`${openTasks.length} open · ${activeCount} active`);
