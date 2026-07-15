@@ -1154,10 +1154,12 @@
    Usage tab
 --------------------------------------------------------------------- */
 .aios-dashboard-root {
-  --aios-usage-fable: var(--aios-p1);
-  --aios-usage-opus: var(--aios-accent);
-  --aios-usage-sonnet: var(--aios-p3);
-  --aios-usage-haiku: var(--aios-done-color);
+  /* Model-family colors: accent family + blue/green. Red stays reserved for
+     errors (design r3: semantic colors carry meaning only). */
+  --aios-usage-fable: #c4b5fd;
+  --aios-usage-opus: #7c4dff;
+  --aios-usage-sonnet: #6ca7f4;
+  --aios-usage-haiku: #40d69a;
   --aios-usage-other: var(--aios-faint);
 }
 
