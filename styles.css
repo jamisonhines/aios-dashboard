@@ -1,115 +1,305 @@
-/* AIOS Dashboard - bespoke dark styling.
-   Scoped under .aios-dashboard-root so it never bleeds into the rest of Obsidian. */
+/* AIOS Dashboard - "real application" pass (build 2.7).
+   A violet-cast dark console where the ONLY loud element is a single signature
+   gradient, used in exactly three places (app mark, active nav pill, progress
+   fill). Everything else is quiet layered surfaces. Scoped under
+   .aios-dashboard-root so it never bleeds into the rest of Obsidian. */
 
 .aios-dashboard-root {
-  --aios-bg: #0a0a0a;
-  --aios-panel: #242424;       /* card: dark grey */
-  --aios-panel-2: #2e2e2e;     /* task hover */
-  --aios-track: #161616;       /* progress-bar empty mask */
-  --aios-border: #333;
-  --aios-text: #f2f2f2;
-  --aios-dim: #8a8a8a;
-  /* Obsidian's own accent (purple by default); falls back if unset. */
-  --aios-purple: var(--interactive-accent, #7c3aed);
-  --aios-p1: #ff5c5c;
-  --aios-p2: #ffae42;
-  --aios-p3: #5b9bd5;
-  --aios-p4: #6f6f6f;
-  --aios-wip: #b07cff;
-  --aios-done-color: #3ecf8e;
+  /* ----- Tokens ----- */
+  --aios-bg: #131020;
+  --aios-surface: #1a1626;
+  --aios-surface-2: #221c33;
+  --aios-track: #0f0d18;
+  --aios-border: #2b2440;
+  --aios-border-hi: #4a3b76;
+  --aios-accent: var(--interactive-accent, #8b5cf6);
+  --aios-accent-hi: #a78bfa;
+  --aios-grad: linear-gradient(135deg, #6d28d9, #a78bfa);
+  --aios-text: #ece8f7;
+  --aios-dim: #9c93b8;
+  --aios-faint: #6b6485;
+
+  /* Old names kept as aliases so nothing elsewhere in this file (or a fork's
+     overrides) has to change to pick up the new palette. */
+  --aios-panel: var(--aios-surface);
+  --aios-panel-2: var(--aios-surface-2);
+  --aios-purple: var(--aios-accent);
   --aios-white: #fff;
-  --aios-foot-color: #5a5a5a;
-  /* Progress gradient stops (override these to change bar color ramp). */
-  --aios-grad-0: #ff4d4d;
-  --aios-grad-1: #ff8a3d;
-  --aios-grad-2: #ffd23f;
-  --aios-grad-3: #9ad13f;
-  --aios-grad-4: #3ecf8e;
+  --aios-foot-color: var(--aios-faint);
+
+  /* Semantic, tuned for violet dark. */
+  --aios-p1: #f97066;
+  --aios-p2: #f7b955;
+  --aios-p3: #6ca7f4;
+  --aios-p4: #6b6485;
+  --aios-done-color: #40d69a;
+  --aios-wip: #a78bfa;
+
+  /* Progress-ramp vars stay defined (charts reference them) but are now a
+     violet-anchored ramp instead of a red-to-green rainbow. */
+  --aios-grad-0: #3b2d63;
+  --aios-grad-1: #5b3fa8;
+  --aios-grad-2: #7c4dff;
+  --aios-grad-3: #9d7bff;
+  --aios-grad-4: #c4b5fd;
 
   padding: 20px 22px 40px;
   background: var(--aios-bg);
   color: var(--aios-text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
   min-height: 100%;
   overflow-y: auto;
 }
 
-/* Header */
+/* Numbers everywhere read as a table: stats, counts, costs, table cells. */
+.aios-dashboard-root .aios-stat,
+.aios-dashboard-root .aios-chip-count,
+.aios-dashboard-root .aios-health-tile-count,
+.aios-dashboard-root .aios-bar-label,
+.aios-dashboard-root .aios-auto-tile-activity,
+.aios-dashboard-root .aios-opsmap-header-count,
+.aios-dashboard-root .aios-usage-table td,
+.aios-dashboard-root .aios-usage-legend-cost,
+.aios-dashboard-root .aios-done-row {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Every interactive element gets a visible, consistent focus ring. */
+.aios-dashboard-root button:focus-visible,
+.aios-dashboard-root [tabindex]:focus-visible,
+.aios-dashboard-root a:focus-visible,
+.aios-dashboard-root input:focus-visible,
+.aios-modal button:focus-visible,
+.aios-modal input:focus-visible,
+.aios-modal a:focus-visible {
+  outline: 2px solid var(--aios-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aios-dashboard-root *,
+  .aios-dashboard-root *::before,
+  .aios-dashboard-root *::after,
+  .aios-modal *,
+  .aios-modal *::before,
+  .aios-modal *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------------
+   App bar
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-header {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   border-bottom: 1px solid var(--aios-border);
-  padding-bottom: 14px;
+  padding-bottom: 16px;
   margin-bottom: 18px;
 }
-.aios-dashboard-root .aios-header h1 {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 1.5px;
+.aios-dashboard-root .aios-app-mark {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--aios-grad);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+.aios-dashboard-root .aios-app-mark svg {
+  width: 17px;
+  height: 17px;
+}
+.aios-dashboard-root .aios-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.aios-dashboard-root .aios-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: var(--aios-faint);
+}
+.aios-dashboard-root .aios-header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: normal;
+  text-transform: none;
   margin: 0;
   color: var(--aios-text);
+  line-height: 1.2;
+}
+.aios-dashboard-root .aios-header-dot {
+  flex: 0 0 auto;
+  color: var(--aios-faint);
+  font-size: 12px;
 }
 .aios-dashboard-root .aios-stat {
   color: var(--aios-dim);
-  font-size: 13px;
-  flex: 1;
-}
-.aios-dashboard-root .aios-refresh {
-  background: var(--aios-panel-2);
-  color: var(--aios-text);
-  border: 1px solid var(--aios-border);
-  border-radius: 0;
-  padding: 5px 12px;
   font-size: 12px;
-  cursor: pointer;
+  white-space: nowrap;
 }
-.aios-dashboard-root .aios-refresh:hover {
-  border-color: var(--aios-purple);
+.aios-dashboard-root .aios-header-spacer {
+  flex: 1 1 auto;
 }
-.aios-dashboard-root .aios-ask-dispatch {
-  border-color: var(--aios-purple);
-  color: var(--aios-text);
+.aios-dashboard-root .aios-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
-/* Health strip: small pills in one row, above the tab bar. Hidden entirely by
-   settings.showHealthStrip=false (no elements rendered) or when computeHealth
-   returns no tiles (all-healthy vault). */
+/* Ghost icon-only buttons (refresh, send, open-project-note...). */
+.aios-dashboard-root .aios-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: transparent;
+  color: var(--aios-dim);
+  border: 1px solid var(--aios-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+.aios-dashboard-root .aios-icon-btn:hover {
+  color: var(--aios-text);
+  border-color: var(--aios-border-hi);
+  background: var(--aios-surface-2);
+}
+.aios-dashboard-root .aios-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.aios-dashboard-root .aios-refresh {
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+.aios-dashboard-root .aios-refresh:hover {
+  border-color: var(--aios-border-hi);
+}
+/* Icon-only refresh button in the app bar (text-less; setIcon fills it). */
+.aios-dashboard-root .aios-header-actions .aios-refresh {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+.aios-dashboard-root .aios-header-actions .aios-refresh svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Primary "Ask Dispatch" button: the signature gradient, used sparingly. */
+.aios-dashboard-root .aios-ask-dispatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--aios-grad);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  width: auto;
+  height: auto;
+  padding: 7px 14px 7px 12px;
+  border-radius: 8px;
+}
+.aios-dashboard-root .aios-ask-dispatch:hover {
+  border-color: transparent;
+  filter: brightness(1.08);
+}
+.aios-dashboard-root .aios-ask-dispatch svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------------------------------------------------------------------
+   Section eyebrows (SYSTEMS / AUTOMATIONS): label + hairline rule.
+--------------------------------------------------------------------- */
+.aios-dashboard-root .aios-auto-head,
+.aios-dashboard-root .aios-section-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--aios-faint);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.aios-dashboard-root .aios-auto-head::after,
+.aios-dashboard-root .aios-section-eyebrow::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--aios-border);
+}
+.aios-dashboard-root .aios-health-section {
+  margin-bottom: 16px;
+}
+.aios-dashboard-root .aios-auto-section {
+  margin-bottom: 16px;
+}
+.aios-dashboard-root .aios-auto-strip {
+  margin-bottom: 0;
+}
+
+/* ---------------------------------------------------------------------
+   Health strip + Automations: dot-chips.
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-health-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 .aios-dashboard-root .aios-health-tile {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--aios-panel);
+  background: var(--aios-surface);
   color: var(--aios-dim);
-  border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border: none;
+  border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: border-color 0.12s ease, color 0.12s ease;
+  transition: background 140ms ease, color 140ms ease;
 }
 .aios-dashboard-root .aios-health-tile:hover {
   color: var(--aios-text);
-  border-color: var(--aios-purple);
+  background: var(--aios-surface-2);
 }
 .aios-dashboard-root .aios-health-tile-warn {
   color: var(--aios-p1);
-  border-color: rgba(255, 92, 92, 0.4);
+  background: rgba(249, 112, 102, 0.1);
 }
 .aios-dashboard-root .aios-health-tile-warn:hover {
-  border-color: var(--aios-p1);
+  background: rgba(249, 112, 102, 0.16);
 }
 .aios-dashboard-root .aios-health-tile-count {
   font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
   opacity: 0.85;
 }
 
@@ -134,7 +324,7 @@
   text-decoration: none;
 }
 .aios-health-modal-link:hover {
-  color: var(--aios-purple);
+  color: var(--aios-accent-hi);
   text-decoration: underline;
 }
 .aios-health-modal-detail {
@@ -152,46 +342,35 @@
   border-top: 1px solid var(--aios-border);
 }
 .aios-modal .aios-btn {
-  background: var(--aios-panel-2);
+  background: var(--aios-surface-2);
   color: var(--aios-text);
   border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border-radius: 8px;
   padding: 6px 14px;
   font-size: 12px;
   cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
 }
 .aios-modal .aios-btn:hover {
-  border-color: var(--aios-purple);
+  border-color: var(--aios-border-hi);
 }
 .aios-modal .aios-btn-cta {
-  background: var(--aios-purple);
-  border-color: var(--aios-purple);
+  background: var(--aios-grad);
+  border-color: transparent;
   color: #fff;
   font-weight: 600;
 }
+.aios-modal .aios-btn-cta:hover {
+  filter: brightness(1.08);
+}
 
 /* Automations strip: one tile per launchd job, colored by state
-   (error/not-loaded red, overdue yellow, running accent, ok green/neutral).
-   Hidden entirely when automation-health.json is missing. */
+   (error/not-loaded red, overdue yellow, running accent, ok green/neutral). */
 .aios-dashboard-root {
   --aios-auto-error: var(--aios-p1);
   --aios-auto-overdue: var(--aios-p2);
   --aios-auto-running: var(--aios-p3);
   --aios-auto-ok: var(--aios-done-color);
-}
-.aios-dashboard-root .aios-auto-head {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 1.4px;
-  color: var(--aios-dim);
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-.aios-dashboard-root .aios-auto-section {
-  margin-bottom: 16px;
-}
-.aios-dashboard-root .aios-auto-strip {
-  margin-bottom: 0;
 }
 .aios-dashboard-root .aios-auto-tile-dot {
   width: 7px;
@@ -202,54 +381,58 @@
 .aios-dashboard-root .aios-auto-tile-activity {
   font-size: 10.5px;
   color: var(--aios-dim);
-  font-variant-numeric: tabular-nums;
 }
 .aios-dashboard-root .aios-auto-tile-unknown,
 .aios-dashboard-root .aios-auto-tile-error {
   color: var(--aios-auto-error);
-  border-color: rgba(255, 92, 92, 0.4);
+  background: rgba(249, 112, 102, 0.1);
 }
 .aios-dashboard-root .aios-auto-tile-unknown:hover,
 .aios-dashboard-root .aios-auto-tile-error:hover {
   color: var(--aios-auto-error);
-  border-color: var(--aios-auto-error);
+  background: rgba(249, 112, 102, 0.16);
 }
 .aios-dashboard-root .aios-auto-tile-unknown .aios-auto-tile-dot,
 .aios-dashboard-root .aios-auto-tile-error .aios-auto-tile-dot {
   background: var(--aios-auto-error);
+  box-shadow: 0 0 6px rgba(249, 112, 102, 0.4);
 }
 .aios-dashboard-root .aios-auto-tile-overdue {
   color: var(--aios-auto-overdue);
-  border-color: rgba(255, 174, 66, 0.4);
+  background: rgba(247, 185, 85, 0.1);
 }
 .aios-dashboard-root .aios-auto-tile-overdue:hover {
   color: var(--aios-auto-overdue);
-  border-color: var(--aios-auto-overdue);
+  background: rgba(247, 185, 85, 0.16);
 }
 .aios-dashboard-root .aios-auto-tile-overdue .aios-auto-tile-dot {
   background: var(--aios-auto-overdue);
+  box-shadow: 0 0 6px rgba(247, 185, 85, 0.4);
 }
 .aios-dashboard-root .aios-auto-tile-running {
   color: var(--aios-auto-running);
-  border-color: rgba(91, 155, 213, 0.4);
+  background: rgba(108, 167, 244, 0.1);
 }
 .aios-dashboard-root .aios-auto-tile-running:hover {
   color: var(--aios-auto-running);
-  border-color: var(--aios-auto-running);
+  background: rgba(108, 167, 244, 0.16);
 }
 .aios-dashboard-root .aios-auto-tile-running .aios-auto-tile-dot {
   background: var(--aios-auto-running);
+  box-shadow: 0 0 6px rgba(108, 167, 244, 0.4);
 }
 .aios-dashboard-root .aios-auto-tile-ok .aios-auto-tile-dot {
   background: var(--aios-auto-ok);
+  box-shadow: 0 0 6px rgba(64, 214, 154, 0.4);
 }
 
 /* Automation detail row (expands under the strip on tile click). */
 .aios-dashboard-root .aios-auto-detail {
   margin-top: 8px;
-  padding: 10px 12px;
-  background: var(--aios-panel);
+  padding: 12px 14px;
+  background: var(--aios-surface);
   border: 1px solid var(--aios-border);
+  border-radius: 12px;
 }
 .aios-dashboard-root .aios-auto-detail-grid {
   display: grid;
@@ -279,48 +462,53 @@
   padding-top: 10px;
 }
 .aios-dashboard-root .aios-auto-detail .aios-btn {
-  background: var(--aios-panel-2);
+  background: var(--aios-surface-2);
   color: var(--aios-text);
   border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border-radius: 8px;
   padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
 }
 .aios-dashboard-root .aios-auto-detail .aios-btn:hover {
-  border-color: var(--aios-purple);
+  border-color: var(--aios-border-hi);
 }
 .aios-dashboard-root .aios-auto-detail .aios-btn-cta {
-  background: var(--aios-purple);
-  border-color: var(--aios-purple);
+  background: var(--aios-grad);
+  border-color: transparent;
   color: #fff;
   font-weight: 600;
 }
 
-/* Sections */
+/* ---------------------------------------------------------------------
+   Sections
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-section {
   margin-bottom: 26px;
 }
 .aios-dashboard-root .aios-section > h2 {
-  font-size: 13px;
+  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 1.4px;
+  letter-spacing: 0.08em;
   color: var(--aios-dim);
   margin: 0 0 12px;
   font-weight: 600;
 }
 
-/* Cards: squared, dark grey, purple border on hover */
+/* ---------------------------------------------------------------------
+   Cards
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-card {
-  background: var(--aios-panel);
+  background: var(--aios-surface);
   border: 1px solid var(--aios-border);
-  border-radius: 0;
-  padding: 13px 16px;
+  border-radius: 12px;
+  padding: 14px 16px;
   margin-bottom: 10px;
-  transition: border-color 0.12s ease;
+  transition: border-color 140ms ease, background 140ms ease;
 }
 .aios-dashboard-root .aios-card:hover {
-  border-color: var(--aios-purple);
+  border-color: var(--aios-border-hi);
+  background: color-mix(in srgb, var(--aios-surface) 97%, #fff 3%);
 }
 .aios-dashboard-root .aios-card-head {
   display: flex;
@@ -330,12 +518,12 @@
   margin-bottom: 8px;
 }
 .aios-dashboard-root .aios-card-title {
-  font-size: 16px;
-  font-weight: 650;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--aios-text);
 }
 .aios-dashboard-root .aios-card-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--aios-dim);
   text-transform: capitalize;
 }
@@ -359,7 +547,12 @@
   color: var(--aios-dim);
   font-size: 11px;
   flex: 0 0 auto;
-  transition: transform 0.15s ease;
+  display: inline-flex;
+  transition: transform 140ms ease;
+}
+.aios-dashboard-root .aios-chevron svg {
+  width: 13px;
+  height: 13px;
 }
 .aios-dashboard-root .aios-card.aios-expanded > .aios-card-head .aios-chevron {
   transform: rotate(90deg);
@@ -373,17 +566,28 @@
   gap: 8px;
 }
 .aios-dashboard-root .aios-open-note {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--aios-dim);
-  font-size: 12px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s ease, color 0.12s ease;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+.aios-dashboard-root .aios-open-note svg {
+  width: 13px;
+  height: 13px;
 }
 .aios-dashboard-root .aios-proj-head:hover .aios-open-note {
   opacity: 1;
 }
 .aios-dashboard-root .aios-open-note:hover {
-  color: var(--aios-purple);
+  color: var(--aios-accent-hi);
+}
+@media (hover: none) {
+  .aios-dashboard-root .aios-open-note {
+    opacity: 1;
+  }
 }
 .aios-dashboard-root .aios-head-right {
   flex: 0 0 auto;
@@ -397,7 +601,9 @@
   display: block;
 }
 
-/* Progress bars: multi-color gradient revealed up to --aios-pct, empty portion masked. */
+/* ---------------------------------------------------------------------
+   Progress bars: signature gradient fill; green at 100%.
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-bar-wrap {
   display: flex;
   align-items: center;
@@ -406,17 +612,10 @@
 .aios-dashboard-root .aios-bar {
   position: relative;
   flex: 1;
-  height: 7px;
-  border-radius: 0;
+  height: 6px;
+  border-radius: 999px;
   overflow: hidden;
-  background: linear-gradient(
-    90deg,
-    var(--aios-grad-0) 0%,
-    var(--aios-grad-1) 28%,
-    var(--aios-grad-2) 52%,
-    var(--aios-grad-3) 76%,
-    var(--aios-grad-4) 100%
-  );
+  background: var(--aios-grad);
 }
 .aios-dashboard-root .aios-bar::after {
   content: "";
@@ -426,21 +625,25 @@
   right: 0;
   left: var(--aios-pct, 0%);
   background: var(--aios-track);
-  transition: left 0.25s ease;
+  transition: left 250ms ease;
+}
+.aios-dashboard-root .aios-bar.aios-bar-complete {
+  background: var(--aios-done-color);
 }
 .aios-dashboard-root .aios-bar-label {
   font-size: 11px;
   color: var(--aios-dim);
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
   min-width: 70px;
   text-align: right;
 }
 .aios-dashboard-root .aios-bar-project .aios-bar {
-  height: 9px;
+  height: 6px;
 }
 
-/* Task rows */
+/* ---------------------------------------------------------------------
+   Task rows
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-list {
   display: flex;
   flex-direction: column;
@@ -450,17 +653,24 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 7px 6px;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 .aios-dashboard-root .aios-task:hover {
-  background: var(--aios-panel-2);
+  background: var(--aios-surface-2);
+}
+.aios-dashboard-root .aios-task-inprogress {
+  border-left-color: var(--aios-accent);
 }
 .aios-dashboard-root .aios-task-main {
   flex: 1;
   min-width: 0;
 }
 .aios-dashboard-root .aios-task-title {
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.35;
   cursor: pointer;
   color: var(--aios-text);
@@ -479,47 +689,73 @@
   margin-top: 4px;
 }
 
-/* Pills (squared) */
+/* Pills */
 .aios-dashboard-root .aios-pill {
   font-size: 10.5px;
   font-weight: 600;
-  padding: 1px 7px;
-  border-radius: 0;
-  border: 1px solid var(--aios-border);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: none;
+  background: var(--aios-surface-2);
   color: var(--aios-dim);
   letter-spacing: 0.3px;
 }
-.aios-dashboard-root .aios-p1 { color: var(--aios-p1); border-color: rgba(255,92,92,0.4); }
-.aios-dashboard-root .aios-p2 { color: var(--aios-p2); border-color: rgba(255,174,66,0.4); }
-.aios-dashboard-root .aios-p3 { color: var(--aios-p3); border-color: rgba(91,155,213,0.4); }
+.aios-dashboard-root .aios-p1 { color: var(--aios-p1); background: rgba(249, 112, 102, 0.12); }
+.aios-dashboard-root .aios-p2 { color: var(--aios-p2); background: rgba(247, 185, 85, 0.12); }
+.aios-dashboard-root .aios-p3 { color: var(--aios-p3); background: rgba(108, 167, 244, 0.12); }
 .aios-dashboard-root .aios-p4 { color: var(--aios-p4); }
 .aios-dashboard-root .aios-due { color: var(--aios-dim); }
-.aios-dashboard-root .aios-overdue { color: var(--aios-p1); border-color: rgba(255,92,92,0.4); }
+.aios-dashboard-root .aios-overdue { color: var(--aios-p1); background: rgba(249, 112, 102, 0.12); }
 
-/* Buttons (squared) */
+/* Buttons */
 .aios-dashboard-root .aios-add {
   background: transparent;
   color: var(--aios-dim);
   border: 1px dashed var(--aios-border);
-  border-radius: 0;
-  padding: 5px 11px;
+  border-radius: 8px;
+  padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
   margin-top: 8px;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
 }
 .aios-dashboard-root .aios-add:hover {
   color: var(--aios-text);
-  border-color: var(--aios-purple);
-  background: var(--aios-panel-2);
+  border-color: var(--aios-border-hi);
+  background: var(--aios-surface-2);
 }
 
-/* Empty + foot */
+/* Empty states: centered icon + one line of copy. */
 .aios-dashboard-root .aios-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   color: var(--aios-dim);
   font-size: 12.5px;
-  font-style: italic;
-  padding: 4px 6px;
+  font-style: normal;
+  padding: 22px 12px;
+  text-align: center;
 }
+.aios-dashboard-root .aios-empty-icon {
+  color: var(--aios-faint);
+  display: inline-flex;
+}
+.aios-dashboard-root .aios-empty-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.aios-dashboard-root .aios-empty-text {
+  color: var(--aios-dim);
+}
+/* Empty states nested inside a list (e.g. "no tasks match") stay compact,
+   left-aligned, no icon padding blow-out. */
+.aios-dashboard-root .aios-list .aios-empty {
+  padding: 4px 6px;
+  align-items: flex-start;
+}
+
 .aios-dashboard-root .aios-foot {
   color: var(--aios-foot-color);
   font-size: 11px;
@@ -531,14 +767,14 @@
 /* Recently done */
 .aios-dashboard-root .aios-done {
   margin-top: 8px;
-  background: var(--aios-panel);
+  background: var(--aios-surface);
   border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border-radius: 12px;
   padding: 10px 16px;
-  transition: border-color 0.12s ease;
+  transition: border-color 140ms ease;
 }
 .aios-dashboard-root .aios-done:hover {
-  border-color: var(--aios-purple);
+  border-color: var(--aios-border-hi);
 }
 .aios-dashboard-root .aios-done > summary {
   cursor: pointer;
@@ -562,9 +798,23 @@
 }
 .aios-dashboard-root .aios-done-title:hover { color: var(--aios-text); }
 
+/* Modal chrome: surface bg + radius-12, same button system as the rest of the
+   console. Scoped to Obsidian's own .modal wrapper only when it hosts our
+   .aios-modal content, so other plugins' modals are untouched. */
+.modal:has(> .aios-modal) {
+  background: var(--aios-surface);
+  border: 1px solid var(--aios-border);
+  border-radius: 12px;
+  color: var(--aios-text);
+}
+.aios-modal h3 {
+  color: var(--aios-text);
+  font-size: 15px;
+}
+
 /* Quick-add modal */
 .aios-modal .aios-modal-context {
-  color: var(--aios-dim, #8a8a8a);
+  color: var(--aios-dim, #9c93b8);
   font-size: 12px;
   margin-bottom: 10px;
 }
@@ -577,10 +827,10 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: transparent;
-  border: 1px solid var(--aios-border);
-  border-radius: 0;
-  padding: 2px 8px;
+  background: var(--aios-surface-2);
+  border: none;
+  border-radius: 999px;
+  padding: 3px 10px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.3px;
@@ -588,10 +838,10 @@
   flex: 0 0 auto;
   align-self: center;
   white-space: nowrap;
-  transition: border-color 0.12s ease, color 0.12s ease;
+  transition: background 140ms ease, color 140ms ease;
 }
 .aios-dashboard-root .aios-status-ctl:hover {
-  border-color: var(--aios-purple);
+  background: color-mix(in srgb, var(--aios-surface-2) 85%, #fff 15%);
 }
 .aios-dashboard-root .aios-ctl-caret {
   font-size: 9px;
@@ -602,11 +852,11 @@
 }
 .aios-dashboard-root .aios-ctl-inprogress {
   color: var(--aios-wip);
-  border-color: rgba(176, 124, 255, 0.4);
+  background: rgba(167, 139, 250, 0.14);
 }
 .aios-dashboard-root .aios-ctl-done {
   color: var(--aios-done-color);
-  border-color: rgba(62, 207, 142, 0.4);
+  background: rgba(64, 214, 154, 0.14);
 }
 .aios-dashboard-root .aios-ctl-cancelled {
   color: var(--aios-p4);
@@ -614,7 +864,7 @@
 
 /* Undo affordance inside the toast. */
 .aios-undo {
-  color: var(--interactive-accent, #7c3aed);
+  color: var(--aios-accent-hi, #a78bfa);
   cursor: pointer;
   font-weight: 600;
   text-decoration: underline;
@@ -623,7 +873,7 @@
 /* Category tag pill. */
 .aios-dashboard-root .aios-tag {
   color: var(--aios-text);
-  border-color: var(--aios-border);
+  background: var(--aios-surface-2);
   text-transform: capitalize;
 }
 
@@ -633,39 +883,64 @@
   text-decoration: line-through;
 }
 
-/* Primary tab bar (Projects / Tasks). */
+/* ---------------------------------------------------------------------
+   Primary nav: segmented control (Today / Projects / Tasks / Usage / Ops map).
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--aios-border);
+  display: inline-flex;
+  gap: 2px;
+  background: var(--aios-surface);
+  border: none;
+  border-radius: 999px;
+  padding: 3px;
   margin-bottom: 18px;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.aios-dashboard-root .aios-tabs::-webkit-scrollbar {
+  display: none;
 }
 .aios-dashboard-root .aios-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: transparent;
   color: var(--aios-dim);
   border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  padding: 8px 14px;
+  border-radius: 999px;
+  padding: 7px 14px;
   font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.4px;
+  letter-spacing: normal;
   cursor: pointer;
-  margin-bottom: -1px;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  white-space: nowrap;
+  margin-bottom: 0;
+  transition: color 140ms ease, background 140ms ease;
+}
+.aios-dashboard-root .aios-tab svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
 }
 .aios-dashboard-root .aios-tab:hover {
   color: var(--aios-text);
 }
 .aios-dashboard-root .aios-tab-active {
-  color: var(--aios-text);
-  border-bottom-color: var(--aios-purple);
+  color: #fff;
+  background: var(--aios-grad);
+  box-shadow: 0 1px 6px rgba(139, 92, 246, 0.35);
+}
+.aios-dashboard-root .aios-tab-active:hover {
+  color: #fff;
 }
 .aios-dashboard-root .aios-tab-body {
   margin-bottom: 8px;
 }
 
-/* Filter chips (shared by Projects status chips and Tasks category chips). */
+/* ---------------------------------------------------------------------
+   Filter chips (shared by Projects status chips and Tasks category chips).
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-chips {
   display: flex;
   flex-wrap: wrap;
@@ -678,30 +953,31 @@
   gap: 6px;
   background: transparent;
   color: var(--aios-dim);
-  border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border: none;
+  border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+  transition: color 140ms ease, background 140ms ease;
 }
 .aios-dashboard-root .aios-chip:hover {
   color: var(--aios-text);
-  border-color: var(--aios-purple);
+  background: var(--aios-surface);
 }
 .aios-dashboard-root .aios-chip-active {
-  color: var(--aios-white);
-  background: var(--aios-panel-2);
-  border-color: var(--aios-purple);
+  color: var(--aios-accent-hi);
+  background: rgba(139, 92, 246, 0.14);
 }
 .aios-dashboard-root .aios-chip-label {
   text-transform: capitalize;
 }
 .aios-dashboard-root .aios-chip-count {
   font-size: 10.5px;
-  color: var(--aios-foot-color);
-  font-variant-numeric: tabular-nums;
+  color: var(--aios-faint);
+  background: var(--aios-surface-2);
+  border-radius: 999px;
+  padding: 1px 6px;
 }
 .aios-dashboard-root .aios-chip-active .aios-chip-count {
   color: var(--aios-dim);
@@ -710,7 +986,8 @@
 /* Doing now strip inside a project card. */
 .aios-dashboard-root .aios-doing {
   border-left: 2px solid var(--aios-wip);
-  background: var(--aios-panel-2);
+  background: var(--aios-surface-2);
+  border-radius: 0 8px 8px 0;
   padding: 8px 10px;
   margin-bottom: 12px;
 }
@@ -762,12 +1039,15 @@
   gap: 3px;
 }
 
-/* Phase cards: nested collapsible cards inside a project card. Lighter than the project
-   card so the nesting reads. Bodies collapse independently via the direct-child rules above. */
+/* Phase cards: nested collapsible cards inside a project card. */
 .aios-dashboard-root .aios-phase-card {
   margin: 8px 0 0 0;
   padding: 10px 12px;
   background: transparent;
+  border-color: var(--aios-border);
+}
+.aios-dashboard-root .aios-phase-card:hover {
+  background: var(--aios-surface-2);
 }
 .aios-dashboard-root .aios-phase-card .aios-phase-name {
   font-size: 13px;
@@ -781,29 +1061,44 @@
   gap: 12px;
 }
 
-/* Per-project view toggles in the header. */
+/* Per-project view toggles in the header: quiet, visible only on card hover
+   (Open note affordance uses the same pattern above). Touch devices always
+   show them since there is no hover to reveal them on tap. */
 .aios-dashboard-root .aios-toggles {
   display: flex;
   gap: 6px;
   margin-top: 6px;
   justify-content: flex-end;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.aios-dashboard-root .aios-proj-head:hover .aios-toggles,
+.aios-dashboard-root .aios-toggles:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .aios-dashboard-root .aios-toggles {
+    opacity: 1;
+  }
 }
 .aios-dashboard-root .aios-toggle {
   font-size: 11px;
-  padding: 2px 10px;
+  padding: 3px 10px;
   border: 1px solid var(--aios-border);
-  border-radius: 0;
+  border-radius: 999px;
   background: transparent;
   color: var(--aios-dim);
   cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
 }
 .aios-dashboard-root .aios-toggle:hover {
-  border-color: var(--aios-purple);
+  border-color: var(--aios-border-hi);
+  color: var(--aios-text);
 }
 .aios-dashboard-root .aios-toggle-on {
-  background: var(--aios-purple);
-  border-color: var(--aios-purple);
-  color: #fff;
+  background: rgba(139, 92, 246, 0.14);
+  border-color: transparent;
+  color: var(--aios-accent-hi);
 }
 
 .aios-dashboard-root .aios-proj-card {
@@ -826,29 +1121,30 @@
   border-bottom: 1px solid var(--aios-border);
 }
 
-/* Usage tab: cost/token dashboard. Per-family hues derived from the existing
-   palette (grad ramp + accent + p-scale) so the chart never clashes with the
-   rest of the dashboard's color system. */
+/* ---------------------------------------------------------------------
+   Usage tab
+--------------------------------------------------------------------- */
 .aios-dashboard-root {
   --aios-usage-fable: var(--aios-p1);
-  --aios-usage-opus: var(--aios-purple);
-  --aios-usage-sonnet: var(--aios-grad-3);
-  --aios-usage-haiku: var(--aios-grad-2);
-  --aios-usage-other: var(--aios-dim);
+  --aios-usage-opus: var(--aios-accent);
+  --aios-usage-sonnet: var(--aios-p3);
+  --aios-usage-haiku: var(--aios-done-color);
+  --aios-usage-other: var(--aios-faint);
 }
 
 /* Workflow attribution colors: 8 stable slots, indexed by
    usageWorkflowColorIndex() in main.ts so a given workflow key always lands
-   on the same color regardless of sort order. */
+   on the same color regardless of sort order. Violet-anchored categorical
+   set with red/amber/blue/green accents so states stay readable. */
 .aios-dashboard-root {
   --aios-workflow-0: var(--aios-p1);
   --aios-workflow-1: var(--aios-p2);
   --aios-workflow-2: var(--aios-p3);
-  --aios-workflow-3: var(--aios-purple);
-  --aios-workflow-4: var(--aios-grad-1);
-  --aios-workflow-5: var(--aios-grad-3);
+  --aios-workflow-3: var(--aios-accent);
+  --aios-workflow-4: var(--aios-grad-2);
+  --aios-workflow-5: var(--aios-done-color);
   --aios-workflow-6: var(--aios-grad-4);
-  --aios-workflow-7: var(--aios-dim);
+  --aios-workflow-7: var(--aios-faint);
 }
 .aios-workflow-color-0 {
   background: var(--aios-workflow-0);
@@ -878,9 +1174,10 @@
 .aios-dashboard-root .aios-usage-workflow-bar {
   display: flex;
   width: 100%;
-  height: 12px;
+  height: 10px;
   overflow: hidden;
-  border: 1px solid var(--aios-border);
+  border-radius: 999px;
+  background: var(--aios-track);
 }
 .aios-dashboard-root .aios-usage-workflow-segment {
   height: 100%;
@@ -900,26 +1197,38 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+/* Stat-card treatment, shared by the Usage tiles and the Today stat row:
+   radius-12 surface, 11px eyebrow label, 16px/700 tabular value. */
 .aios-dashboard-root .aios-usage-tile {
   cursor: default;
-  padding: 8px 14px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  min-width: 112px;
 }
 .aios-dashboard-root .aios-usage-tile:hover {
-  border-color: var(--aios-border);
+  background: var(--aios-surface);
   color: var(--aios-dim);
 }
 .aios-dashboard-root .aios-usage-tile .aios-health-tile-label {
-  color: var(--aios-dim);
+  color: var(--aios-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .aios-dashboard-root .aios-usage-tile .aios-health-tile-count {
   color: var(--aios-text);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .aios-dashboard-root .aios-usage-chart-wrap {
   border: 1px solid var(--aios-border);
-  background: var(--aios-panel);
+  border-radius: 12px;
+  background: var(--aios-surface);
   padding: 10px 6px 4px;
 }
 .aios-usage-svg {
@@ -993,17 +1302,19 @@
 }
 
 .aios-dashboard-root .aios-usage-subhead {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--aios-dim);
+  letter-spacing: 0.08em;
+  color: var(--aios-faint);
   margin-top: 4px;
 }
 
 .aios-dashboard-root .aios-usage-table-wrap {
   overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--aios-border);
+  border-radius: 12px;
 }
 .aios-dashboard-root .aios-usage-table {
   width: 100%;
@@ -1012,21 +1323,26 @@
 }
 .aios-dashboard-root .aios-usage-table th,
 .aios-dashboard-root .aios-usage-table td {
-  padding: 6px 10px;
+  padding: 7px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--aios-border);
+  border-bottom: 1px solid color-mix(in srgb, var(--aios-border) 60%, transparent);
 }
 .aios-dashboard-root .aios-usage-table th {
-  color: var(--aios-dim);
+  color: var(--aios-faint);
   font-weight: 600;
   text-transform: uppercase;
   font-size: 10.5px;
-  letter-spacing: 0.4px;
-  background: var(--aios-panel);
+  letter-spacing: 0.08em;
+  background: var(--aios-surface);
+}
+.aios-dashboard-root .aios-usage-table tr {
+  transition: background 140ms ease;
+}
+.aios-dashboard-root .aios-usage-table tbody tr:hover {
+  background: var(--aios-surface-2);
 }
 .aios-dashboard-root .aios-usage-table td {
   color: var(--aios-text);
-  font-variant-numeric: tabular-nums;
 }
 .aios-dashboard-root .aios-usage-table tr:last-child td {
   border-bottom: none;
@@ -1037,16 +1353,16 @@
   gap: 6px;
 }
 
-/* Ops map tab: deterministic layered SVG graph (agents, workflows, SOPs,
-   guidelines, skills). Type-accent colors reuse the existing palette so the
-   graph never introduces a new hue system. */
+/* ---------------------------------------------------------------------
+   Ops map tab: deterministic layered SVG graph.
+--------------------------------------------------------------------- */
 .aios-dashboard-root {
-  --aios-opsmap-agent: var(--aios-purple);
+  --aios-opsmap-agent: var(--aios-accent);
   --aios-opsmap-workflow: var(--aios-p3);
-  --aios-opsmap-sop: var(--aios-grad-3);
+  --aios-opsmap-sop: var(--aios-done-color);
   --aios-opsmap-guideline: var(--aios-p2);
   --aios-opsmap-skill: var(--aios-dim);
-  --aios-opsmap-skill-summary: var(--aios-foot-color);
+  --aios-opsmap-skill-summary: var(--aios-faint);
 }
 
 .aios-dashboard-root .aios-opsmap-tab {
@@ -1058,7 +1374,8 @@
 .aios-dashboard-root .aios-opsmap-wrap {
   overflow-x: auto;
   border: 1px solid var(--aios-border);
-  background: var(--aios-panel);
+  border-radius: 12px;
+  background: var(--aios-surface);
   padding: 4px 6px 10px;
 }
 
@@ -1078,12 +1395,12 @@
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.08em;
   color: var(--aios-dim);
 }
 .aios-dashboard-root .aios-opsmap-header-count {
   font-size: 11px;
-  color: var(--aios-foot-color);
+  color: var(--aios-faint);
 }
 
 .aios-dashboard-root .aios-opsmap-svg-wrap {
@@ -1094,9 +1411,10 @@
 }
 
 .aios-opsmap-node-rect {
-  fill: var(--aios-panel-2);
+  fill: var(--aios-surface-2);
   stroke: var(--aios-border);
   stroke-width: 1;
+  rx: 8;
 }
 .aios-opsmap-node-accent {
   fill: var(--aios-opsmap-skill);
@@ -1135,14 +1453,14 @@
 .aios-opsmap-node-rect,
 .aios-opsmap-node-accent,
 .aios-opsmap-node-label {
-  transition: opacity 0.12s ease;
+  transition: opacity 140ms ease;
 }
 
 .aios-opsmap-edge {
   stroke: var(--aios-dim);
   stroke-width: 1;
   opacity: 0.25;
-  transition: opacity 0.12s ease, stroke 0.12s ease;
+  transition: opacity 140ms ease, stroke 140ms ease;
 }
 
 /* Hover highlight: bring the hovered node's edges + connected nodes to full
@@ -1157,44 +1475,74 @@
 }
 .aios-opsmap-svg.aios-opsmap-hovering .aios-opsmap-edge.aios-opsmap-edge-active {
   opacity: 0.9;
-  stroke: var(--aios-purple);
+  stroke: var(--aios-accent-hi);
 }
 
-/* Today tab (build 2.6 m3). */
+/* ---------------------------------------------------------------------
+   Today tab
+--------------------------------------------------------------------- */
 .aios-dashboard-root .aios-today-tab {
   display: flex;
   flex-direction: column;
   gap: 18px;
 }
 .aios-dashboard-root .aios-today-section-label {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 1.4px;
-  color: var(--aios-dim);
+  letter-spacing: 0.08em;
+  color: var(--aios-faint);
   margin-bottom: 6px;
   text-transform: uppercase;
 }
 
-/* Quick capture: one-line input + button, Enter submits. */
+/* Quick capture: one-line input + icon-button (inside the field, right side),
+   Enter submits. */
 .aios-dashboard-root .aios-quick-capture-row {
   display: flex;
-  gap: 8px;
+}
+.aios-dashboard-root .aios-quick-capture-input-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
 }
 .aios-dashboard-root .aios-quick-capture-input {
-  flex: 1 1 auto;
-  background: var(--aios-panel);
+  width: 100%;
+  background: var(--aios-surface-2);
   color: var(--aios-text);
   border: 1px solid var(--aios-border);
-  border-radius: 0;
-  padding: 7px 10px;
+  border-radius: 8px;
+  padding: 8px 40px 8px 12px;
   font-size: 13px;
+  transition: border-color 140ms ease;
 }
 .aios-dashboard-root .aios-quick-capture-input:focus {
   outline: none;
-  border-color: var(--aios-purple);
+  border-color: var(--aios-accent);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
 }
 .aios-dashboard-root .aios-quick-capture-btn {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  padding: 0;
   margin-top: 0;
+  border: none;
+  border-radius: 6px;
+  background: var(--aios-surface);
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-quick-capture-btn:hover {
+  color: #fff;
+  background: var(--aios-grad);
+  border-color: transparent;
+}
+.aios-dashboard-root .aios-quick-capture-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* Compact stat row: today's spend, intake backlog, automation summary. */
@@ -1204,14 +1552,37 @@
 .aios-dashboard-root .aios-today-auto-tile {
   cursor: pointer;
 }
+.aios-dashboard-root .aios-today-guardrail:empty {
+  display: none;
+}
 
 /* Spend guardrail warning tile (Today tab and Usage tab). */
 .aios-dashboard-root .aios-budget-warn {
-  background: rgba(255, 92, 92, 0.12);
-  border: 1px solid rgba(255, 92, 92, 0.4);
+  background: rgba(249, 112, 102, 0.12);
+  border: 1px solid rgba(249, 112, 102, 0.4);
+  border-radius: 8px;
   color: var(--aios-p1);
   font-size: 12.5px;
   font-weight: 600;
   padding: 8px 12px;
   margin-bottom: 12px;
+}
+
+/* ---------------------------------------------------------------------
+   Responsive
+--------------------------------------------------------------------- */
+@media (max-width: 560px) {
+  .aios-dashboard-root {
+    padding: 14px 12px 32px;
+  }
+  .aios-dashboard-root .aios-header {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .aios-dashboard-root .aios-stat {
+    white-space: normal;
+  }
+  .aios-dashboard-root .aios-head-right {
+    width: 130px;
+  }
 }

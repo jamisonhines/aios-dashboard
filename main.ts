@@ -12,6 +12,7 @@ import {
   TFolder,
   WorkspaceLeaf,
   normalizePath,
+  setIcon,
 } from "obsidian";
 import {
   resolveBuckets,
@@ -956,7 +957,32 @@ function priorityMeta(p: number | null): { label: string; cls: string } {
 // sortTasks and visiblePhaseTasks now live in model.mjs, imported above
 // (unit-tested in viewModel.test.mjs).
 
-// A progress bar: a multi-color gradient (red -> amber -> green) revealed up to pct,
+// setIcon with a fallback lucide name for icons that may not exist in older
+// Obsidian bundles (e.g. chart-column / waypoints). Falls back silently if
+// the primary icon renders no SVG.
+function setIconWithFallback(el: HTMLElement, primary: string, fallback?: string) {
+  setIcon(el, primary);
+  if (fallback && !el.querySelector("svg")) setIcon(el, fallback);
+}
+
+// A chevron indicator for collapsible card heads: rotates 90deg via CSS when
+// the parent card carries .aios-expanded (see styles.css).
+function renderChevron(container: HTMLElement): HTMLElement {
+  const el = container.createSpan({ cls: "aios-chevron" });
+  setIcon(el, "chevron-right");
+  return el;
+}
+
+// Centered empty-state: a faint icon + one line of copy (spec build 2.7).
+function renderEmptyState(container: HTMLElement, text: string): HTMLElement {
+  const wrap = container.createDiv({ cls: "aios-empty" });
+  const icon = wrap.createDiv({ cls: "aios-empty-icon" });
+  setIcon(icon, "inbox");
+  wrap.createDiv({ cls: "aios-empty-text", text });
+  return wrap;
+}
+
+// A progress bar: the signature gradient revealed up to pct, done color at 100%,
 // plus a "done/total · pct%" label. Calculated, honest (0 when empty). The fill width
 // is driven by the --aios-pct CSS var; the empty portion is masked in CSS.
 function renderProgressBar(container: HTMLElement, p: Progress, extraCls?: string) {
@@ -1173,11 +1199,12 @@ function renderProjectCard(
   // Collapsed head: chevron + name (+ open-note) on the left, overall bar on the right.
   const head = card.createDiv({ cls: "aios-card-head aios-proj-head" });
   const left = head.createDiv({ cls: "aios-head-left" });
-  left.createSpan({ cls: "aios-chevron", text: "▸" });
+  renderChevron(left);
   const nameBlock = left.createDiv({ cls: "aios-name-block" });
   const nameRow = nameBlock.createDiv({ cls: "aios-name-row" });
   nameRow.createSpan({ cls: "aios-card-title", text: proj.name });
-  const open = nameRow.createSpan({ cls: "aios-open-note", text: "↗" });
+  const open = nameRow.createSpan({ cls: "aios-open-note" });
+  setIcon(open, "arrow-up-right");
   open.setAttr("aria-label", "Open project note");
   open.addEventListener("click", (ev) => {
     ev.stopPropagation();
@@ -1224,7 +1251,7 @@ function renderProjectCard(
 
     const phead = pcard.createDiv({ cls: "aios-card-head aios-phase-head" });
     const pleft = phead.createDiv({ cls: "aios-head-left" });
-    pleft.createSpan({ cls: "aios-chevron", text: "▸" });
+    renderChevron(pleft);
     pleft.createSpan({ cls: "aios-phase-name", text: phaseName ?? "No phase" });
     const pright = phead.createDiv({ cls: "aios-head-right" });
     renderProgressBar(pright, computeProgress(phaseTasks), "aios-bar-project");
@@ -1238,7 +1265,7 @@ function renderProjectCard(
     const list = pbody.createDiv({ cls: "aios-list" });
     const visible = visiblePhaseTasks(phaseTasks, showOpen, showComplete);
     if (visible.length === 0) {
-      list.createDiv({ cls: "aios-empty", text: "No tasks match the current view." });
+      renderEmptyState(list, "No tasks match the current view.");
     } else {
       for (const t of visible) renderTaskRow(app, tasksRoot, list, t, refresh);
     }
@@ -1296,7 +1323,7 @@ function renderProjectsTab(
   const groups = groupProjectsByStatus(projects, statusSections);
 
   if (groups.length === 0) {
-    container.createDiv({ cls: "aios-empty", text: "No projects yet." });
+    renderEmptyState(container, "No projects yet.");
     return;
   }
 
@@ -1367,7 +1394,7 @@ function renderTasksTab(
   const filtered = filterStandaloneByCategory(standaloneOpen, active, buckets).slice().sort(sortTasks);
   const list = container.createDiv({ cls: "aios-list aios-tasks-list" });
   if (filtered.length === 0) {
-    list.createDiv({ cls: "aios-empty", text: "Nothing here." });
+    renderEmptyState(list, "Nothing here.");
   } else {
     for (const t of filtered) renderTaskRow(app, tasksRoot, list, t, refresh, tagForTask(t, buckets));
   }
@@ -1556,7 +1583,9 @@ function renderHealthStrip(
   settings: AiosDashboardSettings
 ) {
   if (tiles.length === 0) return;
-  const strip = root.createDiv({ cls: "aios-health-strip" });
+  const section = root.createDiv({ cls: "aios-health-section" });
+  section.createDiv({ cls: "aios-section-eyebrow", text: "Systems" });
+  const strip = section.createDiv({ cls: "aios-health-strip" });
   for (const tile of tiles) {
     const pill = strip.createEl("button", {
       cls: "aios-health-tile" + (tile.warn ? " aios-health-tile-warn" : ""),
@@ -1881,7 +1910,7 @@ function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
 
 function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
   if (table.length === 0) {
-    container.createDiv({ cls: "aios-empty", text: "No model usage in the last 30 days." });
+    renderEmptyState(container, "No model usage in the last 30 days.");
     return;
   }
   const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
@@ -2013,11 +2042,10 @@ function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboar
   loadUsageStats(app, settings.usageStatsPath).then((stats) => {
     wrap.empty();
     if (!stats) {
-      wrap.createDiv({
-        cls: "aios-empty",
-        text:
-          "No usage data yet. The exporter runs at session start, or run: node Operations/scripts/export-usage-stats.mjs",
-      });
+      renderEmptyState(
+        wrap,
+        "No usage data yet. The exporter runs at session start, or run: node Operations/scripts/export-usage-stats.mjs"
+      );
       return;
     }
     const view = computeUsageView(stats, new Date());
@@ -2067,11 +2095,14 @@ function renderQuickCapture(app: App, settings: AiosDashboardSettings, container
   const section = container.createDiv({ cls: "aios-today-section aios-quick-capture" });
   section.createDiv({ cls: "aios-today-section-label", text: "QUICK CAPTURE" });
   const row = section.createDiv({ cls: "aios-quick-capture-row" });
-  const input = row.createEl("input", {
+  const inputWrap = row.createDiv({ cls: "aios-quick-capture-input-wrap" });
+  const input = inputWrap.createEl("input", {
     cls: "aios-quick-capture-input",
     attr: { type: "text", placeholder: "Capture a thought..." },
   }) as HTMLInputElement;
-  const btn = row.createEl("button", { cls: "aios-add aios-quick-capture-btn", text: "Capture" });
+  const btn = inputWrap.createEl("button", { cls: "aios-quick-capture-btn" });
+  btn.setAttr("aria-label", "Capture");
+  setIcon(btn, "arrow-up");
 
   const submit = async () => {
     const value = input.value;
@@ -2099,7 +2130,7 @@ function renderTopTasksSection(
   section.createDiv({ cls: "aios-today-section-label", text: "TOP TASKS" });
   const top = topTasks(tasks, 3);
   if (top.length === 0) {
-    section.createDiv({ cls: "aios-empty", text: "No open tasks." });
+    renderEmptyState(section, "No open tasks.");
     return;
   }
   const list = section.createDiv({ cls: "aios-list" });
@@ -2339,11 +2370,10 @@ function renderOpsMapTab(app: App, container: HTMLElement, settings: AiosDashboa
   loadOpsMap(app, settings.opsMapPath).then((manifest) => {
     wrap.empty();
     if (!manifest) {
-      wrap.createDiv({
-        cls: "aios-empty",
-        text:
-          "No ops map yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs",
-      });
+      renderEmptyState(
+        wrap,
+        "No ops map yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+      );
       return;
     }
     const layout = computeOpsMapLayout(manifest);
@@ -2379,20 +2409,30 @@ function renderDashboard(
   const projects = readProjects(app, settings.projectsRoot);
   const openTasks = tasks.filter((t) => OPEN_STATUSES.includes(t.status));
 
-  // ----- Header -----
+  // ----- App bar -----
   const header = root.createDiv({ cls: "aios-header" });
-  header.createEl("h1", { text: settings.headerTitle });
+  const mark = header.createDiv({ cls: "aios-app-mark" });
+  setIcon(mark, "layout-grid");
+  const titleBlock = header.createDiv({ cls: "aios-title-block" });
+  titleBlock.createDiv({ cls: "aios-eyebrow", text: "OPERATIONS CONSOLE" });
+  titleBlock.createEl("h1", { text: settings.headerTitle });
+  header.createSpan({ cls: "aios-header-dot", text: "·" });
   const stat = header.createDiv({ cls: "aios-stat" });
   const activeCount = projects.filter((p) => p.status === "active").length;
   stat.setText(`${openTasks.length} open · ${activeCount} active`);
-  const refreshBtn = header.createEl("button", { cls: "aios-refresh", text: "Refresh" });
+  header.createDiv({ cls: "aios-header-spacer" });
+
+  const actions = header.createDiv({ cls: "aios-header-actions" });
+  const refreshBtn = actions.createEl("button", { cls: "aios-refresh aios-icon-btn" });
+  refreshBtn.setAttr("aria-label", "Refresh");
+  setIcon(refreshBtn, "rotate-cw");
   refreshBtn.addEventListener("click", () => refresh());
 
   if (settings.actionsEnabled && Platform.isDesktop) {
-    const askBtn = header.createEl("button", {
-      cls: "aios-refresh aios-ask-dispatch",
-      text: "Ask Dispatch",
-    });
+    const askBtn = actions.createEl("button", { cls: "aios-ask-dispatch" });
+    const askIcon = askBtn.createSpan({ cls: "aios-ask-dispatch-icon" });
+    setIcon(askIcon, "sparkles");
+    askBtn.createSpan({ text: "Ask Dispatch" });
     askBtn.addEventListener("click", () => {
       const base = getVaultBasePath(app);
       if (!base) return;
@@ -2413,13 +2453,23 @@ function renderDashboard(
   // ----- Automations strip (launchd job health; hidden when no data file) -----
   renderAutomationSection(app, root, settings);
 
-  // ----- Tab bar -----
+  // ----- Tab bar (segmented nav) -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
+  const TAB_ICONS: Record<string, { primary: string; fallback?: string }> = {
+    today: { primary: "sun" },
+    projects: { primary: "folder-kanban" },
+    tasks: { primary: "list-checks" },
+    usage: { primary: "chart-column", fallback: "bar-chart-3" },
+    opsmap: { primary: "waypoints", fallback: "git-fork" },
+  };
   const mkTab = (id: "today" | "projects" | "tasks" | "usage" | "opsmap", label: string) => {
     const t = tabs.createEl("button", {
       cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
-      text: label,
     });
+    const icon = TAB_ICONS[id];
+    const iconEl = t.createSpan({ cls: "aios-tab-icon" });
+    setIconWithFallback(iconEl, icon.primary, icon.fallback);
+    t.createSpan({ cls: "aios-tab-label", text: label });
     t.addEventListener("click", () => {
       viewState.activeTab = id;
       refresh();
