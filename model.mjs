@@ -522,6 +522,130 @@ export function computeUsageView(stats, nowDate) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Usage range window (build 2.8): 1D/7D/30D toggle + prev/next paging over the
+// exporter's daily buckets. Pure; the impure half (render + resize) is in
+// main.ts renderUsageTab.
+// ---------------------------------------------------------------------------
+
+/** Window length in days per range slug. */
+export const USAGE_RANGE_DAYS = { "1d": 1, "7d": 7, "30d": 30 };
+
+const USAGE_MONTHS_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/** "2026-07-08" -> "Jul 8". Pure string math, no Date parsing (no TZ drift). */
+export function formatUsageDayShort(key) {
+  const parts = key.split("-");
+  const month = USAGE_MONTHS_SHORT[Number(parts[1]) - 1] || parts[1];
+  return month + " " + Number(parts[2]);
+}
+
+/** Window label: "Jul 8 - Jul 14" for multi-day, "Jul 14" for a single day. */
+export function formatUsageWindowLabel(startKey, endKey) {
+  if (startKey === endKey) return formatUsageDayShort(startKey);
+  return formatUsageDayShort(startKey) + " - " + formatUsageDayShort(endKey);
+}
+
+/**
+ * The visible usage window: a continuous zero-filled slice of `days` (the
+ * exporter's sparse day buckets), `range` in {"1d","7d","30d"}, `offset` =
+ * how many windows back from the one ending today (0 = current). Returns
+ * the slice plus label and canPrev/canNext for the paging arrows: canNext
+ * is false at offset 0, canPrev is false once the previous window would
+ * start before the earliest day present in the data.
+ */
+export function computeUsageWindow(days, range, offset, todayDate) {
+  const len = USAGE_RANGE_DAYS[range] || 7;
+  const safeOffset = Math.max(0, offset | 0);
+  const dayByDate = new Map(days.map((d) => [d.date, d]));
+
+  const windowDays = [];
+  for (let i = len - 1; i >= 0; i--) {
+    const shift = safeOffset * len + i;
+    const d = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() - shift);
+    const key = usageLocalDayKey(d);
+    windowDays.push(
+      dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 }
+    );
+  }
+
+  let earliest = null;
+  for (const d of days) if (earliest === null || d.date < earliest) earliest = d.date;
+
+  const startKey = windowDays[0].date;
+  const endKey = windowDays[windowDays.length - 1].date;
+  return {
+    range,
+    offset: safeOffset,
+    days: windowDays,
+    label: formatUsageWindowLabel(startKey, endKey),
+    canPrev: earliest !== null && earliest < startKey,
+    canNext: safeOffset > 0,
+  };
+}
+
+/**
+ * Stacked-bar chart data for an arbitrary continuous day window: same shape
+ * as computeUsageView's fixed 30-day chart (segments per family, gridlines,
+ * sparse x labels), generalized to any window length. Short windows label
+ * every day; long ones label every 7th plus the last.
+ */
+export function usageChartFromWindow(windowDays) {
+  const maxCost = Math.max(0, ...windowDays.map((d) => d.totalCostUsd));
+  const safeMax = maxCost > 0 ? maxCost : 1;
+
+  const chartDays = windowDays.map((d) => {
+    const segments = [];
+    for (const fam of USAGE_FAMILY_ORDER) {
+      const bucket = d.models[fam];
+      if (!bucket || bucket.costUsd <= 0) continue;
+      segments.push({ family: fam, costUsd: bucket.costUsd, heightFraction: bucket.costUsd / safeMax });
+    }
+    return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
+  });
+
+  const gridlines = [1, 0.5, 0].map((frac) => ({
+    fraction: frac,
+    value: maxCost * frac,
+    label: formatUsd(maxCost * frac),
+  }));
+
+  const step = windowDays.length > 10 ? 7 : 1;
+  const xLabelIndices = [];
+  for (let i = 0; i < windowDays.length; i += step) xLabelIndices.push(i);
+  if (xLabelIndices[xLabelIndices.length - 1] !== windowDays.length - 1) {
+    xLabelIndices.push(windowDays.length - 1);
+  }
+
+  return { days: chartDays, maxCost, gridlines, xLabelIndices };
+}
+
+/**
+ * Per-family grouped bars for the 1D view: one bar per model family active
+ * that day, fraction relative to the costliest family. Empty days return
+ * an empty bars array (the renderer shows an empty-state hint).
+ */
+export function usageDayFamilyBars(day) {
+  const raw = [];
+  for (const fam of USAGE_FAMILY_ORDER) {
+    const bucket = day.models[fam];
+    if (!bucket || bucket.costUsd <= 0) continue;
+    raw.push({ family: fam, label: USAGE_FAMILY_LABELS[fam], costUsd: bucket.costUsd });
+  }
+  const maxCost = Math.max(0, ...raw.map((b) => b.costUsd));
+  const safeMax = maxCost > 0 ? maxCost : 1;
+  const bars = raw.map((b) => ({ ...b, fraction: b.costUsd / safeMax }));
+  const gridlines = [1, 0.5, 0].map((frac) => ({
+    fraction: frac,
+    value: maxCost * frac,
+    label: formatUsd(maxCost * frac),
+  }));
+  return { date: day.date, bars, maxCost, gridlines };
+}
+
 // Known workflow keys in the exporter's classification order. Drives a
 // stable color index per key so the share bar, legend, and table dots never
 // disagree and colors don't shift as costs change between runs.

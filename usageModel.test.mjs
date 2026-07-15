@@ -8,6 +8,10 @@ import {
   computeWorkflowsView,
   usageWorkflowColorIndex,
   USAGE_WORKFLOW_COLOR_COUNT,
+  computeUsageWindow,
+  usageChartFromWindow,
+  usageDayFamilyBars,
+  formatUsageWindowLabel,
 } from "./model.mjs";
 
 // --- formatCompactNumber ---
@@ -175,6 +179,89 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   const b = usageWorkflowColorIndex("some-future-workflow");
   assert.equal(a, b, "unknown key still gets a stable (deterministic) color across calls");
   assert.ok(a >= 0 && a < USAGE_WORKFLOW_COLOR_COUNT, "fallback color index stays in palette range");
+}
+
+// --- computeUsageWindow: range slicing, zero-fill, labels, paging edges ---
+{
+  const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
+  const day = (date, cost, fam = "opus") => ({ date, models: { [fam]: bucket(cost) }, totalCostUsd: cost, totalOutputTokens: 1 });
+  const today = new Date(2026, 6, 14); // 2026-07-14 local
+  const days = [
+    day("2026-07-14", 5),
+    day("2026-07-10", 2),
+    day("2026-07-01", 3, "sonnet"),
+    day("2026-06-20", 7),
+  ];
+
+  // 7D current window: Jul 8 - Jul 14, zero-filled to exactly 7 entries.
+  const w7 = computeUsageWindow(days, "7d", 0, today);
+  assert.equal(w7.days.length, 7, "7d window has 7 entries");
+  assert.equal(w7.days[0].date, "2026-07-08", "7d window starts Jul 8");
+  assert.equal(w7.days[6].date, "2026-07-14", "7d window ends today");
+  assert.equal(w7.days[6].totalCostUsd, 5, "today's bucket carried through");
+  assert.equal(w7.days[1].totalCostUsd, 0, "missing days zero-filled");
+  assert.equal(w7.label, "Jul 8 - Jul 14", "multi-day label");
+  assert.equal(w7.canNext, false, "no next at offset 0");
+  assert.equal(w7.canPrev, true, "earlier data exists -> canPrev");
+
+  // Paging back one 7D window: Jul 1 - Jul 7.
+  const w7b = computeUsageWindow(days, "7d", 1, today);
+  assert.equal(w7b.days[0].date, "2026-07-01", "offset 1 pages back by window length");
+  assert.equal(w7b.days[0].totalCostUsd, 3, "Jul 1 bucket present in prior window");
+  assert.equal(w7b.canNext, true, "offset > 0 -> canNext");
+  assert.equal(w7b.canPrev, true, "2026-06-20 is before Jul 1 -> canPrev");
+
+  // Past the earliest data day: canPrev goes false.
+  const w7c = computeUsageWindow(days, "7d", 4, today); // window Jun 10 - Jun 16
+  assert.equal(w7c.canPrev, false, "no data before the window start -> prev disabled");
+
+  // 1D: single-entry slice, single-day label.
+  const w1 = computeUsageWindow(days, "1d", 0, today);
+  assert.equal(w1.days.length, 1, "1d window has one entry");
+  assert.equal(w1.label, "Jul 14", "single-day label has no range dash");
+  const w1b = computeUsageWindow(days, "1d", 4, today);
+  assert.equal(w1b.days[0].date, "2026-07-10", "1d offset pages one day at a time");
+
+  // 30D spans a month boundary in the label.
+  const w30 = computeUsageWindow(days, "30d", 0, today);
+  assert.equal(w30.days.length, 30, "30d window has 30 entries");
+  assert.equal(w30.label, "Jun 15 - Jul 14", "30d label crosses the month boundary");
+
+  // No data at all: paging fully disabled.
+  const wEmpty = computeUsageWindow([], "7d", 0, today);
+  assert.equal(wEmpty.canPrev, false, "empty data -> no prev");
+  assert.equal(wEmpty.canNext, false, "empty data at offset 0 -> no next");
+
+  // usageChartFromWindow: segment fractions, gridlines, x label density.
+  const chart7 = usageChartFromWindow(w7.days);
+  assert.equal(chart7.maxCost, 5, "window max cost");
+  assert.equal(chart7.days.length, 7, "chart mirrors window length");
+  assert.deepEqual(chart7.xLabelIndices, [0, 1, 2, 3, 4, 5, 6], "short windows label every day");
+  const segToday = chart7.days[6].segments[0];
+  assert.equal(segToday.family, "opus", "segment family");
+  assert.equal(segToday.heightFraction, 1, "max-cost day fills the plot");
+  const chart30 = usageChartFromWindow(w30.days);
+  assert.deepEqual(chart30.xLabelIndices, [0, 7, 14, 21, 28, 29], "long windows label every 7th + last");
+
+  // usageDayFamilyBars: per-family bars for the 1D view.
+  const multi = {
+    date: "2026-07-14",
+    models: { opus: bucket(4), haiku: bucket(1) },
+    totalCostUsd: 5,
+    totalOutputTokens: 2,
+  };
+  const dayBars = usageDayFamilyBars(multi);
+  assert.equal(dayBars.bars.length, 2, "one bar per active family");
+  assert.equal(dayBars.bars[0].family, "opus", "family order follows USAGE_FAMILY_ORDER");
+  assert.equal(dayBars.bars[0].fraction, 1, "costliest family fills the plot");
+  assert.equal(dayBars.bars[1].fraction, 0.25, "other families scale relative to max");
+  assert.equal(dayBars.maxCost, 4, "1d max is the costliest family");
+  const emptyBars = usageDayFamilyBars({ date: "2026-07-13", models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
+  assert.equal(emptyBars.bars.length, 0, "empty day -> no bars");
+  assert.equal(emptyBars.maxCost, 0, "empty day -> zero max");
+
+  // Label helper directly.
+  assert.equal(formatUsageWindowLabel("2026-12-28", "2027-01-03"), "Dec 28 - Jan 3", "year boundary label");
 }
 
 console.log("usageModel: all assertions passed");

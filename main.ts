@@ -40,6 +40,9 @@ import {
   resolveCaptureFileName,
   buildQuickCaptureContent,
   budgetGuardrail,
+  computeUsageWindow,
+  usageChartFromWindow,
+  usageDayFamilyBars,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -177,6 +180,9 @@ interface ViewState {
   expanded: Set<string>; // keys of expanded project cards and phase cards
   openOff: Set<string>; // project slugs whose Open toggle is OFF (default: Open ON)
   completeOn: Set<string>; // project slugs whose Complete toggle is ON (default: Complete OFF)
+  usageRange: "1d" | "7d" | "30d"; // Usage chart window length (build 2.8)
+  usageOffset: number; // windows back from the one ending today (0 = current)
+  systemsOpen: boolean; // right-side systems drawer visibility (build 2.8)
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -190,6 +196,9 @@ function makeViewState(): ViewState {
     expanded: new Set(),
     openOff: new Set(),
     completeOn: new Set(),
+    usageRange: "7d",
+    usageOffset: 0,
+    systemsOpen: false,
   };
 }
 
@@ -1801,24 +1810,27 @@ function usageDayTooltip(day: UsageChartDay): string {
   return `${day.date}: ${formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
 }
 
-// Inline SVG stacked bar chart: one bar per day (always 30, see computeUsageView),
-// segments stacked by model family. Built with DOM APIs, width 100% via viewBox.
-function renderUsageChart(container: HTMLElement, chart: UsageChart) {
+// Inline SVG stacked bar chart over an arbitrary day window, segments stacked
+// by model family. The viewBox width comes from the measured container so the
+// chart genuinely fills the pane (a fixed viewBox letterboxes at 600px).
+function renderUsageChart(
+  container: HTMLElement,
+  chart: UsageChart,
+  pixelWidth: number,
+  ariaLabel: string
+) {
   const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
-  const width = 600;
-  const height = 160;
+  const width = Math.max(320, pixelWidth);
+  const height = 180;
   const marginLeft = 44;
   const marginBottom = 16;
   const plotWidth = width - marginLeft - 4;
   const plotHeight = height - marginBottom - 6;
   const baselineY = height - marginBottom;
 
-  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "160" });
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "180" });
   svg.setAttribute("role", "img");
-  svg.setAttribute(
-    "aria-label",
-    "Daily API-equivalent cost over the last 30 days, stacked by model family"
-  );
+  svg.setAttribute("aria-label", ariaLabel);
   svg.classList.add("aios-usage-svg");
 
   // Y gridlines + $ labels.
@@ -1897,6 +1909,183 @@ function renderUsageChart(container: HTMLElement, chart: UsageChart) {
   }
 
   wrap.appendChild(svg);
+}
+
+// Single-day view: one vertical bar per model family (wider bars, family
+// names on the x axis). Data from usageDayFamilyBars (model.mjs, pure).
+function renderUsageDayChart(
+  container: HTMLElement,
+  dayBars: {
+    date: string;
+    bars: { family: string; label: string; costUsd: number; fraction: number }[];
+    gridlines: { fraction: number; label: string }[];
+  },
+  pixelWidth: number
+) {
+  const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
+  const width = Math.max(320, pixelWidth);
+  const height = 180;
+  const marginLeft = 44;
+  const marginBottom = 16;
+  const plotWidth = width - marginLeft - 4;
+  const plotHeight = height - marginBottom - 6;
+  const baselineY = height - marginBottom;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "180" });
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `API-equivalent cost by model family on ${dayBars.date}`);
+  svg.classList.add("aios-usage-svg");
+
+  for (const g of dayBars.gridlines) {
+    const y = baselineY - g.fraction * plotHeight;
+    svg.appendChild(
+      svgEl("line", {
+        x1: String(marginLeft),
+        x2: String(width - 4),
+        y1: String(y),
+        y2: String(y),
+        class: "aios-usage-gridline",
+      })
+    );
+    const label = svgEl("text", {
+      x: String(marginLeft - 6),
+      y: String(y + 3),
+      class: "aios-usage-axis-label",
+      "text-anchor": "end",
+    });
+    label.textContent = g.label;
+    svg.appendChild(label);
+  }
+
+  const n = dayBars.bars.length || 1;
+  const slot = plotWidth / n;
+  const barWidth = Math.min(90, Math.max(24, slot * 0.5));
+  dayBars.bars.forEach((bar, i) => {
+    const x = marginLeft + i * slot + (slot - barWidth) / 2;
+    const g = svgEl("g", { class: "aios-usage-bar-group" });
+    const title = svgEl("title", {});
+    title.textContent = `${bar.label}: ${formatUsd(bar.costUsd)}`;
+    g.appendChild(title);
+    const barHeight = Math.max(1, bar.fraction * plotHeight);
+    g.appendChild(
+      svgEl("rect", {
+        x: String(x),
+        y: String(baselineY - barHeight),
+        width: String(barWidth),
+        height: String(barHeight),
+        class: "aios-usage-bar aios-usage-bar-" + bar.family,
+      })
+    );
+    const label = svgEl("text", {
+      x: String(x + barWidth / 2),
+      y: String(height - 2),
+      class: "aios-usage-axis-label",
+      "text-anchor": "middle",
+    });
+    label.textContent = bar.label;
+    g.appendChild(label);
+    svg.appendChild(g);
+  });
+  if (dayBars.bars.length === 0) {
+    const label = svgEl("text", {
+      x: String(marginLeft + plotWidth / 2),
+      y: String(baselineY - 8),
+      class: "aios-usage-axis-label",
+      "text-anchor": "middle",
+    });
+    label.textContent = "No usage recorded this day";
+    svg.appendChild(label);
+  }
+
+  wrap.appendChild(svg);
+}
+
+// Chart zone: range toggle (1D/7D/30D) + prev/next paging + window label +
+// the chart itself. Re-renders locally on control clicks and on pane resize
+// (ResizeObserver, >20px width change) without a full dashboard refresh.
+function renderUsageChartZone(
+  container: HTMLElement,
+  stats: UsageStats,
+  viewState: ViewState
+) {
+  const zone = container.createDiv({ cls: "aios-usage-chart-zone" });
+
+  const draw = () => {
+    zone.empty();
+    const win = computeUsageWindow(
+      stats.days || [],
+      viewState.usageRange,
+      viewState.usageOffset,
+      new Date()
+    );
+
+    const controls = zone.createDiv({ cls: "aios-usage-controls" });
+    const label = controls.createDiv({ cls: "aios-usage-window-label", text: win.label });
+    label.setAttr("aria-live", "polite");
+    const spacer = controls.createDiv({ cls: "aios-usage-controls-spacer" });
+    void spacer;
+
+    const seg = controls.createDiv({ cls: "aios-usage-range" });
+    for (const r of ["1d", "7d", "30d"] as const) {
+      const b = seg.createEl("button", {
+        cls: "aios-usage-range-btn" + (viewState.usageRange === r ? " aios-usage-range-on" : ""),
+        text: r.toUpperCase(),
+      });
+      b.addEventListener("click", () => {
+        if (viewState.usageRange === r) return;
+        viewState.usageRange = r;
+        viewState.usageOffset = 0;
+        draw();
+      });
+    }
+
+    const nav = controls.createDiv({ cls: "aios-usage-nav" });
+    const prev = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
+    prev.setAttr("aria-label", "Previous window");
+    setIcon(prev, "chevron-left");
+    prev.disabled = !win.canPrev;
+    prev.addEventListener("click", () => {
+      if (!win.canPrev) return;
+      viewState.usageOffset += 1;
+      draw();
+    });
+    const next = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
+    next.setAttr("aria-label", "Next window");
+    setIcon(next, "chevron-right");
+    next.disabled = !win.canNext;
+    next.addEventListener("click", () => {
+      if (!win.canNext) return;
+      viewState.usageOffset -= 1;
+      draw();
+    });
+
+    const chartHost = zone.createDiv({ cls: "aios-usage-chart-host" });
+    const width = Math.floor(chartHost.getBoundingClientRect().width) || zone.clientWidth || 600;
+    if (viewState.usageRange === "1d") {
+      renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0]), width);
+    } else {
+      renderUsageChart(
+        chartHost,
+        usageChartFromWindow(win.days),
+        width,
+        `Daily API-equivalent cost, ${win.label}, stacked by model family`
+      );
+    }
+  };
+
+  draw();
+
+  let lastWidth = zone.getBoundingClientRect().width;
+  const ro = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const w = entry.contentRect.width;
+      if (Math.abs(w - lastWidth) > 20) {
+        lastWidth = w;
+        draw();
+      }
+    }
+  });
+  ro.observe(zone);
 }
 
 function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
@@ -2017,13 +2206,15 @@ function renderBudgetWarning(
 
 function renderUsageView(
   container: HTMLElement,
+  stats: UsageStats,
   view: UsageView,
   workflowsView: UsageWorkflowsView,
-  dailyBudgetUsd: number
+  dailyBudgetUsd: number,
+  viewState: ViewState
 ) {
   renderBudgetWarning(container, budgetGuardrail(view.tiles.todayCostUsd, dailyBudgetUsd));
   renderUsageTiles(container, view);
-  renderUsageChart(container, view.chart);
+  renderUsageChartZone(container, stats, viewState);
   renderUsageLegend(container, view.legend);
   container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
   renderUsageTable(container, view.table);
@@ -2037,7 +2228,12 @@ function renderUsageView(
 
 // Usage tab: async load + render. Renders a hint when the exporter has not
 // run yet (no usage-stats.json at settings.usageStatsPath).
-function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboardSettings) {
+function renderUsageTab(
+  app: App,
+  container: HTMLElement,
+  settings: AiosDashboardSettings,
+  viewState: ViewState
+) {
   const wrap = container.createDiv({ cls: "aios-usage-tab" });
   wrap.createDiv({ cls: "aios-empty", text: "Loading usage data..." });
   loadUsageStats(app, settings.usageStatsPath).then((stats) => {
@@ -2051,7 +2247,7 @@ function renderUsageTab(app: App, container: HTMLElement, settings: AiosDashboar
     }
     const view = computeUsageView(stats, new Date());
     const workflowsView = computeWorkflowsView(stats);
-    renderUsageView(wrap, view, workflowsView, settings.dailyBudgetUsd);
+    renderUsageView(wrap, stats, view, workflowsView, settings.dailyBudgetUsd, viewState);
   });
 }
 
@@ -2410,19 +2606,52 @@ function renderDashboard(
   const projects = readProjects(app, settings.projectsRoot);
   const openTasks = tasks.filter((t) => OPEN_STATUSES.includes(t.status));
 
-  // ----- App bar -----
+  // Health tiles are computed unconditionally (not gated on showHealthStrip)
+  // so the Today tab's intake-backlog stat and the app-bar systems status
+  // share the same source of truth.
+  const healthInput = gatherHealthInput(app, settings, tasks, projects);
+  const healthTiles = computeHealth(healthInput);
+
+  // ----- App bar (slim single row; build 2.8) -----
   const header = root.createDiv({ cls: "aios-header" });
-  const mark = header.createDiv({ cls: "aios-app-mark" });
-  setIcon(mark, "layout-grid");
+  header.createDiv({ cls: "aios-app-mark" });
   const titleBlock = header.createDiv({ cls: "aios-title-block" });
-  titleBlock.createDiv({ cls: "aios-eyebrow", text: "OPERATIONS CONSOLE" });
   titleBlock.createEl("h1", { text: settings.headerTitle });
+  titleBlock.createDiv({ cls: "aios-eyebrow", text: "OPERATIONS CONSOLE" });
   const stat = header.createDiv({ cls: "aios-stat" });
   const activeCount = projects.filter((p) => p.status === "active").length;
   stat.setText(`${openTasks.length} open · ${activeCount} active`);
   header.createDiv({ cls: "aios-header-spacer" });
 
   const actions = header.createDiv({ cls: "aios-header-actions" });
+
+  // Systems status: one dot + summary text; opens the right-side drawer.
+  // Health issues are known synchronously; automation errors arrive async
+  // and update the same control in place. Respects showHealthStrip (a user
+  // who hid health reporting is not nagged about it in the app bar either).
+  const sysBtn = actions.createEl("button", { cls: "aios-sys-status" });
+  sysBtn.setAttr("aria-label", "Systems status");
+  sysBtn.createSpan({ cls: "aios-sys-dot" });
+  const sysLabel = sysBtn.createSpan({ cls: "aios-sys-label", text: "systems ok" });
+  const healthIssueCount = settings.showHealthStrip
+    ? healthTiles.filter((t) => t.warn).length
+    : 0;
+  const applySysStatus = (autoIssues: number) => {
+    const n = healthIssueCount + autoIssues;
+    sysBtn.toggleClass("aios-sys-status-issues", n > 0);
+    sysLabel.setText(n > 0 ? `${n} issue${n === 1 ? "" : "s"}` : "systems ok");
+  };
+  applySysStatus(0);
+  loadAutomationHealth(app, settings.automationHealthPath).then((health) => {
+    if (!health) return;
+    const view: AutomationView = computeAutomationView(health, new Date());
+    applySysStatus((view.counts.error || 0) + (view.counts.unknown || 0));
+  });
+  sysBtn.addEventListener("click", () => {
+    viewState.systemsOpen = !viewState.systemsOpen;
+    refresh();
+  });
+
   const refreshBtn = actions.createEl("button", { cls: "aios-refresh aios-icon-btn" });
   refreshBtn.setAttr("aria-label", "Refresh");
   setIcon(refreshBtn, "rotate-cw");
@@ -2440,18 +2669,43 @@ function renderDashboard(
     });
   }
 
-  // ----- Health strip -----
-  // Computed unconditionally (not gated on showHealthStrip) so the Today
-  // tab's intake-backlog stat has the same source of truth even when the
-  // strip itself is hidden by user choice.
-  const healthInput = gatherHealthInput(app, settings, tasks, projects);
-  const healthTiles = computeHealth(healthInput);
-  if (settings.showHealthStrip) {
-    renderHealthStrip(app, root, healthTiles, settings);
-  }
+  // ----- Systems drawer (replaces the always-on health + automations strips) -----
+  if (viewState.systemsOpen) {
+    const drawer = root.createDiv({ cls: "aios-drawer" });
+    drawer.setAttr("tabindex", "-1");
+    const dHead = drawer.createDiv({ cls: "aios-drawer-head" });
+    dHead.createDiv({ cls: "aios-drawer-title", text: "Systems" });
+    const closeBtn = dHead.createEl("button", { cls: "aios-icon-btn aios-drawer-close" });
+    closeBtn.setAttr("aria-label", "Close systems panel");
+    setIcon(closeBtn, "x");
+    const closeDrawer = () => {
+      viewState.systemsOpen = false;
+      refresh();
+    };
+    closeBtn.addEventListener("click", closeDrawer);
+    drawer.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") closeDrawer();
+    });
 
-  // ----- Automations strip (launchd job health; hidden when no data file) -----
-  renderAutomationSection(app, root, settings);
+    const dBody = drawer.createDiv({ cls: "aios-drawer-body" });
+    if (settings.showHealthStrip) {
+      if (healthTiles.length === 0) {
+        const sec = dBody.createDiv({ cls: "aios-health-section" });
+        sec.createDiv({ cls: "aios-section-eyebrow", text: "Systems" });
+        renderEmptyState(sec, "All systems healthy.");
+      } else {
+        renderHealthStrip(app, dBody, healthTiles, settings);
+      }
+    }
+    renderAutomationSection(app, dBody, settings);
+
+    // Focus for Escape-to-close, but never steal focus from an input the
+    // user is typing in when a live vault change re-renders the dashboard.
+    const active = document.activeElement;
+    if (!active || active === document.body) {
+      window.setTimeout(() => drawer.focus(), 0);
+    }
+  }
 
   // ----- Tab bar (segmented nav) -----
   const tabs = root.createDiv({ cls: "aios-tabs" });
@@ -2488,7 +2742,7 @@ function renderDashboard(
   } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else if (viewState.activeTab === "usage") {
-    renderUsageTab(app, body, settings);
+    renderUsageTab(app, body, settings, viewState);
   } else if (viewState.activeTab === "opsmap") {
     renderOpsMapTab(app, body, settings);
   } else {
