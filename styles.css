@@ -1862,3 +1862,46 @@
 .modal .aios-modal {
   background: var(--aios-surface);
 }
+
+/* Modal token scope (2.8.2). Obsidian mounts modals at the app root, OUTSIDE
+   .aios-dashboard-root, so every var(--aios-*) inside a modal resolved to
+   nothing: transparent background, unstyled text (Jaymo's report: systems
+   cards mid-screen with transparent bg). Mirror the tokens onto the modal
+   scope; values must stay in sync with the block at the top of this file. */
+.aios-modal,
+.modal:has(> .aios-modal) {
+  --aios-bg: #101010;
+  --aios-surface: #171717;
+  --aios-surface-2: #1f1f1f;
+  --aios-track: #0c0c0c;
+  --aios-border: #262626;
+  --aios-border-hi: #3a3a3a;
+  --aios-accent: var(--interactive-accent, #8b5cf6);
+  --aios-accent-hi: #a78bfa;
+  --aios-grad: var(--aios-accent);
+  --aios-text: #ececec;
+  --aios-dim: #9a9a9a;
+  --aios-faint: #5f5f5f;
+  --aios-panel: var(--aios-surface);
+  --aios-panel-2: var(--aios-surface-2);
+  --aios-purple: var(--aios-accent);
+  --aios-white: #fff;
+  --aios-foot-color: var(--aios-faint);
+  --aios-p1: #f97066;
+  --aios-p2: #f7b955;
+  --aios-p3: #6ca7f4;
+  --aios-p4: #5f5f5f;
+  --aios-done-color: #40d69a;
+  --aios-wip: #a78bfa;
+}
+/* With tokens now resolvable, paint the modal shell explicitly. */
+.modal:has(> .aios-modal) {
+  background: var(--aios-surface);
+  border: 1px solid var(--aios-border-hi);
+  border-radius: 0;
+  color: var(--aios-text);
+}
+.modal .aios-modal {
+  background: var(--aios-surface);
+  color: var(--aios-text);
+}
