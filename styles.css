@@ -1838,3 +1838,27 @@
 .aios-dashboard-root .aios-usage-chart-host {
   width: 100%;
 }
+
+/* Drawer contrast fix (2.8.1): the expanded detail card used the same grey
+   as the drawer behind it, so it read as transparent and its text sank in.
+   Inside the drawer, detail cards step DOWN to the page bg with a stronger
+   border, and labels step up one contrast level. */
+.aios-dashboard-root .aios-drawer .aios-auto-detail {
+  background: var(--aios-bg);
+  border-color: var(--aios-border-hi);
+}
+.aios-dashboard-root .aios-drawer .aios-auto-detail-label {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-drawer .aios-auto-detail-value {
+  color: var(--aios-text);
+}
+.aios-dashboard-root .aios-drawer .aios-health-tile,
+.aios-dashboard-root .aios-drawer .aios-auto-tile {
+  background: var(--aios-bg);
+}
+/* Belt and braces: the health/task modals stay opaque even if the :has()
+   direct-child match ever misses (older installer, DOM change). */
+.modal .aios-modal {
+  background: var(--aios-surface);
+}
