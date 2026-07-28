@@ -95,7 +95,48 @@ export function localDay(timestamp) {
   return `${y}-${m}-${day}`;
 }
 
-async function findTranscripts(root, cutoffMs) {
+// Recursively collects every .jsonl path under `dir` (depth-unbounded).
+// Subagent transcripts are written at least 2 directory levels below their
+// project dir (<project>/<session-id>/subagents/agent-*.jsonl), and nested
+// subagents (an agent dispatching its own subagents) go deeper still
+// (observed: <project>/<session-id>/subagents/workflows/wf_*/agent-*.jsonl).
+// Non-.jsonl siblings (tool-results/*.txt, workflows/scripts/*.js, a
+// project-level memory/*.md dir) are skipped by the extension check, so
+// walking into them is harmless.
+export async function walkJsonlFiles(dir) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await walkJsonlFiles(full)));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+// `project` is always the TOP-LEVEL directory name under the projects root
+// (e.g. "-Users-jaymo-AIOS"), regardless of how deep a file sits -- a
+// session-id directory or a `subagents`/`workflows` directory is never
+// mistaken for a project, because `project` comes from the first readdir
+// level only.
+//
+// `sessionId` is the real (top-level) Claude Code session id. For a file
+// that sits directly under the project dir, that's just its own basename
+// (unchanged from before this fix). For a file nested any number of levels
+// deeper -- a subagent, or a subagent-of-a-subagent -- it's the FIRST path
+// segment under the project dir, i.e. the outermost session-id directory
+// that everything below it was dispatched from. `isTopLevel` tells the
+// caller which case it is, since only top-level files are real user
+// sessions (see the `sessions` counter in applyTranscriptToAggregates).
+export async function findTranscripts(root, cutoffMs) {
   const files = [];
   let projectDirs;
   try {
@@ -106,23 +147,19 @@ async function findTranscripts(root, cutoffMs) {
   for (const entry of projectDirs) {
     if (!entry.isDirectory()) continue;
     const projectPath = path.join(root, entry.name);
-    let children;
-    try {
-      children = await fs.readdir(projectPath, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const child of children) {
-      if (!child.isFile() || !child.name.endsWith(".jsonl")) continue;
-      const filePath = path.join(projectPath, child.name);
+    const jsonlPaths = await walkJsonlFiles(projectPath);
+    for (const filePath of jsonlPaths) {
+      let stat;
       try {
-        const stat = await fs.stat(filePath);
-        if (stat.mtimeMs >= cutoffMs) {
-          files.push({ filePath, project: entry.name });
-        }
+        stat = await fs.stat(filePath);
       } catch {
-        // Ignore unreadable files.
+        continue; // Ignore unreadable files.
       }
+      if (stat.mtimeMs < cutoffMs) continue;
+      const relParts = path.relative(projectPath, filePath).split(path.sep);
+      const isTopLevel = relParts.length === 1;
+      const sessionId = isTopLevel ? path.basename(relParts[0], ".jsonl") : relParts[0];
+      files.push({ filePath, project: entry.name, sessionId, isTopLevel });
     }
   }
   return files;
@@ -433,6 +470,24 @@ export function foldWorkflowEntry(acc, dayKey, cost, outputTokens) {
  * (createSkillSegmenter) already only emits a run once it has messages > 0,
  * and messages are only recorded for entries that passed the same cutoff
  * inside parseTranscript.
+ *
+ * `isSubagent` (build 2.9 recursive-scan fix): true when this transcript is
+ * a dispatched subagent file rather than a real top-level session file. Two
+ * things change for those:
+ *  - skillRuns are dropped entirely. parseTranscript's segmenter opens/closes
+ *    runs on genuine human turns (`isSidechain !== true && !isToolResultContent`),
+ *    but a subagent transcript has no genuine human turns -- its "user"
+ *    messages are the orchestrator's tool_result feed and prompt injection,
+ *    not a person typing. Any run a subagent transcript appeared to produce
+ *    would be a segmentation artifact, not a real skill invocation, so it
+ *    must not pollute per-skill cost attribution (which existing callers
+ *    already rely on to mean "human-invoked skill runs").
+ *  - `sessions` is not incremented. A subagent transcript is not a user
+ *    session -- it's delegated work billed to the parent session's workflow
+ *    (see findTranscripts/main: the caller passes the PARENT session's
+ *    `rule` for a subagent file, not one derived from the subagent's own
+ *    content). Cost/tokens/messages still fold into days/projects/workflows
+ *    as normal; only the session count stays real.
  */
 export function applyTranscriptToAggregates({
   entries,
@@ -443,16 +498,19 @@ export function applyTranscriptToAggregates({
   projects,
   workflows,
   skills,
+  isSubagent = false,
 }) {
-  for (const run of skillRuns) {
-    if (!skills.has(run.key)) {
-      skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+  if (!isSubagent) {
+    for (const run of skillRuns) {
+      if (!skills.has(run.key)) {
+        skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+      }
+      const s = skills.get(run.key);
+      s.costUsd += run.costUsd;
+      s.outputTokens += run.outputTokens;
+      s.messages += run.messages;
+      s.runs += 1;
     }
-    const s = skills.get(run.key);
-    s.costUsd += run.costUsd;
-    s.outputTokens += run.outputTokens;
-    s.messages += run.messages;
-    s.runs += 1;
   }
 
   if (entries.length === 0) return;
@@ -471,7 +529,7 @@ export function applyTranscriptToAggregates({
     });
   }
   const w = workflows.get(rule.key);
-  w.sessions += 1;
+  if (!isSubagent) w.sessions += 1;
 
   for (const e of entries) {
     const family = modelFamily(e.model);
@@ -532,19 +590,59 @@ async function main() {
   // skillKey -> { costUsd, outputTokens, messages, runs }
   const skills = new Map();
 
-  for (const { filePath, project } of transcripts) {
-    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
+  // Top-level session files must be classified BEFORE any nested subagent
+  // file, because a subagent's cost rolls up to its PARENT session's
+  // workflow (a Sonnet builder dispatched during an "Interactive" session is
+  // Interactive cost, not its own workflow) -- classifying by the subagent's
+  // own content would be wrong and could even fabricate a bogus workflow out
+  // of `agent-<hash>` "session ids". Directory-walk order is not guaranteed
+  // to visit a session's own file before its subagents/ subtree, so split
+  // and process top-level first regardless of discovery order.
+  const topLevel = transcripts.filter((t) => t.isTopLevel);
+  const nested = transcripts.filter((t) => !t.isTopLevel);
 
+  // sessionId -> the workflow rule that session's own top-level transcript
+  // resolved to, so every subagent dispatched under it can inherit the same
+  // classification.
+  const sessionRules = new Map();
+
+  for (const { filePath, project, sessionId } of topLevel) {
+    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
     const projectName = prettifyProject(project);
-    const sessionId = path.basename(filePath, ".jsonl");
     const rule = classifyWorkflow(workflowRules, {
       project: projectName,
       sessionId,
       firstCommand,
       firstUserContent,
     });
-
+    sessionRules.set(sessionId, rule);
     applyTranscriptToAggregates({ entries, skillRuns, projectName, rule, days, projects, workflows, skills });
+  }
+
+  for (const { filePath, project, sessionId } of nested) {
+    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
+    const projectName = prettifyProject(project);
+    // Prefer the parent session's own classification. Fall back to
+    // classifying off this file's content only if the parent session's
+    // top-level transcript wasn't discovered at all (e.g. it aged out of
+    // the mtime prefilter while a subagent file it spawned was touched more
+    // recently) -- zero-in-window-entries files still fall through
+    // applyTranscriptToAggregates's existing empty-transcript guard, so this
+    // never fabricates a workflow entry out of nothing.
+    const rule =
+      sessionRules.get(sessionId) ||
+      classifyWorkflow(workflowRules, { project: projectName, sessionId, firstCommand, firstUserContent });
+    applyTranscriptToAggregates({
+      entries,
+      skillRuns,
+      projectName,
+      rule,
+      days,
+      projects,
+      workflows,
+      skills,
+      isSubagent: true,
+    });
   }
 
   const sortedDays = [...days.keys()].sort();

@@ -23,6 +23,7 @@ import {
   foldWorkflowEntry,
   parseTranscript,
   applyTranscriptToAggregates,
+  findTranscripts,
 } from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
@@ -395,6 +396,168 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   assert.equal(w.sessions, 1, "only the contributing transcript counts as a session -- the empty one did not");
   assert.ok(w.costUsd > 0, "cost flowed through from the single in-window entry");
   assert.equal(projects.get("some-project").messages, 1, "project aggregate reflects only the contributing transcript");
+}
+
+// --- findTranscripts: recurses into subagent directories at any depth
+// (build 2.9 recursive-scan fix). Real transcripts on disk are nested like
+// <projectsRoot>/<project>/<session-id>/subagents/agent-*.jsonl, and deeper
+// still for a subagent that dispatches its own subagents:
+// <project>/<session-id>/subagents/workflows/wf_*/agent-*.jsonl. ---
+{
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "findTranscripts-test-"));
+  try {
+    const project = "-Users-jaymo-AIOS";
+    const sessionId = "9a9ef267-d9f0-478b-8c80-85269dbb526d";
+    const projectDir = path.join(root, project);
+    const topLevelFile = path.join(projectDir, `${sessionId}.jsonl`);
+    const subagentDir = path.join(projectDir, sessionId, "subagents");
+    const subagentFile = path.join(subagentDir, "agent-afa3dd6e7ec4f8e6d.jsonl");
+    const nestedSubagentDir = path.join(subagentDir, "workflows", "wf_cd47bf27-ac2");
+    const nestedSubagentFile = path.join(nestedSubagentDir, "agent-a2f53d6f6ae332553.jsonl");
+
+    await fs.mkdir(nestedSubagentDir, { recursive: true });
+    await fs.writeFile(topLevelFile, "{}\n", "utf8");
+    await fs.writeFile(subagentFile, "{}\n", "utf8");
+    await fs.writeFile(nestedSubagentFile, "{}\n", "utf8");
+    // A non-.jsonl sibling (mirrors real tool-results/*.txt, memory/*.md
+    // dirs) must not be picked up and must not break the walk.
+    await fs.writeFile(path.join(subagentDir, "notes.txt"), "not a transcript", "utf8");
+
+    const cutoffMs = Date.now() - 35 * 24 * 60 * 60 * 1000;
+    const files = await findTranscripts(root, cutoffMs);
+    assert.equal(files.length, 3, "all three nested .jsonl files are discovered, the .txt sibling is not");
+
+    const byPath = new Map(files.map((f) => [f.filePath, f]));
+
+    const top = byPath.get(topLevelFile);
+    assert.ok(top, "top-level session file discovered");
+    assert.equal(top.project, project, "project is the top-level dir name");
+    assert.equal(top.sessionId, sessionId, "top-level file's sessionId is its own basename");
+    assert.equal(top.isTopLevel, true, "top-level file flagged as a real session");
+
+    const sub = byPath.get(subagentFile);
+    assert.ok(sub, "one-level-nested subagent file discovered");
+    assert.equal(sub.project, project, "subagent file's project is STILL the top-level dir, not 'subagents'");
+    assert.equal(sub.sessionId, sessionId, "subagent file's sessionId resolves to its PARENT session id");
+    assert.equal(sub.isTopLevel, false, "subagent file is not flagged as a top-level session");
+
+    const nestedSub = byPath.get(nestedSubagentFile);
+    assert.ok(nestedSub, "two-levels-nested (subagent-of-a-subagent) file discovered");
+    assert.equal(
+      nestedSub.project,
+      project,
+      "deeply-nested file's project is still the top-level dir, never a session-id or 'workflows'/'wf_*' dir"
+    );
+    assert.equal(
+      nestedSub.sessionId,
+      sessionId,
+      "deeply-nested file walks up to the OUTERMOST session-id directory, not 'subagents' or 'wf_cd47bf27-ac2'"
+    );
+    assert.equal(nestedSub.isTopLevel, false, "deeply-nested file is not flagged as a top-level session");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- findTranscripts: the existing mtime prefilter still applies to files
+// found by the recursive walk, not just top-level ones. ---
+{
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "findTranscripts-cutoff-test-"));
+  try {
+    const staleFile = path.join(root, "proj", "session-1", "subagents", "agent-old.jsonl");
+    await fs.mkdir(path.dirname(staleFile), { recursive: true });
+    await fs.writeFile(staleFile, "{}\n", "utf8");
+    const farFutureCutoffMs = Date.now() + 24 * 60 * 60 * 1000; // 1 day in the future
+    const files = await findTranscripts(root, farFutureCutoffMs);
+    assert.deepEqual(files, [], "a subagent file older than cutoff is excluded, same as a top-level file would be");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- applyTranscriptToAggregates: isSubagent semantics (build 2.9
+// recursive-scan fix). A subagent transcript's cost/tokens still fold into
+// days/projects/workflows (attributed to the PARENT session's workflow rule
+// by the caller), but it must not inflate `sessions` (it isn't a user
+// session) and must not contribute skillRuns (a subagent transcript has no
+// genuine human turns, so any apparent run would be a segmentation
+// artifact, not a real skill invocation). ---
+{
+  const days = new Map();
+  const projects = new Map();
+  const workflows = new Map();
+  const skills = new Map();
+  const rule = { key: "interactive", label: "Interactive" };
+
+  const entry = {
+    timestamp: "2026-07-20T12:00:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 100,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  // A bogus "skill run" the segmenter should never actually produce for a
+  // subagent transcript, but even if it did, isSubagent must suppress it.
+  const bogusSkillRun = { key: "agent-afa3dd6e7ec4f8e6d", costUsd: 5, outputTokens: 500, messages: 1 };
+
+  // First fold a real top-level session (establishes the workflow + a real
+  // session count of 1) so we can prove the subagent fold on top of it does
+  // NOT bump sessions further.
+  applyTranscriptToAggregates({
+    entries: [entry],
+    skillRuns: [{ key: "real-skill", costUsd: 1, outputTokens: 100, messages: 1 }],
+    projectName: "AIOS",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+    isSubagent: false,
+  });
+  assert.equal(workflows.get("interactive").sessions, 1, "the real top-level session counts as 1 session");
+  assert.equal(skills.get("real-skill").runs, 1, "the real top-level session's skill run is recorded");
+
+  // Now fold a subagent transcript attributed to the SAME workflow.
+  applyTranscriptToAggregates({
+    entries: [entry],
+    skillRuns: [bogusSkillRun],
+    projectName: "AIOS",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+    isSubagent: true,
+  });
+
+  const w = workflows.get("interactive");
+  assert.equal(w.sessions, 1, "a subagent transcript does NOT increment sessions -- still 1, not 2");
+  assert.ok(w.costUsd > 0, "cost still rolled up into the parent session's workflow");
+  assert.equal(
+    w.costUsd,
+    2 * estimateCostForEntry(entry),
+    "workflow cost reflects BOTH the top-level session's and the subagent's contribution"
+  );
+  assert.equal(
+    skills.has("agent-afa3dd6e7ec4f8e6d"),
+    false,
+    "a subagent transcript's skillRuns are dropped entirely -- no bogus per-skill entry created"
+  );
+  assert.equal(skills.size, 1, "skills map still only has the one real skill from the top-level session");
+  assert.equal(
+    projects.get("AIOS").messages,
+    2,
+    "project aggregate DOES include the subagent's messages (cost/tokens roll up, only `sessions` is exempt)"
+  );
+}
+
+function estimateCostForEntry(entry) {
+  // Mirrors estimateCost(family, entry, entry.timestamp) for the sonnet
+  // family. 2026-07-20 is still inside the Sonnet 5 intro-pricing window
+  // (through 2026-08-31), so the intro rate applies.
+  const rate = SONNET_INTRO_RATE;
+  return (entry.input_tokens * rate.in + entry.output_tokens * rate.out) / 1e6;
 }
 
 console.log("exportUsageWorkflows: all assertions passed");
