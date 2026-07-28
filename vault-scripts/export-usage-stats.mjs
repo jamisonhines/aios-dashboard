@@ -262,7 +262,16 @@ export function createSkillSegmenter() {
 
 // Single pass over the transcript: collects usage entries AND the two extra
 // classification signals (firstUserContent, firstCommand) with no second pass.
-async function parseTranscript(filePath) {
+//
+// `cutoffMs` windows entries by their OWN timestamp (not the file's mtime).
+// findTranscripts() only prefilters which FILES are worth opening (a file
+// untouched for WINDOW_DAYS isn't worth reading); a long-lived session file
+// that passes that prefilter can still contain entries far outside the
+// window (it was appended to over many days). Filtering here is the single
+// choke point: entries[] and skillRuns (fed by the segmenter) both flow from
+// this loop, so days/projects/workflows/skills all become consistently
+// windowed from one change.
+export async function parseTranscript(filePath, cutoffMs) {
   const entries = [];
   let firstUserContent;
   const segmenter = createSkillSegmenter();
@@ -294,6 +303,8 @@ async function parseTranscript(filePath) {
     if (!model || model === "<synthetic>") continue;
     const timestamp = obj.timestamp;
     if (!timestamp) continue;
+    const entryMs = new Date(timestamp).getTime();
+    if (Number.isNaN(entryMs) || entryMs < cutoffMs) continue;
     const entry = {
       timestamp,
       model,
@@ -405,6 +416,100 @@ export function foldWorkflowEntry(acc, dayKey, cost, outputTokens) {
   return acc;
 }
 
+/**
+ * Folds one parsed transcript (its skillRuns + already-window-filtered
+ * entries) into the four running aggregates (days/projects/workflows/
+ * skills), all passed in as Maps and mutated in place. Extracted from main()
+ * (build 2.9) so the zero-in-window-entries edge case is unit-testable
+ * without synthesizing real transcript files or touching the filesystem.
+ *
+ * Because `entries` arrives pre-filtered by parseTranscript()'s cutoffMs
+ * check, "this transcript has nothing to contribute" collapses to
+ * `entries.length === 0` -- a file that passed the mtime prefilter in
+ * findTranscripts() but whose own entries are all outside the window. Guard
+ * on that up front so such a file never creates a $0/0-message workflow
+ * session, and never materializes a workflow/project entry that would
+ * otherwise carry no data. skillRuns need no extra guard here: the segmenter
+ * (createSkillSegmenter) already only emits a run once it has messages > 0,
+ * and messages are only recorded for entries that passed the same cutoff
+ * inside parseTranscript.
+ */
+export function applyTranscriptToAggregates({
+  entries,
+  skillRuns,
+  projectName,
+  rule,
+  days,
+  projects,
+  workflows,
+  skills,
+}) {
+  for (const run of skillRuns) {
+    if (!skills.has(run.key)) {
+      skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+    }
+    const s = skills.get(run.key);
+    s.costUsd += run.costUsd;
+    s.outputTokens += run.outputTokens;
+    s.messages += run.messages;
+    s.runs += 1;
+  }
+
+  if (entries.length === 0) return;
+
+  if (!workflows.has(rule.key)) {
+    workflows.set(rule.key, {
+      label: rule.label,
+      costUsd: 0,
+      outputTokens: 0,
+      messages: 0,
+      sessions: 0,
+      // dayKey -> { costUsd, outputTokens, messages }. Only days with actual
+      // cost get an entry (see below) -- not zero-padded across the whole
+      // WINDOW_DAYS window, to keep this JSON compact.
+      byDay: new Map(),
+    });
+  }
+  const w = workflows.get(rule.key);
+  w.sessions += 1;
+
+  for (const e of entries) {
+    const family = modelFamily(e.model);
+    const cost = estimateCost(family, e, e.timestamp);
+    const dayKey = localDay(e.timestamp);
+
+    if (!days.has(dayKey)) days.set(dayKey, {});
+    const dayModels = days.get(dayKey);
+    if (!dayModels[family]) {
+      dayModels[family] = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        messages: 0,
+        costUsd: 0,
+      };
+    }
+    const bucket = dayModels[family];
+    bucket.inputTokens += e.input_tokens;
+    bucket.outputTokens += e.output_tokens;
+    bucket.cacheReadTokens += e.cache_read_input_tokens;
+    bucket.cacheWriteTokens += e.cache_creation_input_tokens;
+    bucket.messages += 1;
+    bucket.costUsd += cost;
+
+    if (!projects.has(projectName)) {
+      projects.set(projectName, { costUsd: 0, outputTokens: 0, messages: 0 });
+    }
+    const p = projects.get(projectName);
+    p.costUsd += cost;
+    p.outputTokens += e.output_tokens;
+    p.messages += 1;
+
+    foldWorkflowEntry(w, dayKey, cost, e.output_tokens);
+  }
+}
+
 async function main() {
   const vaultRoot = process.argv[2] || process.cwd();
   const outDir = path.join(vaultRoot, "Operations", "usage");
@@ -428,18 +533,7 @@ async function main() {
   const skills = new Map();
 
   for (const { filePath, project } of transcripts) {
-    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath);
-
-    for (const run of skillRuns) {
-      if (!skills.has(run.key)) {
-        skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
-      }
-      const s = skills.get(run.key);
-      s.costUsd += run.costUsd;
-      s.outputTokens += run.outputTokens;
-      s.messages += run.messages;
-      s.runs += 1;
-    }
+    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
 
     const projectName = prettifyProject(project);
     const sessionId = path.basename(filePath, ".jsonl");
@@ -450,57 +544,7 @@ async function main() {
       firstUserContent,
     });
 
-    if (!workflows.has(rule.key)) {
-      workflows.set(rule.key, {
-        label: rule.label,
-        costUsd: 0,
-        outputTokens: 0,
-        messages: 0,
-        sessions: 0,
-        // dayKey -> { costUsd, outputTokens, messages }. Only days with actual
-        // cost get an entry (see below) -- not zero-padded across the whole
-        // WINDOW_DAYS window, to keep this JSON compact.
-        byDay: new Map(),
-      });
-    }
-    const w = workflows.get(rule.key);
-    w.sessions += 1;
-
-    for (const e of entries) {
-      const family = modelFamily(e.model);
-      const cost = estimateCost(family, e, e.timestamp);
-      const dayKey = localDay(e.timestamp);
-
-      if (!days.has(dayKey)) days.set(dayKey, {});
-      const dayModels = days.get(dayKey);
-      if (!dayModels[family]) {
-        dayModels[family] = {
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          messages: 0,
-          costUsd: 0,
-        };
-      }
-      const bucket = dayModels[family];
-      bucket.inputTokens += e.input_tokens;
-      bucket.outputTokens += e.output_tokens;
-      bucket.cacheReadTokens += e.cache_read_input_tokens;
-      bucket.cacheWriteTokens += e.cache_creation_input_tokens;
-      bucket.messages += 1;
-      bucket.costUsd += cost;
-
-      if (!projects.has(projectName)) {
-        projects.set(projectName, { costUsd: 0, outputTokens: 0, messages: 0 });
-      }
-      const p = projects.get(projectName);
-      p.costUsd += cost;
-      p.outputTokens += e.output_tokens;
-      p.messages += 1;
-
-      foldWorkflowEntry(w, dayKey, cost, e.output_tokens);
-    }
+    applyTranscriptToAggregates({ entries, skillRuns, projectName, rule, days, projects, workflows, skills });
   }
 
   const sortedDays = [...days.keys()].sort();

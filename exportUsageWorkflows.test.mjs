@@ -3,6 +3,9 @@
 // to the vault by deploy.sh). Importing the exporter never starts a scan
 // (direct-execution guard). Run: node exportUsageWorkflows.test.mjs
 import assert from "node:assert";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   extractTextContent,
   FIRST_COMMAND_RE,
@@ -18,6 +21,8 @@ import {
   SONNET_STANDARD_RATE,
   SONNET_INTRO_CUTOFF_DAY,
   foldWorkflowEntry,
+  parseTranscript,
+  applyTranscriptToAggregates,
 } from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
@@ -260,6 +265,136 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   assert.equal(sumCost, acc.costUsd, "sum(byDay.costUsd) matches the top-level total");
   assert.equal(sumTokens, acc.outputTokens, "sum(byDay.outputTokens) matches the top-level total");
   assert.equal(sumMessages, acc.messages, "sum(byDay.messages) matches the top-level total");
+}
+
+// --- parseTranscript: entries are windowed by their OWN timestamp, not the
+// file's mtime (build 2.9 bugfix). findTranscripts() only prefilters which
+// FILES are worth opening; a long-lived session file that passes that
+// prefilter can still hold entries spanning far outside WINDOW_DAYS. ---
+{
+  const now = Date.now();
+  const cutoffMs = now - 35 * 24 * 60 * 60 * 1000;
+  const inWindowIso = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+  const outOfWindowIso = new Date(now - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+  const lines = [
+    // Opens a skill run.
+    { type: "user", timestamp: inWindowIso, isSidechain: false, message: { content: marker("test-skill") } },
+    // Harness-injected expanded command body -- absorbed, not a boundary.
+    { type: "user", timestamp: inWindowIso, isSidechain: false, message: { content: "expanded command body" } },
+    // In-window usage entry: must survive.
+    {
+      type: "assistant",
+      timestamp: inWindowIso,
+      message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 20 } },
+    },
+    // Out-of-window usage entry (same file, so it passed the mtime prefilter):
+    // must be dropped by its own timestamp.
+    {
+      type: "assistant",
+      timestamp: outOfWindowIso,
+      message: { model: "claude-opus-5", usage: { input_tokens: 10, output_tokens: 20 } },
+    },
+  ];
+
+  const tmpFile = path.join(os.tmpdir(), `parseTranscript-window-test-${process.pid}.jsonl`);
+  await fs.writeFile(tmpFile, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+  try {
+    const { entries, skillRuns } = await parseTranscript(tmpFile, cutoffMs);
+
+    assert.equal(entries.length, 1, "only the in-window entry survives, regardless of file mtime");
+    assert.equal(entries[0].model, "claude-sonnet-5", "the surviving entry is the in-window one");
+
+    assert.equal(skillRuns.length, 1, "the skill run is still recorded once (it has an in-window message)");
+    assert.equal(skillRuns[0].key, "test-skill", "skill attribution unaffected by the window fix");
+    assert.equal(skillRuns[0].messages, 1, "only the in-window usage counts toward the run, the out-of-window one is excluded");
+  } finally {
+    await fs.rm(tmpFile, { force: true });
+  }
+}
+
+// --- parseTranscript: a skill run whose ONLY usage entry is out-of-window
+// must not be emitted at all (messages stays 0, so the segmenter discards
+// it on finish()). ---
+{
+  const now = Date.now();
+  const cutoffMs = now - 35 * 24 * 60 * 60 * 1000;
+  const outOfWindowIso = new Date(now - 50 * 24 * 60 * 60 * 1000).toISOString();
+
+  const lines = [
+    { type: "user", timestamp: outOfWindowIso, isSidechain: false, message: { content: marker("old-only-skill") } },
+    { type: "user", timestamp: outOfWindowIso, isSidechain: false, message: { content: "expanded command body" } },
+    {
+      type: "assistant",
+      timestamp: outOfWindowIso,
+      message: { model: "claude-opus-5", usage: { input_tokens: 10, output_tokens: 20 } },
+    },
+  ];
+
+  const tmpFile = path.join(os.tmpdir(), `parseTranscript-window-test-2-${process.pid}.jsonl`);
+  await fs.writeFile(tmpFile, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+  try {
+    const { entries, skillRuns } = await parseTranscript(tmpFile, cutoffMs);
+    assert.equal(entries.length, 0, "no entries survive the window filter");
+    assert.deepEqual(skillRuns, [], "a skill run with zero in-window messages is never emitted");
+  } finally {
+    await fs.rm(tmpFile, { force: true });
+  }
+}
+
+// --- applyTranscriptToAggregates: zero-in-window-entries edge case (build
+// 2.9). A transcript file can pass findTranscripts()'s mtime prefilter yet
+// contribute nothing once its entries are windowed by their own timestamps
+// (e.g. an old session file touched recently by a stray write). That must
+// not create a $0/0-message workflow session, nor a workflow/project entry
+// that otherwise carries no data. ---
+{
+  const days = new Map();
+  const projects = new Map();
+  const workflows = new Map();
+  const skills = new Map();
+  const rule = { key: "interactive", label: "Interactive" };
+
+  // A file with zero in-window entries and zero skill runs contributes nothing.
+  applyTranscriptToAggregates({
+    entries: [],
+    skillRuns: [],
+    projectName: "some-project",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+  });
+  assert.equal(workflows.size, 0, "no workflow entry materializes for a zero-contribution transcript");
+  assert.equal(projects.size, 0, "no project entry materializes for a zero-contribution transcript");
+  assert.equal(days.size, 0, "no day entry materializes for a zero-contribution transcript");
+
+  // A second, real file for the same workflow DOES contribute -- confirms
+  // the guard only skips empty transcripts, not the workflow as a whole.
+  const entry = {
+    timestamp: "2026-07-20T12:00:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 100,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  applyTranscriptToAggregates({
+    entries: [entry],
+    skillRuns: [],
+    projectName: "some-project",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+  });
+  const w = workflows.get("interactive");
+  assert.ok(w, "the workflow entry is created once a transcript actually contributes");
+  assert.equal(w.sessions, 1, "only the contributing transcript counts as a session -- the empty one did not");
+  assert.ok(w.costUsd > 0, "cost flowed through from the single in-window entry");
+  assert.equal(projects.get("some-project").messages, 1, "project aggregate reflects only the contributing transcript");
 }
 
 console.log("exportUsageWorkflows: all assertions passed");
