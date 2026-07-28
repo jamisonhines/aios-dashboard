@@ -1341,6 +1341,46 @@
   margin-top: 4px;
 }
 
+/* Workflow spike alerts (build 2.9 slice 3): quiet by default -- the section
+   renders nothing when there's nothing to say. When present, a compact list
+   of one-line rows sits between the subhead and the share bar. Grey surface
+   like every other card; the accent dot + "new"/share-jump text are the
+   only purple in the section, since a spike is the one thing here meant to
+   draw the eye. */
+.aios-dashboard-root .aios-usage-spike-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 8px;
+}
+.aios-dashboard-root .aios-usage-spike-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--aios-surface);
+  border: 1px solid var(--aios-border);
+  border-left: 2px solid var(--aios-accent);
+  border-radius: 0;
+  font-size: 12px;
+}
+.aios-dashboard-root .aios-usage-spike-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--aios-accent);
+  flex-shrink: 0;
+}
+.aios-dashboard-root .aios-usage-spike-label {
+  color: var(--aios-text);
+  font-weight: 600;
+}
+.aios-dashboard-root .aios-usage-spike-detail {
+  color: var(--aios-accent-hi);
+  font-weight: 600;
+  margin-left: auto;
+}
+
 /* Skills section: show-more/less toggle under the per-invocation table. */
 .aios-dashboard-root .aios-usage-showmore {
   margin-top: 6px;

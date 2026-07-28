@@ -14,6 +14,10 @@ import {
   formatUsageWindowLabel,
   computeSkillsView,
   USAGE_SKILLS_TOP_N,
+  computeWorkflowSpikes,
+  SPIKE_MIN_RECENT_COST_USD,
+  SPIKE_MIN_SHARE_INCREASE_PP,
+  SPIKE_MIN_SHARE_MULTIPLIER,
 } from "./model.mjs";
 
 // --- formatCompactNumber ---
@@ -301,6 +305,70 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   const few = computeSkillsView({ skills: mkSkills(3) }, false);
   assert.equal(few.rows.length, 3, "short list renders in full");
   assert.equal(few.hiddenCount, 0, "short list hides the show-more button");
+}
+
+// --- computeWorkflowSpikes: share-of-spend spike detection (build 2.9 slice 3) ---
+{
+  const now = new Date(2026, 6, 28); // 2026-07-28 local; recent = Jul22-28, baseline = Jun24-Jul21
+
+  const byDay = (entries) => {
+    const o = {};
+    for (const [dayKey, costUsd] of entries) o[dayKey] = { costUsd, outputTokens: 0, messages: 1 };
+    return o;
+  };
+
+  // wf-a: baseline $5 (5% of $100 baseline total), recent $30 (60% of $50
+  // recent total) -- a clear, material spike (delta 55pp, 12x multiplier).
+  // wf-b: baseline $95 (95%), recent $20 (40%) -- share DROPPED, must be silent.
+  // wf-new: no baseline cost at all, $2 recent -- flagged "new", not a spike.
+  // wf-noise: recent cost is below the absolute floor even though its share
+  // would technically triple -- must be silent (the $0.02 -> $0.10 case from spec).
+  // wf-flat: same share both periods -- must be silent.
+  const stats = {
+    workflows: [
+      { key: "wf-a", label: "Workflow A", byDay: byDay([["2026-07-10", 5], ["2026-07-25", 30]]) },
+      { key: "wf-b", label: "Workflow B", byDay: byDay([["2026-07-10", 95], ["2026-07-25", 20]]) },
+      { key: "wf-new", label: "New workflow", byDay: byDay([["2026-07-25", 2]]) },
+      { key: "wf-noise", label: "Noisy workflow", byDay: byDay([["2026-07-10", 0.02], ["2026-07-25", 0.1]]) },
+      { key: "wf-flat", label: "Flat workflow", byDay: byDay([["2026-07-10", 10], ["2026-07-25", 5]]) },
+    ],
+  };
+
+  const alerts = computeWorkflowSpikes(stats, now);
+  const byKey = Object.fromEntries(alerts.map((a) => [a.key, a]));
+
+  assert.ok(byKey["wf-a"], "wf-a's material share increase is flagged");
+  assert.equal(byKey["wf-a"].kind, "spike", "wf-a is a spike, not new");
+  assert.ok(
+    byKey["wf-a"].recentSharePercent - byKey["wf-a"].baselineSharePercent >= SPIKE_MIN_SHARE_INCREASE_PP,
+    "flagged delta clears the percentage-point floor"
+  );
+
+  assert.ok(byKey["wf-new"], "a workflow with zero prior-28d cost is flagged");
+  assert.equal(byKey["wf-new"].kind, "new", "no-baseline case reports kind 'new', not a spike percentage");
+
+  assert.equal(byKey["wf-b"], undefined, "a workflow whose share fell is never flagged");
+  assert.equal(byKey["wf-noise"], undefined, "below the absolute-cost floor stays silent even if share tripled");
+  assert.equal(byKey["wf-flat"], undefined, "an unchanged share is not a spike");
+
+  assert.equal(alerts.length, 2, "exactly the two qualifying workflows are reported");
+  assert.equal(alerts[0].key, "wf-a", "alerts sort by recentCostUsd desc");
+
+  // Degrades gracefully: no workflows, empty array, and missing byDay all
+  // produce an empty alert list rather than throwing.
+  assert.deepEqual(computeWorkflowSpikes({}, now), [], "missing workflows -> no alerts");
+  assert.deepEqual(computeWorkflowSpikes({ workflows: [] }, now), [], "empty workflows -> no alerts");
+  assert.deepEqual(
+    computeWorkflowSpikes({ workflows: [{ key: "old", label: "Old-shape entry" }] }, now),
+    [],
+    "a workflow entry with no byDay (pre-slice-2 JSON) contributes zero cost, never flags"
+  );
+
+  // Sanity-check the exported thresholds are the documented values, since the
+  // test above depends on them.
+  assert.equal(SPIKE_MIN_RECENT_COST_USD, 1.0);
+  assert.equal(SPIKE_MIN_SHARE_INCREASE_PP, 10);
+  assert.equal(SPIKE_MIN_SHARE_MULTIPLIER, 1.5);
 }
 
 console.log("usageModel: all assertions passed");

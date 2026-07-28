@@ -1287,12 +1287,107 @@ export function budgetGuardrail(todayCostUsd, dailyBudgetUsd) {
   };
 }
 
-// Per-workflow spend-spike detection (share of last-7-days cost vs share of
-// prior-28-days cost) was SKIPPED for build 2.6 m3: usage-stats.json's
-// `workflows` array is aggregated over the whole WINDOW_DAYS window with no
-// per-day breakdown, so a workflow's 7-day and prior-28-day cost shares
-// cannot be computed from the data the exporter currently writes. Per the
-// spec's escape hatch, this was left undone rather than extending the
-// exporter. See vault-scripts/export-usage-stats.mjs: `days[]` carries
-// per-day totals and per-family model buckets, but workflow attribution is
-// only accumulated once, window-wide.
+// ---------------------------------------------------------------------------
+// Workflow spend-spike detection (build 2.9 slice 3). Compares each
+// workflow's cost SHARE (of total workflow spend, not absolute dollars) over
+// the last 7 days against its share over the prior 28 days (days 8-35 ago --
+// the rest of the exporter's 35-day window). A workflow whose share has
+// risen materially is flagged; flat or shrinking shares stay silent. Needs
+// per-workflow `byDay` (build 2.9 slice 2); older JSON without it degrades to
+// an empty alert list rather than throwing.
+//
+// Design decisions:
+//  - SPIKE_MIN_RECENT_COST_USD ($1.00) is an absolute floor on last-7-day
+//    cost. Without it, a workflow that went from $0.02 to $0.10 (tripling
+//    its share) would flag despite moving a trivial amount of money.
+//  - A spike requires BOTH a percentage-point floor
+//    (SPIKE_MIN_SHARE_INCREASE_PP, 10pp) AND a relative-growth floor
+//    (SPIKE_MIN_SHARE_MULTIPLIER, 1.5x). The pp floor stops an
+//    already-dominant workflow from re-flagging on tiny wobbles (80% -> 85%);
+//    the multiplier floor stops a workflow with a large absolute swing but a
+//    small relative one. Both together keep the bar at "materially risen",
+//    not "moved at all".
+//  - A workflow with zero cost anywhere in the prior 28 days has no baseline
+//    to compare against, so it's reported as kind: "new" rather than an
+//    infinite/undefined percentage spike.
+// ---------------------------------------------------------------------------
+
+export const SPIKE_MIN_RECENT_COST_USD = 1.0;
+export const SPIKE_MIN_SHARE_INCREASE_PP = 10;
+export const SPIKE_MIN_SHARE_MULTIPLIER = 1.5;
+
+/**
+ * Pure. `nowDate` drives the 7d (recent) / 28d (baseline) window boundaries,
+ * so this is unit-testable without mocking the clock. Returns alerts sorted
+ * by recentCostUsd desc (empty when nothing qualifies):
+ * [{key, label, kind: "new"|"spike", recentCostUsd, recentSharePercent, baselineSharePercent}]
+ */
+export function computeWorkflowSpikes(stats, nowDate) {
+  const workflows = stats.workflows;
+  if (!Array.isArray(workflows) || workflows.length === 0) return [];
+
+  const recentSet = new Set();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - i);
+    recentSet.add(usageLocalDayKey(d));
+  }
+  const baselineSet = new Set();
+  for (let i = 7; i < 35; i++) {
+    const d = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - i);
+    baselineSet.add(usageLocalDayKey(d));
+  }
+
+  function sumByDay(byDay, daySet) {
+    if (!byDay) return 0;
+    let sum = 0;
+    for (const [dayKey, d] of Object.entries(byDay)) {
+      if (daySet.has(dayKey)) sum += d.costUsd || 0;
+    }
+    return sum;
+  }
+
+  const perWorkflow = workflows.map((w) => ({
+    key: w.key,
+    label: w.label,
+    recentCostUsd: sumByDay(w.byDay, recentSet),
+    baselineCostUsd: sumByDay(w.byDay, baselineSet),
+  }));
+
+  const recentTotal = perWorkflow.reduce((s, w) => s + w.recentCostUsd, 0);
+  const baselineTotal = perWorkflow.reduce((s, w) => s + w.baselineCostUsd, 0);
+  const safeRecentTotal = recentTotal > 0 ? recentTotal : 1;
+  const safeBaselineTotal = baselineTotal > 0 ? baselineTotal : 1;
+
+  const alerts = [];
+  for (const w of perWorkflow) {
+    if (w.recentCostUsd < SPIKE_MIN_RECENT_COST_USD) continue;
+    const recentSharePercent = (w.recentCostUsd / safeRecentTotal) * 100;
+    if (w.baselineCostUsd <= 0) {
+      alerts.push({
+        key: w.key,
+        label: w.label,
+        kind: "new",
+        recentCostUsd: w.recentCostUsd,
+        recentSharePercent,
+        baselineSharePercent: 0,
+      });
+      continue;
+    }
+    const baselineSharePercent = (w.baselineCostUsd / safeBaselineTotal) * 100;
+    const deltaPp = recentSharePercent - baselineSharePercent;
+    const multiplier = recentSharePercent / baselineSharePercent;
+    if (deltaPp >= SPIKE_MIN_SHARE_INCREASE_PP && multiplier >= SPIKE_MIN_SHARE_MULTIPLIER) {
+      alerts.push({
+        key: w.key,
+        label: w.label,
+        kind: "spike",
+        recentCostUsd: w.recentCostUsd,
+        recentSharePercent,
+        baselineSharePercent,
+      });
+    }
+  }
+
+  alerts.sort((a, b) => b.recentCostUsd - a.recentCostUsd);
+  return alerts;
+}

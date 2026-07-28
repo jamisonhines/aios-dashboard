@@ -44,6 +44,7 @@ import {
   computeUsageWindow,
   usageChartFromWindow,
   usageDayFamilyBars,
+  computeWorkflowSpikes,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -459,6 +460,12 @@ interface UsageProjectStat {
   messages: number;
 }
 
+interface UsageWorkflowDayStat {
+  costUsd: number;
+  outputTokens: number;
+  messages: number;
+}
+
 interface UsageWorkflowStat {
   key: string;
   label: string;
@@ -466,6 +473,23 @@ interface UsageWorkflowStat {
   outputTokens: number;
   messages: number;
   sessions: number;
+  // Optional: absent in JSON written before build 2.9 slice 2. Powers the
+  // spike-alert computation (computeWorkflowSpikes); the workflows table
+  // itself doesn't need it.
+  byDay?: Record<string, UsageWorkflowDayStat>;
+}
+
+interface WorkflowSpikeAlert {
+  key: string;
+  label: string;
+  // model.mjs (plain JS) returns "new" | "spike" in practice; typed as
+  // string here (not a literal union) because TS infers the return type of
+  // computeWorkflowSpikes from an untyped array literal, which widens to
+  // string -- see the `a.kind === "new"` check below for the actual switch.
+  kind: string;
+  recentCostUsd: number;
+  recentSharePercent: number;
+  baselineSharePercent: number;
 }
 
 // Per-invocation skill spend: one entry per slash-command/skill, aggregated
@@ -2208,11 +2232,36 @@ function renderUsageWorkflowTable(container: HTMLElement, table: UsageWorkflowTa
   }
 }
 
+// Spike alerts (build 2.9 slice 3): quiet by design. Renders nothing when
+// there are no alerts -- no permanently-visible empty state, per spec. Each
+// alert is a single line: dot + label + kind-specific text, purple accent
+// used only on the dot/kind text since a spike is the one thing in this
+// section meant to draw the eye.
+function renderWorkflowSpikeAlerts(container: HTMLElement, alerts: WorkflowSpikeAlert[]) {
+  if (alerts.length === 0) return;
+  const wrap = container.createDiv({ cls: "aios-usage-spike-alerts" });
+  for (const a of alerts) {
+    const row = wrap.createDiv({ cls: "aios-usage-spike-row" });
+    row.createSpan({ cls: "aios-usage-spike-dot" });
+    row.createSpan({ cls: "aios-usage-spike-label", text: a.label });
+    const detail =
+      a.kind === "new"
+        ? `new -- ${formatUsd(a.recentCostUsd)} this week`
+        : `${Math.round(a.baselineSharePercent)}% -> ${Math.round(a.recentSharePercent)}% of spend`;
+    row.createSpan({ cls: "aios-usage-spike-detail", text: detail });
+  }
+}
+
 // Missing `workflows` field (old JSON) or an empty window renders nothing at
 // all -- no section header, no error.
-function renderUsageWorkflowsSection(container: HTMLElement, view: UsageWorkflowsView) {
+function renderUsageWorkflowsSection(
+  container: HTMLElement,
+  view: UsageWorkflowsView,
+  spikeAlerts: WorkflowSpikeAlert[]
+) {
   if (!view.hasData) return;
   container.createDiv({ cls: "aios-usage-subhead", text: "Workflows (30d)" });
+  renderWorkflowSpikeAlerts(container, spikeAlerts);
   renderUsageWorkflowShareBar(container, view.shareBar);
   renderUsageWorkflowTable(container, view.table);
 }
@@ -2295,6 +2344,7 @@ function renderUsageView(
   stats: UsageStats,
   view: UsageView,
   workflowsView: UsageWorkflowsView,
+  spikeAlerts: WorkflowSpikeAlert[],
   dailyBudgetUsd: number,
   viewState: ViewState
 ) {
@@ -2304,7 +2354,7 @@ function renderUsageView(
   renderUsageLegend(container, view.legend);
   container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
   renderUsageTable(container, view.table);
-  renderUsageWorkflowsSection(container, workflowsView);
+  renderUsageWorkflowsSection(container, workflowsView, spikeAlerts);
   renderUsageSkillsSection(container, stats, viewState);
   renderUsageProjectsTable(container, view.projects);
   container.createDiv({
@@ -2334,7 +2384,8 @@ function renderUsageTab(
     }
     const view = computeUsageView(stats, new Date());
     const workflowsView = computeWorkflowsView(stats);
-    renderUsageView(wrap, stats, view, workflowsView, settings.dailyBudgetUsd, viewState);
+    const spikeAlerts = computeWorkflowSpikes(stats, new Date());
+    renderUsageView(wrap, stats, view, workflowsView, spikeAlerts, settings.dailyBudgetUsd, viewState);
   });
 }
 
