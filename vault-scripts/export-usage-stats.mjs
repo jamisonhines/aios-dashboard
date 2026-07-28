@@ -22,10 +22,34 @@ const WINDOW_DAYS = 35;
 export const RATES = {
   fable: { in: 10, out: 50 },
   opus: { in: 5, out: 25 },
+  // sonnet is date-aware -- see resolveSonnetRate/SONNET_INTRO_CUTOFF_DAY
+  // below. This entry is only the fallback used when a caller has no
+  // timestamp to resolve against.
   sonnet: { in: 3, out: 15 },
   haiku: { in: 1, out: 5 },
   other: { in: 5, out: 25 },
 };
+
+// Anthropic introductory pricing for Sonnet 5: $2 input / $10 output per
+// Mtok through 2026-08-31, reverting to the $3/$15 standard rate on
+// 2026-09-01. Keyed off each USAGE ENTRY's own timestamp (not "now"), so a
+// message logged during the intro window is priced correctly forever, no
+// matter when the exporter later re-runs over that same history.
+export const SONNET_INTRO_RATE = { in: 2, out: 10 };
+export const SONNET_STANDARD_RATE = { in: 3, out: 15 };
+export const SONNET_INTRO_CUTOFF_DAY = "2026-08-31"; // last local day still at intro pricing
+
+/**
+ * Pure rate-resolution helper: dayKey is a "YYYY-MM-DD" local-day string
+ * (see localDay()). String comparison is safe here because the format is
+ * fixed-width and zero-padded, so lexicographic order matches date order.
+ * A missing/unparseable dayKey falls back to the standard rate rather than
+ * guessing.
+ */
+export function resolveSonnetRate(dayKey) {
+  if (dayKey && dayKey <= SONNET_INTRO_CUTOFF_DAY) return SONNET_INTRO_RATE;
+  return SONNET_STANDARD_RATE;
+}
 
 export function modelFamily(model) {
   const m = model.toLowerCase();
@@ -36,8 +60,15 @@ export function modelFamily(model) {
   return "other";
 }
 
-export function estimateCost(family, usage) {
-  const rate = RATES[family] || RATES.other;
+/**
+ * `timestamp` (ISO string) is optional but required to get date-aware
+ * sonnet pricing right; omitting it falls back to RATES.sonnet (the
+ * standard/current rate). All real callers in this file pass the usage
+ * entry's own timestamp.
+ */
+export function estimateCost(family, usage, timestamp) {
+  const rate =
+    family === "sonnet" ? resolveSonnetRate(timestamp ? localDay(timestamp) : undefined) : RATES[family] || RATES.other;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
@@ -217,7 +248,7 @@ export function createSkillSegmenter() {
     // Call for every assistant message that carries usage, sidechain included.
     usage(family, entry) {
       if (!active) return;
-      active.costUsd += estimateCost(family, entry);
+      active.costUsd += estimateCost(family, entry, entry.timestamp);
       active.outputTokens += entry.output_tokens || 0;
       active.messages += 1;
     },
@@ -410,7 +441,7 @@ async function main() {
 
     for (const e of entries) {
       const family = modelFamily(e.model);
-      const cost = estimateCost(family, e);
+      const cost = estimateCost(family, e, e.timestamp);
       const dayKey = localDay(e.timestamp);
 
       if (!days.has(dayKey)) days.set(dayKey, {});

@@ -12,6 +12,11 @@ import {
   isToolResultContent,
   LOCAL_COMMAND_STDOUT_RE,
   BUILTIN_COMMANDS,
+  estimateCost,
+  resolveSonnetRate,
+  SONNET_INTRO_RATE,
+  SONNET_STANDARD_RATE,
+  SONNET_INTRO_CUTOFF_DAY,
 } from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
@@ -209,6 +214,30 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   assert.equal(isToolResultContent([{ type: "text", text: "hi" }]), false, "plain text is not a tool result");
   assert.equal(isToolResultContent("plain string"), false, "string content is not a tool result");
   assert.equal(isToolResultContent(undefined), false, "missing content is not a tool result");
+}
+
+// --- Sonnet introductory rate (build 2.9 milestone A) ---
+// $2 in / $10 out through 2026-08-31, $3 in / $15 out from 2026-09-01.
+{
+  assert.deepEqual(resolveSonnetRate("2026-08-30"), SONNET_INTRO_RATE, "day before cutoff -> intro rate");
+  assert.deepEqual(resolveSonnetRate(SONNET_INTRO_CUTOFF_DAY), SONNET_INTRO_RATE, "cutoff day itself -> still intro rate (inclusive)");
+  assert.deepEqual(resolveSonnetRate("2026-09-01"), SONNET_STANDARD_RATE, "day after cutoff -> standard rate");
+  assert.deepEqual(resolveSonnetRate(undefined), SONNET_STANDARD_RATE, "missing dayKey falls back to standard rate");
+}
+
+// estimateCost wires the date-aware rate through for the sonnet family only.
+{
+  const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  // Noon UTC keeps the local-day conversion (localDay uses the machine's
+  // local timezone) safely inside the same calendar day across all real-world
+  // UTC offsets, so this test isn't flaky depending on where it runs.
+  const before = estimateCost("sonnet", usage, "2026-08-31T12:00:00Z");
+  assert.equal(before, SONNET_INTRO_RATE.in + SONNET_INTRO_RATE.out, "on-cutoff-day entry prices at the intro rate");
+  const after = estimateCost("sonnet", usage, "2026-09-01T12:00:00Z");
+  assert.equal(after, SONNET_STANDARD_RATE.in + SONNET_STANDARD_RATE.out, "post-cutoff entry prices at the standard rate");
+  // Non-sonnet families are unaffected by the timestamp argument.
+  const opusCost = estimateCost("opus", usage, "2026-09-01T12:00:00Z");
+  assert.equal(opusCost, 5 + 25, "opus rate is unchanged by the sonnet-only date logic");
 }
 
 console.log("exportUsageWorkflows: all assertions passed");
