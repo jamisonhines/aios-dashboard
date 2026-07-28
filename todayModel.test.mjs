@@ -11,6 +11,8 @@ import {
   resolveCaptureFileName,
   buildQuickCaptureContent,
   budgetGuardrail,
+  computeSpendSparkline,
+  SPARKLINE_WINDOW_DAYS,
 } from "./model.mjs";
 
 // --- topTasks ---
@@ -110,6 +112,46 @@ assert.equal(budgetGuardrail(10, 10), null, "exactly at budget -> null (not over
   const g = budgetGuardrail(12.5, 10);
   assert.ok(g, "over budget -> triggered");
   assert.equal(g.message, "Today $12.50 of $10.00 budget (API-equivalent)");
+}
+
+// --- computeSpendSparkline: Today-tab trend line (build 2.9 slice 4) ---
+{
+  const now = new Date(2026, 6, 28); // 2026-07-28 local
+
+  // Degrades gracefully: missing stats, no days array, and too few days to
+  // show a direction (< 2) all yield hasData: false, never a throw.
+  assert.equal(computeSpendSparkline(null, now).hasData, false, "missing stats -> no sparkline");
+  assert.equal(computeSpendSparkline({}, now).hasData, false, "no days array -> no sparkline");
+  assert.equal(
+    computeSpendSparkline({ days: [{ date: "2026-07-28", totalCostUsd: 5, totalOutputTokens: 0 }] }, now).hasData,
+    false,
+    "a single day of history can't show a trend"
+  );
+
+  // Zero-filled 7-day window, same convention as computeUsageView: a day
+  // with no transcript activity is $0, not omitted.
+  const stats = {
+    days: [
+      { date: "2026-07-26", totalCostUsd: 2, totalOutputTokens: 0 },
+      { date: "2026-07-27", totalCostUsd: 4, totalOutputTokens: 0 },
+      { date: "2026-07-28", totalCostUsd: 8, totalOutputTokens: 0 },
+    ],
+  };
+  const spark = computeSpendSparkline(stats, now);
+  assert.equal(spark.hasData, true, "two-or-more days -> sparkline renders");
+  assert.equal(spark.values.length, SPARKLINE_WINDOW_DAYS, "always a full window, zero-filled");
+  assert.deepEqual(spark.values, [0, 0, 0, 0, 2, 4, 8], "days with no activity are 0, not skipped");
+  assert.equal(spark.max, 8, "max is the costliest day in the window");
+  assert.equal(spark.points[spark.points.length - 1], 1, "costliest day normalizes to 1");
+  assert.equal(spark.points[0], 0, "a zero day normalizes to 0");
+  assert.equal(spark.points[4], 0.25, "2/8 normalizes to 0.25");
+
+  // All-zero window (exporter ran but nothing was spent) must not divide by
+  // zero: every point is 0, not NaN.
+  const zeroStats = { days: [{ date: "2026-07-27", totalCostUsd: 0, totalOutputTokens: 0 }, { date: "2026-07-28", totalCostUsd: 0, totalOutputTokens: 0 }] };
+  const zeroSpark = computeSpendSparkline(zeroStats, now);
+  assert.equal(zeroSpark.max, 0, "all-zero window reports max 0");
+  assert.ok(zeroSpark.points.every((p) => p === 0), "all-zero window has no NaN points");
 }
 
 console.log("todayModel.test.mjs: all assertions passed");

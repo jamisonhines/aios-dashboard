@@ -1256,6 +1256,22 @@
   font-weight: 700;
 }
 
+/* Today-tab trend sparkline (build 2.9 slice 4): quiet by design, sits under
+   the spend tile's number. Thin grey line, no fill/axis/labels -- it must
+   not compete with the headline number above it. Empty when there's no
+   sparkline (renderSparklineSvg appends nothing), so it takes no visual
+   space rather than leaving a gap. */
+.aios-dashboard-root .aios-sparkline-slot {
+  margin-top: 2px;
+  line-height: 0;
+}
+.aios-dashboard-root .aios-sparkline-line {
+  fill: none;
+  stroke: var(--aios-faint);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+
 .aios-dashboard-root .aios-usage-chart-wrap {
   border: 1px solid var(--aios-border);
   border-radius: 0;

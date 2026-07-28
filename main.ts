@@ -45,6 +45,7 @@ import {
   usageChartFromWindow,
   usageDayFamilyBars,
   computeWorkflowSpikes,
+  computeSpendSparkline,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -2472,10 +2473,40 @@ function renderTopTasksSection(
   for (const t of top) renderTaskRow(app, tasksRoot, list, t, refresh);
 }
 
+// Sparkline SVG (build 2.9 slice 4): inline, no library. `points` are 0..1
+// normalized (see computeSpendSparkline). Deliberately tiny and quiet -- it
+// sits under a headline number and must not compete with it, so it's a
+// single thin grey line with no fill, no axis, no labels.
+function renderSparklineSvg(container: HTMLElement, points: number[]) {
+  if (points.length < 2) return;
+  const width = 64;
+  const height = 18;
+  const stepX = width / (points.length - 1);
+  const coords = points
+    .map((p, i) => `${(i * stepX).toFixed(1)},${(height - p * height).toFixed(1)}`)
+    .join(" ");
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "aios-sparkline-svg");
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  line.setAttribute("class", "aios-sparkline-line");
+  line.setAttribute("points", coords);
+  svg.appendChild(line);
+  container.appendChild(svg);
+}
+
 // Compact stat row: today's spend + automation summary load async (usage-stats.json,
 // automation-health.json); intake backlog is synchronous (reuses the already-computed
 // health tiles, same source the health strip renders from). Missing data files render
 // "n/a" / hide the automations stat, same optional-data pattern as their own tabs.
+//
+// Only the spend tile gets a trend sparkline: it's the only stat row entry
+// backed by a daily time series (usage-stats.json days[]). Intake backlog and
+// the automations summary have no per-day history in the current data model,
+// so they stay plain numbers rather than growing a fake or misleading trend.
 function renderTodayStatRow(
   app: App,
   settings: AiosDashboardSettings,
@@ -2493,6 +2524,7 @@ function renderTodayStatRow(
   };
 
   const spend = mkTile("Today's spend");
+  const sparkSlot = spend.tile.createDiv({ cls: "aios-sparkline-slot" });
   const intake = mkTile("Intake backlog");
   intake.val.setText(String(intakeBacklogCount(healthTiles)));
 
@@ -2511,6 +2543,8 @@ function renderTodayStatRow(
     const view = computeUsageView(stats, new Date());
     spend.val.setText(formatUsd(view.tiles.todayCostUsd));
     renderBudgetWarning(guardrailSlot, budgetGuardrail(view.tiles.todayCostUsd, settings.dailyBudgetUsd));
+    const sparkline = computeSpendSparkline(stats, new Date());
+    if (sparkline.hasData) renderSparklineSvg(sparkSlot, sparkline.points);
   });
 
   loadAutomationHealth(app, settings.automationHealthPath).then((health) => {

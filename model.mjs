@@ -1391,3 +1391,48 @@ export function computeWorkflowSpikes(stats, nowDate) {
   alerts.sort((a, b) => b.recentCostUsd - a.recentCostUsd);
   return alerts;
 }
+
+// ---------------------------------------------------------------------------
+// Today-tab trend sparkline (build 2.9 slice 4). Only the spend stat card has
+// a daily history to draw from -- intake backlog and the automations summary
+// (healthTiles / automation-health.json) carry no per-day series in the
+// current data model, so this only covers "Today's spend". Pure series-
+// shaping only; the SVG itself is drawn in main.ts.
+//
+// Window: 7 days. Matches the existing "Today's spend" tile's own cadence
+// (it's a daily number) and the Usage tab's default 7D range toggle (build
+// 2.8), so a reader who flips to the Usage tab sees the same window they
+// just glanced at here. Also short enough to read as "this week's direction"
+// in a ~60px-wide sparkline without the line getting too noisy.
+// ---------------------------------------------------------------------------
+
+export const SPARKLINE_WINDOW_DAYS = 7;
+
+/**
+ * Pure. Degrades to `hasData: false` (never throws) when `stats` is missing
+ * or has fewer than 2 days of history -- a single data point can't show a
+ * direction, so there's nothing worth drawing yet. Otherwise returns a
+ * zero-filled 7-day window (missing days = $0, same convention as
+ * computeUsageView) as both raw costUsd values and 0..1-normalized points
+ * (0 = cheapest/zero day in the window, 1 = costliest) ready for an SVG
+ * polyline.
+ */
+export function computeSpendSparkline(stats, nowDate) {
+  if (!stats || !Array.isArray(stats.days) || stats.days.length < 2) {
+    return { hasData: false, values: [], points: [] };
+  }
+
+  const dayByDate = new Map(stats.days.map((d) => [d.date, d]));
+  const values = [];
+  for (let i = SPARKLINE_WINDOW_DAYS - 1; i >= 0; i--) {
+    const d = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - i);
+    const key = usageLocalDayKey(d);
+    values.push(dayByDate.get(key)?.totalCostUsd || 0);
+  }
+
+  const max = Math.max(...values);
+  const safeMax = max > 0 ? max : 1;
+  const points = values.map((v) => v / safeMax);
+
+  return { hasData: true, values, points, max };
+}
