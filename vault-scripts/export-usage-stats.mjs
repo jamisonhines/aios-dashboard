@@ -382,6 +382,29 @@ export function classifyWorkflow(rules, ctx) {
   return rules[rules.length - 1];
 }
 
+/**
+ * Pure accumulator step (build 2.9 slice 2): folds one usage entry's cost
+ * into a workflow's running totals AND its per-day breakdown (`byDay`, a
+ * dayKey -> {costUsd, outputTokens, messages} Map). This is the ONLY place
+ * that touches either side, so sum(byDay) always equals the top-level
+ * totals by construction -- exported so that invariant is unit-testable
+ * without a real transcript. Mutates and returns `acc` for convenience in
+ * the main loop.
+ */
+export function foldWorkflowEntry(acc, dayKey, cost, outputTokens) {
+  acc.costUsd += cost;
+  acc.outputTokens += outputTokens;
+  acc.messages += 1;
+  if (!acc.byDay.has(dayKey)) {
+    acc.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0 });
+  }
+  const wd = acc.byDay.get(dayKey);
+  wd.costUsd += cost;
+  wd.outputTokens += outputTokens;
+  wd.messages += 1;
+  return acc;
+}
+
 async function main() {
   const vaultRoot = process.argv[2] || process.cwd();
   const outDir = path.join(vaultRoot, "Operations", "usage");
@@ -434,6 +457,10 @@ async function main() {
         outputTokens: 0,
         messages: 0,
         sessions: 0,
+        // dayKey -> { costUsd, outputTokens, messages }. Only days with actual
+        // cost get an entry (see below) -- not zero-padded across the whole
+        // WINDOW_DAYS window, to keep this JSON compact.
+        byDay: new Map(),
       });
     }
     const w = workflows.get(rule.key);
@@ -472,9 +499,7 @@ async function main() {
       p.outputTokens += e.output_tokens;
       p.messages += 1;
 
-      w.costUsd += cost;
-      w.outputTokens += e.output_tokens;
-      w.messages += 1;
+      foldWorkflowEntry(w, dayKey, cost, e.output_tokens);
     }
   }
 
@@ -491,7 +516,11 @@ async function main() {
     .sort((a, b) => b.costUsd - a.costUsd);
 
   const workflowList = [...workflows.entries()]
-    .map(([key, v]) => ({ key, ...v }))
+    .map(([key, v]) => {
+      const byDay = {};
+      for (const [dayKey, d] of [...v.byDay.entries()].sort()) byDay[dayKey] = d;
+      return { key, ...v, byDay };
+    })
     .sort((a, b) => b.costUsd - a.costUsd);
 
   // Sorted by total cost, not run count: the point of this section is finding

@@ -17,6 +17,7 @@ import {
   SONNET_INTRO_RATE,
   SONNET_STANDARD_RATE,
   SONNET_INTRO_CUTOFF_DAY,
+  foldWorkflowEntry,
 } from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
@@ -238,6 +239,27 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   // Non-sonnet families are unaffected by the timestamp argument.
   const opusCost = estimateCost("opus", usage, "2026-09-01T12:00:00Z");
   assert.equal(opusCost, 5 + 25, "opus rate is unchanged by the sonnet-only date logic");
+}
+
+// --- foldWorkflowEntry: per-day workflow breakdown (build 2.9 slice 2) ---
+// The invariant that matters: sum(byDay) always equals the top-level totals,
+// because both are written by the same fold step.
+{
+  const acc = { costUsd: 0, outputTokens: 0, messages: 0, byDay: new Map() };
+  foldWorkflowEntry(acc, "2026-07-27", 1.5, 1000);
+  foldWorkflowEntry(acc, "2026-07-27", 0.5, 500);
+  foldWorkflowEntry(acc, "2026-07-28", 2.0, 2000);
+
+  assert.equal(acc.byDay.size, 2, "two distinct days recorded, not padded across the window");
+  assert.deepEqual(acc.byDay.get("2026-07-27"), { costUsd: 2.0, outputTokens: 1500, messages: 2 });
+  assert.deepEqual(acc.byDay.get("2026-07-28"), { costUsd: 2.0, outputTokens: 2000, messages: 1 });
+
+  const sumCost = [...acc.byDay.values()].reduce((s, d) => s + d.costUsd, 0);
+  const sumTokens = [...acc.byDay.values()].reduce((s, d) => s + d.outputTokens, 0);
+  const sumMessages = [...acc.byDay.values()].reduce((s, d) => s + d.messages, 0);
+  assert.equal(sumCost, acc.costUsd, "sum(byDay.costUsd) matches the top-level total");
+  assert.equal(sumTokens, acc.outputTokens, "sum(byDay.outputTokens) matches the top-level total");
+  assert.equal(sumMessages, acc.messages, "sum(byDay.messages) matches the top-level total");
 }
 
 console.log("exportUsageWorkflows: all assertions passed");
