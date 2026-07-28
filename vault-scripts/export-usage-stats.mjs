@@ -113,11 +113,128 @@ export function extractTextContent(content) {
 
 export const FIRST_COMMAND_RE = /<command-name>(\/[\w-]+)<\/command-name>/;
 
+// Per-invocation skill attribution (build 2.9). The workflow classifier above
+// tags a whole SESSION by its first message, so anything invoked mid-session
+// (/close-session, /brief, a /gsd-* command) is invisible inside "Interactive".
+// This segments a transcript into runs instead: a run opens at a
+// <command-name> marker and closes at the next human message.
+//
+// Colon is allowed for plugin-namespaced skills (/superpowers:brainstorming).
+export const SKILL_COMMAND_RE = /<command-name>\/([\w:-]+)<\/command-name>/;
+
+// A user entry carrying tool_result blocks is the harness feeding a tool's
+// output back in, not a human turn -- it must NOT close the active run.
+export function isToolResultContent(content) {
+  return Array.isArray(content) && content.some((b) => b && b.type === "tool_result");
+}
+
+// Builtin CLI commands (/model, /context, /clear...) run locally and echo
+// their result in this tag. They do no model work, so the marker that opened
+// the run is not a skill invocation at all -- the run is DISCARDED rather
+// than closed, otherwise the real prompt that follows (e.g. "continue") gets
+// billed to /model.
+export const LOCAL_COMMAND_STDOUT_RE = /<local-command-stdout>/;
+
+// Builtin CLI commands are not skills. Most are caught by the stdout rule
+// above, but a few emit nothing; deny them by name so they can never displace
+// a real skill from the top of the table. Conservative on purpose: anything
+// not listed here is treated as a skill.
+export const BUILTIN_COMMANDS = new Set([
+  "model",
+  "context",
+  "clear",
+  "compact",
+  "cost",
+  "status",
+  "config",
+  "help",
+  "resume",
+  "doctor",
+  "login",
+  "logout",
+  "ide",
+  "fast",
+  "vim",
+  "memory",
+  "exit",
+  "terminal-setup",
+  "release-notes",
+]);
+
+/**
+ * Stateful segmenter, fed in transcript order. Kept separate from
+ * parseTranscript (and exported) so the rules are unit-testable without
+ * synthesizing .jsonl files.
+ *
+ * Three deliberate attribution choices:
+ *  - Claude Code injects the expanded command body as a SECOND user message
+ *    right after the marker, so a brand-new run survives exactly ONE
+ *    non-marker message before any assistant work. Bounding it at one keeps a
+ *    stray builtin from swallowing the next real prompt.
+ *  - A <local-command-stdout> message means the marker was a builtin CLI
+ *    command, not a skill: the run is discarded, not recorded.
+ *  - Sidechain (subagent) usage counts toward the run that dispatched it, and
+ *    sidechain user messages never act as boundaries. A skill that fans out to
+ *    agents owns that spend.
+ */
+export function createSkillSegmenter() {
+  const runs = [];
+  let active = null;
+
+  function closeActive() {
+    if (active && active.messages > 0) {
+      delete active.absorbedInjection;
+      runs.push(active);
+    }
+    active = null;
+  }
+
+  return {
+    // Call for human (non-sidechain, non-tool-result) user messages only.
+    boundary(text) {
+      const body = text || "";
+      const m = SKILL_COMMAND_RE.exec(body);
+      if (m) {
+        closeActive();
+        active = BUILTIN_COMMANDS.has(m[1])
+          ? null
+          : { key: m[1], costUsd: 0, outputTokens: 0, messages: 0, absorbedInjection: false };
+        return;
+      }
+      if (!active) return;
+      // Builtin CLI command: never a skill run, drop it entirely.
+      if (LOCAL_COMMAND_STDOUT_RE.test(body)) {
+        active = null;
+        return;
+      }
+      // The harness's expanded command body, once, before any assistant work.
+      if (active.messages === 0 && !active.absorbedInjection) {
+        active.absorbedInjection = true;
+        return;
+      }
+      closeActive();
+    },
+    // Call for every assistant message that carries usage, sidechain included.
+    usage(family, entry) {
+      if (!active) return;
+      active.costUsd += estimateCost(family, entry);
+      active.outputTokens += entry.output_tokens || 0;
+      active.messages += 1;
+    },
+    // Transcripts often end mid-run (session still open); keep that run.
+    finish() {
+      closeActive();
+      return runs;
+    },
+  };
+}
+
 // Single pass over the transcript: collects usage entries AND the two extra
 // classification signals (firstUserContent, firstCommand) with no second pass.
 async function parseTranscript(filePath) {
   const entries = [];
   let firstUserContent;
+  const segmenter = createSkillSegmenter();
   const rl = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -130,8 +247,15 @@ async function parseTranscript(filePath) {
     } catch {
       continue;
     }
-    if (firstUserContent === undefined && obj?.type === "user") {
-      firstUserContent = extractTextContent(obj.message?.content).slice(0, 500);
+    if (obj?.type === "user") {
+      const content = obj.message?.content;
+      if (firstUserContent === undefined) {
+        firstUserContent = extractTextContent(content).slice(0, 500);
+      }
+      // Skill-run boundary: human turns only.
+      if (obj.isSidechain !== true && !isToolResultContent(content)) {
+        segmenter.boundary(extractTextContent(content).slice(0, 500));
+      }
     }
     const usage = obj?.message?.usage;
     if (!usage) continue;
@@ -139,19 +263,21 @@ async function parseTranscript(filePath) {
     if (!model || model === "<synthetic>") continue;
     const timestamp = obj.timestamp;
     if (!timestamp) continue;
-    entries.push({
+    const entry = {
       timestamp,
       model,
       input_tokens: usage.input_tokens || 0,
       output_tokens: usage.output_tokens || 0,
       cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
       cache_read_input_tokens: usage.cache_read_input_tokens || 0,
-    });
+    };
+    entries.push(entry);
+    if (obj.type === "assistant") segmenter.usage(modelFamily(model), entry);
   }
   if (firstUserContent === undefined) firstUserContent = "";
   const firstCommandMatch = FIRST_COMMAND_RE.exec(firstUserContent);
   const firstCommand = firstCommandMatch ? firstCommandMatch[1] : undefined;
-  return { entries, firstUserContent, firstCommand };
+  return { entries, firstUserContent, firstCommand, skillRuns: segmenter.finish() };
 }
 
 // Bridge session ids: values of ~/.aios/bridge/data/sessions.json (chatId -> session uuid).
@@ -244,9 +370,23 @@ async function main() {
   const projects = new Map();
   // workflowKey -> { label, costUsd, outputTokens, messages, sessions }
   const workflows = new Map();
+  // skillKey -> { costUsd, outputTokens, messages, runs }
+  const skills = new Map();
 
   for (const { filePath, project } of transcripts) {
-    const { entries, firstUserContent, firstCommand } = await parseTranscript(filePath);
+    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath);
+
+    for (const run of skillRuns) {
+      if (!skills.has(run.key)) {
+        skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+      }
+      const s = skills.get(run.key);
+      s.costUsd += run.costUsd;
+      s.outputTokens += run.outputTokens;
+      s.messages += run.messages;
+      s.runs += 1;
+    }
+
     const projectName = prettifyProject(project);
     const sessionId = path.basename(filePath, ".jsonl");
     const rule = classifyWorkflow(workflowRules, {
@@ -323,6 +463,17 @@ async function main() {
     .map(([key, v]) => ({ key, ...v }))
     .sort((a, b) => b.costUsd - a.costUsd);
 
+  // Sorted by total cost, not run count: the point of this section is finding
+  // the expensive skill, and the Runs column keeps frequency visible anyway.
+  const skillList = [...skills.entries()]
+    .map(([key, v]) => ({
+      key,
+      label: key,
+      ...v,
+      avgCostUsd: v.runs > 0 ? v.costUsd / v.runs : 0,
+    }))
+    .sort((a, b) => b.costUsd - a.costUsd);
+
   const todayKey = localDay(now.toISOString());
   const sevenDaysAgoMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
   const thirtyDaysAgoMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
@@ -343,6 +494,7 @@ async function main() {
     days: dayList,
     projects: projectList,
     workflows: workflowList,
+    skills: skillList,
     totals: { last7DaysCostUsd, last30DaysCostUsd, todayCostUsd },
   };
 
@@ -357,9 +509,13 @@ async function main() {
   const topWorkflowText = topWorkflow
     ? `, top workflow ${topWorkflow.label} $${topWorkflow.costUsd.toFixed(2)}`
     : "";
+  const topSkill = skillList[0];
+  const topSkillText = topSkill
+    ? `, top skill /${topSkill.label} $${topSkill.avgCostUsd.toFixed(2)}/run x${topSkill.runs}`
+    : "";
   console.log(
     `usage-stats: ${transcripts.length} transcript(s), ${totalMessages} message(s), ` +
-      `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText} -> ${outFile}`
+      `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText} -> ${outFile}`
   );
 }
 

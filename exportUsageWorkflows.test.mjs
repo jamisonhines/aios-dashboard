@@ -8,6 +8,10 @@ import {
   FIRST_COMMAND_RE,
   buildWorkflowRules,
   classifyWorkflow,
+  createSkillSegmenter,
+  isToolResultContent,
+  LOCAL_COMMAND_STDOUT_RE,
+  BUILTIN_COMMANDS,
 } from "./vault-scripts/export-usage-stats.mjs";
 
 function baseCtx(overrides) {
@@ -110,6 +114,101 @@ assert.equal(extractTextContent(undefined), "", "missing content -> empty string
   const match = FIRST_COMMAND_RE.exec(firstUserContent);
   assert.ok(match, "regex finds the command-name tag inside array-joined content");
   assert.equal(match[1], "/vgb-draft-followup", "captured command includes the leading slash");
+}
+
+// --- skill segmenter (build 2.9): per-invocation attribution ---
+const OPUS = { input_tokens: 0, output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+const marker = (name) => `<command-name>/${name}</command-name>`;
+
+// Baseline: a run opens at the marker, collects assistant usage, closes at the
+// next human message. Work before the marker belongs to nobody.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary("just chatting");
+  seg.usage("opus", OPUS); // pre-marker work is unattributed
+  seg.boundary(marker("close-session"));
+  seg.usage("opus", OPUS);
+  seg.usage("opus", OPUS);
+  seg.boundary("thanks, next topic");
+  seg.usage("opus", OPUS); // post-run work is unattributed again
+  const runs = seg.finish();
+  assert.equal(runs.length, 1, "exactly one run recorded");
+  assert.equal(runs[0].key, "close-session", "key is the command name without the slash");
+  assert.equal(runs[0].messages, 2, "only assistant messages inside the run count");
+  assert.equal(runs[0].outputTokens, 2_000_000, "output tokens sum across the run");
+  assert.equal(runs[0].costUsd, 50, "cost uses the real estimateCost (opus out 25/Mtok x 2M)");
+}
+
+// The injected command body (a second user message right after the marker)
+// must not close the run before it has recorded anything.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("close-session"));
+  seg.boundary("<expanded command body injected by the harness>");
+  seg.usage("opus", OPUS);
+  const runs = seg.finish();
+  assert.equal(runs.length, 1, "empty run is not emitted, and the marker survives the injection");
+  assert.equal(runs[0].key, "close-session", "usage still lands on the skill");
+}
+
+// Back-to-back invocations, and a transcript ending mid-run.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("brief"));
+  seg.usage("sonnet", OPUS);
+  seg.boundary(marker("close-session"));
+  seg.usage("sonnet", OPUS);
+  const runs = seg.finish();
+  assert.equal(runs.length, 2, "a new marker closes the previous run and opens the next");
+  assert.deepEqual(runs.map((r) => r.key), ["brief", "close-session"], "runs keep transcript order");
+}
+
+// Builtin CLI commands (/model, /context) echo <local-command-stdout> and do
+// no model work. The run must be DISCARDED so the real prompt that follows is
+// not billed to the builtin.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("model"));
+  seg.boundary("<local-command-stdout>Set model to claude-fable-5</local-command-stdout>");
+  seg.boundary("continue"); // a genuine human prompt
+  seg.usage("opus", OPUS); // ...and a lot of real work
+  assert.deepEqual(seg.finish(), [], "builtin command absorbs none of the following work");
+}
+
+// A run absorbs at most ONE pre-work message, so a builtin that emits no
+// stdout still cannot swallow the next real prompt indefinitely.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("some-builtin"));
+  seg.boundary("injected body");
+  seg.boundary("a real human prompt");
+  seg.usage("opus", OPUS);
+  assert.deepEqual(seg.finish(), [], "second non-marker message closes the empty run for good");
+}
+
+// Denylisted builtins never open a run at all, even without stdout.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("context"));
+  seg.usage("opus", OPUS);
+  assert.deepEqual(seg.finish(), [], "/context is a builtin, not a skill");
+  assert.equal(BUILTIN_COMMANDS.has("close-session"), false, "real skills are not denylisted");
+}
+
+// Plugin-namespaced skills keep their colon.
+{
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("superpowers:brainstorming"));
+  seg.usage("haiku", OPUS);
+  assert.equal(seg.finish()[0].key, "superpowers:brainstorming", "colon-namespaced key preserved");
+}
+
+// tool_result user entries are harness plumbing, never run boundaries.
+{
+  assert.equal(isToolResultContent([{ type: "tool_result", content: "ok" }]), true, "tool_result detected");
+  assert.equal(isToolResultContent([{ type: "text", text: "hi" }]), false, "plain text is not a tool result");
+  assert.equal(isToolResultContent("plain string"), false, "string content is not a tool result");
+  assert.equal(isToolResultContent(undefined), false, "missing content is not a tool result");
 }
 
 console.log("exportUsageWorkflows: all assertions passed");

@@ -29,6 +29,7 @@ import {
   formatCompactNumber,
   computeUsageView,
   computeWorkflowsView,
+  computeSkillsView,
   computeOpsMapLayout,
   OPS_MAP_DEFAULTS,
   buildLaunchCommand,
@@ -467,6 +468,18 @@ interface UsageWorkflowStat {
   sessions: number;
 }
 
+// Per-invocation skill spend: one entry per slash-command/skill, aggregated
+// over its runs (a run = marker -> next human message, subagents included).
+interface UsageSkillStat {
+  key: string;
+  label: string;
+  costUsd: number;
+  outputTokens: number;
+  messages: number;
+  runs: number;
+  avgCostUsd: number;
+}
+
 interface UsageStats {
   generatedAt: string;
   windowDays: number;
@@ -475,6 +488,9 @@ interface UsageStats {
   // Optional: absent in JSON written before build 2.5. The Usage tab hides
   // the workflows section entirely when this is missing.
   workflows?: UsageWorkflowStat[];
+  // Optional: absent in JSON written before build 2.9. Same hide-when-missing
+  // rule as workflows.
+  skills?: UsageSkillStat[];
   totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
 }
 
@@ -558,6 +574,14 @@ interface UsageWorkflowShareRow {
 
 interface UsageWorkflowTableRow extends UsageWorkflowStat {
   colorIndex: number;
+}
+
+interface UsageSkillsView {
+  hasData: boolean;
+  rows: UsageSkillStat[];
+  hiddenCount: number;
+  expanded: boolean;
+  totalCount: number;
 }
 
 interface UsageWorkflowsView {
@@ -2193,6 +2217,68 @@ function renderUsageWorkflowsSection(container: HTMLElement, view: UsageWorkflow
   renderUsageWorkflowTable(container, view.table);
 }
 
+// Skills section: per-invocation spend, top 5 collapsed with a show-more
+// toggle. Unlike the workflows section this owns its own container and
+// redraws itself in place on toggle, so expanding does not re-render (and
+// re-request) the whole Usage tab. Expand state lives in the shared
+// viewState.expanded set, so it survives live re-renders like everything else.
+const USAGE_SKILLS_EXPAND_KEY = "usage-skills";
+
+function renderUsageSkillsTable(container: HTMLElement, rows: UsageSkillStat[]) {
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", { cls: "aios-usage-table" });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of ["Skill", "Runs", "Cost", "Avg/run", "Output tokens"]) {
+    headRow.createEl("th", { text: h });
+  }
+  const tbody = el.createEl("tbody");
+  for (const row of rows) {
+    const tr = tbody.createEl("tr");
+    tr.createEl("td", { cls: "aios-usage-table-name", text: "/" + row.label });
+    tr.createEl("td", { text: String(row.runs) });
+    tr.createEl("td", { text: formatUsd(row.costUsd) });
+    tr.createEl("td", { text: formatUsd(row.avgCostUsd) });
+    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
+  }
+}
+
+function renderUsageSkillsSection(
+  container: HTMLElement,
+  stats: UsageStats,
+  viewState: ViewState
+) {
+  const section = container.createDiv({ cls: "aios-usage-skills" });
+
+  const draw = () => {
+    section.empty();
+    const view: UsageSkillsView = computeSkillsView(
+      stats,
+      viewState.expanded.has(USAGE_SKILLS_EXPAND_KEY)
+    );
+    if (!view.hasData) return;
+
+    section.createDiv({ cls: "aios-usage-subhead", text: "Skills (30d, per invocation)" });
+    renderUsageSkillsTable(section, view.rows);
+
+    if (view.hiddenCount === 0 && !view.expanded) return;
+    const btn = section.createEl("button", {
+      cls: "aios-usage-showmore",
+      text: view.expanded ? "Show less" : `Show more (${view.hiddenCount})`,
+    });
+    btn.addEventListener("click", () => {
+      if (viewState.expanded.has(USAGE_SKILLS_EXPAND_KEY)) {
+        viewState.expanded.delete(USAGE_SKILLS_EXPAND_KEY);
+      } else {
+        viewState.expanded.add(USAGE_SKILLS_EXPAND_KEY);
+      }
+      draw();
+    });
+  };
+
+  draw();
+}
+
 // Spend-guardrail warning tile, shared by the Today tab and the Usage tab so
 // the two never disagree (both call budgetGuardrail with the same inputs).
 // Renders nothing when the guardrail is off or not triggered.
@@ -2219,6 +2305,7 @@ function renderUsageView(
   container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
   renderUsageTable(container, view.table);
   renderUsageWorkflowsSection(container, workflowsView);
+  renderUsageSkillsSection(container, stats, viewState);
   renderUsageProjectsTable(container, view.projects);
   container.createDiv({
     cls: "aios-foot",

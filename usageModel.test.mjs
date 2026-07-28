@@ -12,6 +12,8 @@ import {
   usageChartFromWindow,
   usageDayFamilyBars,
   formatUsageWindowLabel,
+  computeSkillsView,
+  USAGE_SKILLS_TOP_N,
 } from "./model.mjs";
 
 // --- formatCompactNumber ---
@@ -262,6 +264,43 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
 
   // Label helper directly.
   assert.equal(formatUsageWindowLabel("2026-12-28", "2027-01-03"), "Dec 28 - Jan 3", "year boundary label");
+}
+
+// --- computeSkillsView (build 2.9): top-N collapse + show-more ---
+{
+  const mkSkills = (n) =>
+    Array.from({ length: n }, (_, i) => ({
+      key: "skill-" + i,
+      label: "skill-" + i,
+      costUsd: 100 - i,
+      outputTokens: 1000,
+      messages: 10,
+      runs: 2,
+      avgCostUsd: (100 - i) / 2,
+    }));
+
+  // Missing/empty skills (JSON written before build 2.9) hides the section.
+  assert.equal(computeSkillsView({}, false).hasData, false, "missing skills -> no section");
+  assert.equal(computeSkillsView({ skills: [] }, false).hasData, false, "empty skills -> no section");
+
+  // Collapsed: exactly TOP_N rows, remainder counted for the button label.
+  const collapsed = computeSkillsView({ skills: mkSkills(9) }, false);
+  assert.equal(collapsed.hasData, true, "skills present -> section renders");
+  assert.equal(collapsed.rows.length, USAGE_SKILLS_TOP_N, "collapsed shows exactly the top N");
+  assert.equal(collapsed.rows[0].key, "skill-0", "exporter order (cost desc) is preserved");
+  assert.equal(collapsed.hiddenCount, 4, "hiddenCount drives the show-more label");
+  assert.equal(collapsed.totalCount, 9, "totalCount reports the full set");
+
+  // Expanded: everything, nothing hidden.
+  const expanded = computeSkillsView({ skills: mkSkills(9) }, true);
+  assert.equal(expanded.rows.length, 9, "expanded shows all rows");
+  assert.equal(expanded.hiddenCount, 0, "expanded hides nothing");
+  assert.equal(expanded.expanded, true, "expanded flag flips the button to Show less");
+
+  // Fewer than TOP_N: no button (hiddenCount 0) and no padding.
+  const few = computeSkillsView({ skills: mkSkills(3) }, false);
+  assert.equal(few.rows.length, 3, "short list renders in full");
+  assert.equal(few.hiddenCount, 0, "short list hides the show-more button");
 }
 
 console.log("usageModel: all assertions passed");

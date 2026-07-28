@@ -703,6 +703,34 @@ export function computeWorkflowsView(stats) {
   return { hasData: true, shareBar, table };
 }
 
+// Skills section shows this many rows collapsed; the rest hide behind the
+// show-more toggle.
+export const USAGE_SKILLS_TOP_N = 5;
+
+/**
+ * Pure view-model function: turns the exporter's optional `skills` block (one
+ * entry per skill/slash-command, aggregated across per-invocation runs) into
+ * the collapsed-or-expanded table the Usage tab renders. Missing/empty
+ * `skills` (JSON written before build 2.9) yields hasData: false so the
+ * caller hides the whole section. Order is preserved as delivered by the
+ * exporter (sorted by costUsd desc).
+ */
+export function computeSkillsView(stats, expanded) {
+  const skills = stats.skills;
+  if (!Array.isArray(skills) || skills.length === 0) {
+    return { hasData: false, rows: [], hiddenCount: 0, expanded: false, totalCount: 0 };
+  }
+  const isExpanded = !!expanded;
+  const rows = isExpanded ? skills.slice() : skills.slice(0, USAGE_SKILLS_TOP_N);
+  return {
+    hasData: true,
+    rows,
+    hiddenCount: Math.max(0, skills.length - rows.length),
+    expanded: isExpanded,
+    totalCount: skills.length,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Ops map model (pure). Reads Operations/ops-map.json (written by
 // export-ops-map.mjs) and lays out a deterministic 5-column graph: Agents,
