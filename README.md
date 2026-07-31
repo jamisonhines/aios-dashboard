@@ -2,6 +2,10 @@
 
 Obsidian plugin for AIOS vaults: a live, interactive project and task dashboard. Reads task files (`Operations/tasks/**/tsk-*.md`) and project hubs (`Projects/<slug>/<slug>.md`), renders phase cards with computed progress bars, and writes status changes back to the files (frontmatter + folder moves). Nothing is stored in the dashboard note itself, so nothing drifts.
 
+![Projects tab with phase progress bars](docs/screenshot-projects-tab.png)
+
+*Demo vault with sample projects.*
+
 This is ONE engine shared by every AIOS instance. Per-fork variation is data, not code: override buckets and section order via frontmatter on the vault's `Projects/Dashboard.md`. Never fork this code per instance.
 
 ## Settings
