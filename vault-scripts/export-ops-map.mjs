@@ -38,7 +38,15 @@ async function listMdFiles(dir, { skipIndex = true } = {}) {
     .sort();
 }
 
-async function listSkillDirs(dir) {
+// Tolerant of symlinked skill dirs (~/.claude/skills commonly holds
+// symlinks into ~/.agents/skills/, e.g. all firecrawl-* skills): a
+// readdir() Dirent's isDirectory()/isSymbolicLink() reflect the entry's OWN
+// type, never the symlink target, so a plain isDirectory() check silently
+// drops every symlinked skill. For any entry that is a symlink, fs.stat()
+// (which follows symlinks, unlike fs.lstat()) resolves whether the TARGET
+// is a directory; a broken symlink's stat() throws and the entry is
+// skipped, same as any other non-skill entry.
+export async function listSkillDirs(dir) {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -47,11 +55,21 @@ async function listSkillDirs(dir) {
   }
   const out = [];
   for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const skillFile = path.join(dir, e.name, "SKILL.md");
+    const entryPath = path.join(dir, e.name);
+    let isDir = e.isDirectory();
+    if (!isDir && e.isSymbolicLink()) {
+      try {
+        const stat = await fs.stat(entryPath);
+        isDir = stat.isDirectory();
+      } catch {
+        continue; // broken symlink target
+      }
+    }
+    if (!isDir) continue;
+    const skillFile = path.join(entryPath, "SKILL.md");
     try {
       await fs.access(skillFile);
-      out.push({ id: e.name, dir: path.join(dir, e.name), skillFile });
+      out.push({ id: e.name, dir: entryPath, skillFile });
     } catch {
       // Not a skill dir (no SKILL.md); skip.
     }

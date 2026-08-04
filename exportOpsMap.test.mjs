@@ -4,6 +4,9 @@
 // deploy.sh). Importing the exporter never starts a scan (direct-execution
 // guard). Run: node exportOpsMap.test.mjs
 import assert from "node:assert";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   extractTokenRefs,
   extractAgentRefs,
@@ -11,6 +14,7 @@ import {
   dedupeEdges,
   firstSentenceDescription,
   parseDisableModelInvocation,
+  listSkillDirs,
 } from "./vault-scripts/export-ops-map.mjs";
 
 // --- token refs: numbered tokens map by id prefix ---
@@ -154,6 +158,45 @@ import {
     false,
     "string 'false' is falsy"
   );
+}
+
+// --- listSkillDirs: symlinked skill dirs are found (real skills dirs are
+// symlinks, e.g. ~/.claude/skills/firecrawl-* -> ~/.agents/skills/firecrawl-*) ---
+{
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "listSkillDirs-test-"));
+  try {
+    const skillsDir = path.join(root, "skills");
+    const realTarget = path.join(root, "real-target-dir");
+    await fs.mkdir(skillsDir, { recursive: true });
+    await fs.mkdir(realTarget, { recursive: true });
+    await fs.writeFile(path.join(realTarget, "SKILL.md"), "---\nname: symlinked-skill\n---\n");
+
+    // A real (non-symlink) skill dir, for control.
+    const plainDir = path.join(skillsDir, "plain-skill");
+    await fs.mkdir(plainDir);
+    await fs.writeFile(path.join(plainDir, "SKILL.md"), "---\nname: plain-skill\n---\n");
+
+    // A symlinked skill dir pointing outside skillsDir (mirrors the real
+    // ~/.agents/skills/ layout).
+    await fs.symlink(realTarget, path.join(skillsDir, "symlinked-skill"), "dir");
+
+    // A broken symlink (target does not exist) must be skipped, not thrown.
+    await fs.symlink(path.join(root, "does-not-exist"), path.join(skillsDir, "broken-symlink"), "dir");
+
+    // A symlink to a non-directory file must also be skipped.
+    const plainFile = path.join(root, "not-a-dir.txt");
+    await fs.writeFile(plainFile, "hi");
+    await fs.symlink(plainFile, path.join(skillsDir, "symlink-to-file"), "file");
+
+    const found = await listSkillDirs(skillsDir);
+    const ids = found.map((f) => f.id).sort();
+    assert.deepEqual(ids, ["plain-skill", "symlinked-skill"], "symlinked skill dir is found; broken symlink and symlink-to-file are skipped");
+
+    const symlinked = found.find((f) => f.id === "symlinked-skill");
+    assert.equal(symlinked.dir, path.join(skillsDir, "symlinked-skill"), "dir field keeps the symlink path (not resolved target), matching plain-dir behavior");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }
 
 console.log("exportOpsMap: all assertions passed");
