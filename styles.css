@@ -1458,6 +1458,48 @@
   gap: 6px;
 }
 
+/* Column alignment (Phase 1 System-browser range toggle, 2026-08-04;
+   re-fixed per Reviewer M2, 2026-08-04 -- the first attempt below was
+   MEASURED to still misalign, see main.ts's USAGE_BREAKDOWN_TOTAL_COLUMNS
+   comment for why per-table percentage math can never make this work).
+   Every breakdown table (workflows, skills, and any future one) now renders
+   the SAME NUMBER of columns (main.ts pads a shorter table's rows with
+   blank trailing cells), so a single set of nth-child width rules applies
+   identically to every table -- there is no per-table variance left for
+   two tables to disagree about, and table-layout:fixed has nothing to
+   redistribute because the declared widths already sum to exactly 100%
+   for every table, always. */
+.aios-dashboard-root .aios-usage-breakdown-table {
+  table-layout: fixed;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:first-child,
+.aios-dashboard-root .aios-usage-breakdown-table td:first-child {
+  width: 32%;
+  text-align: left;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(3),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(3),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(5),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(5) {
+  width: 15%;
+  text-align: right;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(6),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(6) {
+  width: 8%;
+  text-align: right;
+}
+.aios-dashboard-root .aios-usage-table-name-suffix {
+  color: var(--aios-faint);
+  font-size: 10.5px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------------
    Ops map tab: deterministic layered SVG graph.
 --------------------------------------------------------------------- */
@@ -1852,11 +1894,43 @@
   padding: 0;
 }
 
-/* Usage chart zone: range toggle + paging + full-width chart. */
-.aios-dashboard-root .aios-usage-chart-zone {
+/* Usage tab body: everything below the sticky header (tiles, chart, model
+   breakdown, workflows, skills, projects). */
+.aios-dashboard-root .aios-usage-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 10px;
+}
+
+/* Sticky period header (Phase 1 System-browser range toggle, 2026-08-04):
+   pinned to the top of the scrolling dashboard root (.aios-dashboard-root
+   itself is the scroll container -- see its overflow-y:auto) while the
+   Usage tab's body scrolls underneath it, so the active period ("Last 7
+   days", plus the concrete date range) and the range/paging controls stay
+   visible and every breakdown below stays unambiguous about which period
+   it's showing. Matches the root background so scrolled content doesn't
+   show through, and sits above table rows/hover states (z-index). */
+.aios-dashboard-root .aios-usage-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--aios-bg);
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--aios-border);
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.aios-dashboard-root .aios-usage-sticky-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.aios-dashboard-root .aios-usage-period-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--aios-text);
 }
 .aios-dashboard-root .aios-usage-controls {
   display: flex;

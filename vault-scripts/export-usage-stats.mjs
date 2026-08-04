@@ -16,6 +16,15 @@ import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
 
+// Kept as a fixed constant, not a CLI parameter, on purpose (Phase 1
+// System-browser range toggle, 2026-08-04): the Usage tab's "All" range
+// option shows every day this export already scanned rather than triggering
+// a wider scan. Scanning is proportional to how many days of transcripts get
+// opened, and this exporter runs on every Claude Code SessionStart hook --
+// widening WINDOW_DAYS to "unbounded history" would make every session
+// start slower forever, not just the one time someone clicks "All". If a
+// genuinely unbounded history view is wanted later, it should be a separate
+// opt-in export path, not the hook-triggered default.
 const WINDOW_DAYS = 35;
 
 // Per-Mtok rates: { in, out }. Cache read bills at 0.1x input rate, cache write at 1.25x input rate.
@@ -244,6 +253,13 @@ export const BUILTIN_COMMANDS = new Set([
  *  - Sidechain (subagent) usage counts toward the run that dispatched it, and
  *    sidechain user messages never act as boundaries. A skill that fans out to
  *    agents owns that spend.
+ *
+ * Per-day breakdown (Phase 1 System-browser range toggle, 2026-08-04): each
+ * run also carries `byDay` (dayKey -> {costUsd, outputTokens, messages}),
+ * folded from every usage() call the same way foldWorkflowEntry does for
+ * workflows. A run almost always lands on a single day, but a long-lived
+ * session CAN carry a run across a calendar-day boundary, so this is tracked
+ * per usage entry rather than assumed from the run's first timestamp.
  */
 export function createSkillSegmenter() {
   const runs = [];
@@ -266,7 +282,7 @@ export function createSkillSegmenter() {
         closeActive();
         active = BUILTIN_COMMANDS.has(m[1])
           ? null
-          : { key: m[1], costUsd: 0, outputTokens: 0, messages: 0, absorbedInjection: false };
+          : { key: m[1], costUsd: 0, outputTokens: 0, messages: 0, absorbedInjection: false, byDay: new Map() };
         return;
       }
       if (!active) return;
@@ -285,9 +301,24 @@ export function createSkillSegmenter() {
     // Call for every assistant message that carries usage, sidechain included.
     usage(family, entry) {
       if (!active) return;
-      active.costUsd += estimateCost(family, entry, entry.timestamp);
+      const cost = estimateCost(family, entry, entry.timestamp);
+      active.costUsd += cost;
       active.outputTokens += entry.output_tokens || 0;
       active.messages += 1;
+      // Real callers (parseTranscript) always pass a timestamp -- entries
+      // without one never reach this far (see the timestamp guard in
+      // parseTranscript's main loop). Guarded defensively anyway so a caller
+      // missing one (e.g. a test double) degrades to "no day attribution"
+      // instead of polluting byDay with an Invalid Date key.
+      if (!entry.timestamp) return;
+      const dayKey = localDay(entry.timestamp);
+      if (!active.byDay.has(dayKey)) {
+        active.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0 });
+      }
+      const d = active.byDay.get(dayKey);
+      d.costUsd += cost;
+      d.outputTokens += entry.output_tokens || 0;
+      d.messages += 1;
     },
     // Transcripts often end mid-run (session still open); keep that run.
     finish() {
@@ -444,12 +475,31 @@ export function foldWorkflowEntry(acc, dayKey, cost, outputTokens) {
   acc.outputTokens += outputTokens;
   acc.messages += 1;
   if (!acc.byDay.has(dayKey)) {
-    acc.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0 });
+    acc.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0, sessions: 0 });
   }
   const wd = acc.byDay.get(dayKey);
   wd.costUsd += cost;
   wd.outputTokens += outputTokens;
   wd.messages += 1;
+  return acc;
+}
+
+/**
+ * Pure accumulator step (Phase 1 System-browser range toggle, 2026-08-04):
+ * attributes one SESSION (not one usage entry) to a day in the workflow's
+ * `byDay` breakdown, so a range-scoped "Runs" column can be computed the
+ * same way the skills table's per-day run count is. Called once per
+ * top-level (non-subagent) transcript, keyed off that session's first
+ * in-window entry's day -- a session's cost/tokens/messages can legitimately
+ * spread across multiple days (foldWorkflowEntry handles that per-entry),
+ * but "how many sessions started in this window" only needs one day per
+ * session, so the session is not double-counted.
+ */
+export function foldWorkflowSession(acc, dayKey) {
+  if (!acc.byDay.has(dayKey)) {
+    acc.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0, sessions: 0 });
+  }
+  acc.byDay.get(dayKey).sessions += 1;
   return acc;
 }
 
@@ -503,13 +553,40 @@ export function applyTranscriptToAggregates({
   if (!isSubagent) {
     for (const run of skillRuns) {
       if (!skills.has(run.key)) {
-        skills.set(run.key, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+        skills.set(run.key, {
+          costUsd: 0,
+          outputTokens: 0,
+          messages: 0,
+          runs: 0,
+          // dayKey -> { costUsd, outputTokens, messages, runs }. Mirrors
+          // workflows' byDay (Phase 1 System-browser range toggle,
+          // 2026-08-04) so the Usage tab can recompute per-skill numbers for
+          // any range instead of only ever showing the full-window total.
+          byDay: new Map(),
+        });
       }
       const s = skills.get(run.key);
       s.costUsd += run.costUsd;
       s.outputTokens += run.outputTokens;
       s.messages += run.messages;
       s.runs += 1;
+      if (run.byDay) {
+        for (const [dayKey, d] of run.byDay) {
+          if (!s.byDay.has(dayKey)) {
+            s.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+          }
+          const sd = s.byDay.get(dayKey);
+          sd.costUsd += d.costUsd;
+          sd.outputTokens += d.outputTokens;
+          sd.messages += d.messages;
+        }
+        // The run itself is attributed to its FIRST active day only, so
+        // sum(byDay.runs) === s.runs even when a single run's usage spans
+        // more than one calendar day (rare, but foldWorkflowSession makes
+        // the same choice for workflow sessions for the same reason).
+        const firstDayKey = [...run.byDay.keys()].sort()[0];
+        if (firstDayKey) s.byDay.get(firstDayKey).runs += 1;
+      }
     }
   }
 
@@ -522,14 +599,20 @@ export function applyTranscriptToAggregates({
       outputTokens: 0,
       messages: 0,
       sessions: 0,
-      // dayKey -> { costUsd, outputTokens, messages }. Only days with actual
-      // cost get an entry (see below) -- not zero-padded across the whole
-      // WINDOW_DAYS window, to keep this JSON compact.
+      // dayKey -> { costUsd, outputTokens, messages, sessions }. Only days
+      // with actual cost or a session start get an entry (see below) -- not
+      // zero-padded across the whole WINDOW_DAYS window, to keep this JSON
+      // compact.
       byDay: new Map(),
     });
   }
   const w = workflows.get(rule.key);
-  if (!isSubagent) w.sessions += 1;
+  if (!isSubagent) {
+    w.sessions += 1;
+    // entries.length > 0 is guaranteed here (the early return above already
+    // handled the zero-entries case), so entries[0] always exists.
+    foldWorkflowSession(w, localDay(entries[0].timestamp));
+  }
 
   for (const e of entries) {
     const family = modelFamily(e.model);
@@ -668,12 +751,17 @@ async function main() {
   // Sorted by total cost, not run count: the point of this section is finding
   // the expensive skill, and the Runs column keeps frequency visible anyway.
   const skillList = [...skills.entries()]
-    .map(([key, v]) => ({
-      key,
-      label: key,
-      ...v,
-      avgCostUsd: v.runs > 0 ? v.costUsd / v.runs : 0,
-    }))
+    .map(([key, v]) => {
+      const byDay = {};
+      for (const [dayKey, d] of [...v.byDay.entries()].sort()) byDay[dayKey] = d;
+      return {
+        key,
+        label: key,
+        ...v,
+        byDay,
+        avgCostUsd: v.runs > 0 ? v.costUsd / v.runs : 0,
+      };
+    })
     .sort((a, b) => b.costUsd - a.costUsd);
 
   const todayKey = localDay(now.toISOString());

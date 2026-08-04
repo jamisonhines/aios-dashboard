@@ -416,11 +416,64 @@ export function formatUsd(n) {
 }
 
 /**
+ * Per-model-family legend + breakdown table for an arbitrary continuous day
+ * window. Extracted (Phase 1 System-browser range toggle, 2026-08-04) from
+ * computeUsageView so the same aggregation can run over ANY window
+ * (computeUsageWindow's range-scoped slice), not only the fixed 30-day one --
+ * this is what lets the "Model breakdown" table follow the range toggle.
+ */
+export function usageFamilyBreakdown(windowDays) {
+  const famTotals = new Map();
+  for (const d of windowDays) {
+    for (const fam of Object.keys(d.models)) {
+      const b = d.models[fam];
+      const acc = famTotals.get(fam) || usageEmptyBucket();
+      acc.inputTokens += b.inputTokens;
+      acc.outputTokens += b.outputTokens;
+      acc.cacheReadTokens += b.cacheReadTokens;
+      acc.cacheWriteTokens += b.cacheWriteTokens;
+      acc.messages += b.messages;
+      acc.costUsd += b.costUsd;
+      famTotals.set(fam, acc);
+    }
+  }
+
+  const legend = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => ({
+    family: f,
+    label: USAGE_FAMILY_LABELS[f],
+    costUsd: famTotals.get(f).costUsd,
+  }));
+
+  const table = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
+    const b = famTotals.get(f);
+    return {
+      family: f,
+      label: USAGE_FAMILY_LABELS[f],
+      messages: b.messages,
+      inputTokens: b.inputTokens,
+      outputTokens: b.outputTokens,
+      cacheReadTokens: b.cacheReadTokens,
+      costUsd: b.costUsd,
+    };
+  });
+
+  return { legend, table };
+}
+
+/**
  * Pure view-model function: turns the exporter's usage-stats.json shape plus
  * "now" into everything the Usage tab renders (tiles, chart, legend, table,
  * projects). `nowDate` is passed in (not read from the clock) so the tile
  * math (today/7d/30d boundaries) and the always-30-entries chart window are
  * unit-testable without mocking time.
+ *
+ * NOTE (Phase 1 System-browser range toggle, 2026-08-04): this fixed-30-day
+ * view still exists and is still tested as-is (nothing here changed
+ * behavior), but the Usage tab no longer renders its `tiles`/`legend`/
+ * `table` directly -- those are now recomputed per the selected range via
+ * computeUsageRangeTiles/usageFamilyBreakdown over computeUsageWindow's
+ * slice. `hasData` and `projects` (which has no per-day breakdown to scope
+ * by range) are still sourced from here.
  */
 export function computeUsageView(stats, nowDate) {
   const dayByDate = new Map(stats.days.map((d) => [d.date, d]));
@@ -467,39 +520,7 @@ export function computeUsageView(stats, nowDate) {
   }
 
   // 30d per-family totals, feeding both the legend and the breakdown table.
-  const famTotals = new Map();
-  for (const d of windowDays) {
-    for (const fam of Object.keys(d.models)) {
-      const b = d.models[fam];
-      const acc = famTotals.get(fam) || usageEmptyBucket();
-      acc.inputTokens += b.inputTokens;
-      acc.outputTokens += b.outputTokens;
-      acc.cacheReadTokens += b.cacheReadTokens;
-      acc.cacheWriteTokens += b.cacheWriteTokens;
-      acc.messages += b.messages;
-      acc.costUsd += b.costUsd;
-      famTotals.set(fam, acc);
-    }
-  }
-
-  const legend = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => ({
-    family: f,
-    label: USAGE_FAMILY_LABELS[f],
-    costUsd: famTotals.get(f).costUsd,
-  }));
-
-  const table = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
-    const b = famTotals.get(f);
-    return {
-      family: f,
-      label: USAGE_FAMILY_LABELS[f],
-      messages: b.messages,
-      inputTokens: b.inputTokens,
-      outputTokens: b.outputTokens,
-      cacheReadTokens: b.cacheReadTokens,
-      costUsd: b.costUsd,
-    };
-  });
+  const { legend, table } = usageFamilyBreakdown(windowDays);
 
   const projects = stats.projects
     .slice()
@@ -528,8 +549,21 @@ export function computeUsageView(stats, nowDate) {
 // main.ts renderUsageTab.
 // ---------------------------------------------------------------------------
 
-/** Window length in days per range slug. */
+/** Window length in days per range slug. "all" has no fixed length -- see computeUsageWindow. */
 export const USAGE_RANGE_DAYS = { "1d": 1, "7d": 7, "30d": 30 };
+
+/**
+ * Human period label per range slug, for the sticky header and range-scoped
+ * subheads ("Skills (Last 7 days)" etc). Distinct from the date-range label
+ * computeUsageWindow returns ("Jul 8 - Jul 14") -- this is the fixed name of
+ * the period itself, always legible even when the window is empty.
+ */
+export const USAGE_RANGE_LABELS = {
+  "1d": "Today",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  all: "All available",
+};
 
 const USAGE_MONTHS_SHORT = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -551,16 +585,50 @@ export function formatUsageWindowLabel(startKey, endKey) {
 
 /**
  * The visible usage window: a continuous zero-filled slice of `days` (the
- * exporter's sparse day buckets), `range` in {"1d","7d","30d"}, `offset` =
- * how many windows back from the one ending today (0 = current). Returns
- * the slice plus label and canPrev/canNext for the paging arrows: canNext
- * is false at offset 0, canPrev is false once the previous window would
- * start before the earliest day present in the data.
+ * exporter's sparse day buckets), `range` in {"1d","7d","30d","all"},
+ * `offset` = how many windows back from the one ending today (0 = current,
+ * ignored for "all"). Returns the slice plus label and canPrev/canNext for
+ * the paging arrows: canNext is false at offset 0, canPrev is false once the
+ * previous window would start before the earliest day present in the data.
+ *
+ * "all" (Phase 1 System-browser range toggle, 2026-08-04) is every day the
+ * exporter scanned, not a fixed length: a continuous zero-filled span from
+ * the earliest day present in `days` through today. Paging is meaningless
+ * for a window that's already everything, so canPrev/canNext are always
+ * false and `offset` is ignored.
  */
 export function computeUsageWindow(days, range, offset, todayDate) {
+  const dayByDate = new Map(days.map((d) => [d.date, d]));
+
+  if (range === "all") {
+    let earliest = null;
+    for (const d of days) if (earliest === null || d.date < earliest) earliest = d.date;
+    const todayKey = usageLocalDayKey(todayDate);
+    const startKey = earliest !== null && earliest < todayKey ? earliest : todayKey;
+
+    const windowDays = [];
+    let cursor = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate());
+    // Walk backward from today to startKey, then reverse -- simplest way to
+    // get a correct calendar walk (handles month/year boundaries) without
+    // computing a day-count first.
+    while (usageLocalDayKey(cursor) >= startKey) {
+      const key = usageLocalDayKey(cursor);
+      windowDays.unshift(dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1);
+    }
+
+    return {
+      range,
+      offset: 0,
+      days: windowDays,
+      label: formatUsageWindowLabel(windowDays[0].date, windowDays[windowDays.length - 1].date),
+      canPrev: false,
+      canNext: false,
+    };
+  }
+
   const len = USAGE_RANGE_DAYS[range] || 7;
   const safeOffset = Math.max(0, offset | 0);
-  const dayByDate = new Map(days.map((d) => [d.date, d]));
 
   const windowDays = [];
   for (let i = len - 1; i >= 0; i--) {
@@ -584,6 +652,40 @@ export function computeUsageWindow(days, range, offset, todayDate) {
     label: formatUsageWindowLabel(startKey, endKey),
     canPrev: earliest !== null && earliest < startKey,
     canNext: safeOffset > 0,
+  };
+}
+
+/**
+ * Offset-aware period label (Reviewer M4, 2026-08-04): USAGE_RANGE_LABELS is
+ * only true at offset 0 -- "Last 7 days" paged back one window is actually
+ * last-last week, and "Today" paged back one day is actually yesterday.
+ * Falls back to the window's own concrete date-range label (`win.label`,
+ * e.g. "Jul 1 - Jul 7") whenever offset != 0, so a scoped number is never
+ * shown under a period name that no longer describes it. "all" never pages
+ * (computeUsageWindow always returns offset: 0 for it), so it always reads
+ * "All available" here.
+ */
+export function usageScopedRangeLabel(win) {
+  if (win.offset === 0) return USAGE_RANGE_LABELS[win.range] || win.label;
+  return win.label;
+}
+
+/**
+ * Total spend + output tokens tiles for an arbitrary continuous day window
+ * (Phase 1 System-browser range toggle, 2026-08-04). Replaces the old fixed
+ * Today/7d/30d tiles: the Usage tab now shows exactly two numbers, both
+ * scoped to whatever range is selected, so the tiles never disagree with the
+ * chart/tables below them. `rangeLabel` (from USAGE_RANGE_LABELS) is passed
+ * straight through so the renderer doesn't need to re-derive it.
+ */
+export function computeUsageRangeTiles(windowDays, rangeLabel) {
+  const costUsd = windowDays.reduce((s, d) => s + d.totalCostUsd, 0);
+  const outputTokens = windowDays.reduce((s, d) => s + d.totalOutputTokens, 0);
+  return {
+    rangeLabel,
+    costUsd,
+    outputTokens,
+    outputTokensCompact: formatCompactNumber(outputTokens),
   };
 }
 
@@ -703,6 +805,108 @@ export function computeWorkflowsView(stats) {
   return { hasData: true, shareBar, table };
 }
 
+/**
+ * Range-scoped workflows view (Phase 1 System-browser range toggle,
+ * 2026-08-04): recomputes cost/tokens/messages/sessions from each workflow's
+ * `byDay` breakdown summed over `windowDays` (computeUsageWindow's slice),
+ * instead of always showing the fixed all-time total under whatever range
+ * button happens to be active.
+ *
+ * A workflow entry with no `byDay` at all (JSON written before build 2.9
+ * slice 2) has no per-day data to scope -- its full-time total is shown
+ * regardless of range, flagged `partial: true` so the caller can label it
+ * honestly rather than silently mislabeling an all-time number as
+ * range-scoped. Workflows with `byDay` but zero activity inside the window
+ * are dropped (nothing to show for that range). Sorted by costUsd desc.
+ *
+ * Reviewer M3 (2026-08-04, found against Jaymo's live usage-stats.json):
+ * `byDay` can exist WITHOUT a `sessions` key on its day buckets -- that's
+ * exactly the shape every workflow in JSON written before the per-day
+ * session fold (this same Phase 1 slice) has. Cost/tokens/messages are
+ * still genuinely scoped from that byDay, but summing a missing `sessions`
+ * key silently produces 0 for every range, which reads as "this workflow
+ * had zero runs this week" -- a wrong number, not an honest one. Detected
+ * per-workflow (`hasSessionsPerDay`) and, when absent, the Runs column
+ * falls back to the workflow's all-time session count and the row is
+ * flagged `sessionsPartial: true` so the renderer can label just that
+ * column honestly, without also declaring the (correctly scoped)
+ * cost/tokens/messages partial.
+ */
+export function computeWorkflowsViewForRange(stats, windowDays, range) {
+  const workflows = stats.workflows;
+  if (!Array.isArray(workflows) || workflows.length === 0) {
+    return { hasData: false, shareBar: [], table: [] };
+  }
+
+  const dateKeys = windowDays.map((d) => d.date);
+  const rows = [];
+  for (const w of workflows) {
+    if (!w.byDay) {
+      rows.push({
+        key: w.key,
+        label: w.label,
+        costUsd: w.costUsd,
+        outputTokens: w.outputTokens,
+        messages: w.messages,
+        sessions: w.sessions,
+        partial: true,
+        sessionsPartial: true,
+      });
+      continue;
+    }
+    const hasSessionsPerDay = Object.values(w.byDay).some((d) => typeof d.sessions === "number");
+
+    // "all" already covers the workflow's whole recorded history (its
+    // byDay never has entries outside what windowDays spans), so summing
+    // over the exact same date keys is correct for every range including
+    // "all" -- no special case needed here.
+    let costUsd = 0, outputTokens = 0, messages = 0, sessions = 0;
+    for (const dk of dateKeys) {
+      const d = w.byDay[dk];
+      if (!d) continue;
+      costUsd += d.costUsd;
+      outputTokens += d.outputTokens;
+      messages += d.messages;
+      if (hasSessionsPerDay) sessions += d.sessions || 0;
+    }
+    // The Runs/sessions fallback uses the workflow's ALL-TIME session count
+    // when there's no per-day session data to scope -- honestly wrong-scope
+    // (a real number, just not range-limited) instead of silently wrong
+    // (zero, which reads as "no activity"). The zero-activity drop below
+    // deliberately ignores `sessions` for this reason: a workflow with zero
+    // in-window cost/messages must still be dropped even though its
+    // fallback `sessions` value is a nonzero all-time count.
+    if (!hasSessionsPerDay) sessions = w.sessions || 0;
+    if (costUsd <= 0 && messages === 0) continue;
+    rows.push({
+      key: w.key,
+      label: w.label,
+      costUsd,
+      outputTokens,
+      messages,
+      sessions,
+      partial: false,
+      sessionsPartial: !hasSessionsPerDay,
+    });
+  }
+  rows.sort((a, b) => b.costUsd - a.costUsd);
+
+  const total = rows.reduce((s, w) => s + w.costUsd, 0);
+  const safeTotal = total > 0 ? total : 1;
+
+  const shareBar = rows.map((w) => ({
+    key: w.key,
+    label: w.label,
+    costUsd: w.costUsd,
+    sharePercent: (w.costUsd / safeTotal) * 100,
+    colorIndex: usageWorkflowColorIndex(w.key),
+  }));
+
+  const table = rows.map((w) => ({ ...w, colorIndex: usageWorkflowColorIndex(w.key) }));
+
+  return { hasData: table.length > 0, shareBar, table, range };
+}
+
 // Skills section shows this many rows collapsed; the rest hide behind the
 // show-more toggle.
 export const USAGE_SKILLS_TOP_N = 5;
@@ -728,6 +932,70 @@ export function computeSkillsView(stats, expanded) {
     hiddenCount: Math.max(0, skills.length - rows.length),
     expanded: isExpanded,
     totalCount: skills.length,
+  };
+}
+
+/**
+ * Range-scoped skills view (Phase 1 System-browser range toggle,
+ * 2026-08-04): recomputes cost/tokens/messages/runs/avgCostUsd from each
+ * skill's `byDay` breakdown summed over `windowDays`, same idea as
+ * computeWorkflowsViewForRange.
+ *
+ * `rangeSupported` is section-level, not per-row: if ANY skill in the
+ * exported set predates the `byDay` field (build before Phase 1), the whole
+ * section falls back to all-time totals rather than silently mixing
+ * range-scoped rows with all-time rows in the same table -- one honest label
+ * ("Skills (All available data)") beats a table where some rows quietly mean
+ * something different than others.
+ */
+export function computeSkillsViewForRange(stats, windowDays, range, expanded) {
+  const skills = stats.skills;
+  if (!Array.isArray(skills) || skills.length === 0) {
+    return { hasData: false, rows: [], hiddenCount: 0, expanded: false, totalCount: 0, rangeSupported: false };
+  }
+
+  const rangeSupported = skills.every((s) => s && typeof s.byDay === "object" && s.byDay !== null);
+
+  let source;
+  if (!rangeSupported || range === "all") {
+    source = skills.slice();
+  } else {
+    const dateKeys = windowDays.map((d) => d.date);
+    source = skills
+      .map((s) => {
+        let costUsd = 0, outputTokens = 0, messages = 0, runs = 0;
+        const byDay = s.byDay || {};
+        for (const dk of dateKeys) {
+          const d = byDay[dk];
+          if (!d) continue;
+          costUsd += d.costUsd;
+          outputTokens += d.outputTokens;
+          messages += d.messages;
+          runs += d.runs || 0;
+        }
+        return {
+          key: s.key,
+          label: s.label,
+          costUsd,
+          outputTokens,
+          messages,
+          runs,
+          avgCostUsd: runs > 0 ? costUsd / runs : 0,
+        };
+      })
+      .filter((s) => s.runs > 0 || s.costUsd > 0 || s.messages > 0)
+      .sort((a, b) => b.costUsd - a.costUsd);
+  }
+
+  const isExpanded = !!expanded;
+  const rows = isExpanded ? source.slice() : source.slice(0, USAGE_SKILLS_TOP_N);
+  return {
+    hasData: true,
+    rows,
+    hiddenCount: Math.max(0, source.length - rows.length),
+    expanded: isExpanded,
+    totalCount: source.length,
+    rangeSupported,
   };
 }
 
