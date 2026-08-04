@@ -342,6 +342,14 @@ export function createSkillSegmenter() {
 export async function parseTranscript(filePath, cutoffMs) {
   const entries = [];
   let firstUserContent;
+  // System-browser Agents section (Phase 3, 2026-08-05): a dispatched
+  // subagent transcript carries the Task-tool subagent_type on every line as
+  // `attributionAgent` (verified constant per file across 30 sampled real
+  // transcripts on this machine). Top-level session files never carry it.
+  // Captured opportunistically from ANY line (not just assistant/user), so a
+  // file that happens to lead with a line lacking the field still resolves
+  // it from a later one.
+  let attributionAgent;
   const segmenter = createSkillSegmenter();
   const rl = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -354,6 +362,9 @@ export async function parseTranscript(filePath, cutoffMs) {
       obj = JSON.parse(line);
     } catch {
       continue;
+    }
+    if (attributionAgent === undefined && typeof obj?.attributionAgent === "string" && obj.attributionAgent) {
+      attributionAgent = obj.attributionAgent;
     }
     if (obj?.type === "user") {
       const content = obj.message?.content;
@@ -387,7 +398,90 @@ export async function parseTranscript(filePath, cutoffMs) {
   if (firstUserContent === undefined) firstUserContent = "";
   const firstCommandMatch = FIRST_COMMAND_RE.exec(firstUserContent);
   const firstCommand = firstCommandMatch ? firstCommandMatch[1] : undefined;
-  return { entries, firstUserContent, firstCommand, skillRuns: segmenter.finish() };
+  return { entries, firstUserContent, firstCommand, skillRuns: segmenter.finish(), attributionAgent };
+}
+
+// Falls back to this bucket when a subagent transcript carries in-window
+// usage entries but no attributionAgent field. Reviewer Minor 2 (2026-08-05):
+// this comment previously undersold it as a zero-cost edge case (the only
+// instance found in a first pass was an API-error transcript with 0 usage,
+// which never even reaches this fold -- applyAgentTranscript's own
+// zero-entries guard returns before creating a bucket at all). In practice
+// this bucket can carry REAL, nonzero cost: any future subagent dispatch
+// path that doesn't set attributionAgent (a host/CLI version change, a
+// dispatch mechanism other than the Task tool) lands here rather than being
+// silently dropped. It is treated exactly like any other non-roster type
+// (general-purpose, Explore, workflow-subagent, Plan, seo-*,
+// claude-code-guide): computeSystemAgentsView (model.mjs) surfaces it in the
+// System tab's "Generic subagents" group, not hidden and not merged into a
+// roster row it doesn't belong to.
+export const UNKNOWN_AGENT_TYPE = "unknown";
+
+/**
+ * Pure accumulator (System-browser Agents section, Phase 3, 2026-08-05):
+ * folds ONE subagent transcript's already-window-filtered entries into the
+ * `agents` Map, keyed by the host-level attributionAgent value (e.g.
+ * "coder", "general-purpose", "Explore") -- NOT yet mapped onto the AIOS
+ * roster; that join happens later, in the plugin's view-model layer, against
+ * ops-map.json's agent node ids (which already match the roster's
+ * attributionAgent values 1:1: capture/coder/curate/recruit/research/
+ * reviewer/tooling/web-builder). Keeping the raw type here means a
+ * currently-non-roster type (e.g. a future hire) shows up the moment its
+ * ops-map node exists, with no exporter change required.
+ *
+ * Mirrors applyTranscriptToAggregates' skills-map fold: one FILE is one run,
+ * attributed to its first in-window day, same reasoning as skills' run
+ * attribution (a run/file can span >1 day of cost, but is only ever "how
+ * many runs happened" once).
+ *
+ * Deliberately independent of applyTranscriptToAggregates' days/projects/
+ * workflows folds -- this is an ADDITIONAL dimension over the same already-
+ * counted-once subagent entries, not a second charge. The exporter's
+ * pre-existing days/projects/workflows totals (unchanged by this function)
+ * remain the truthful headline numbers; `agents` breaks the same subagent
+ * spend down a different way, same relationship projects/workflows/skills
+ * already have to each other.
+ */
+export function applyAgentTranscript(agents, agentType, entries) {
+  if (entries.length === 0) return;
+  const key = agentType || UNKNOWN_AGENT_TYPE;
+  if (!agents.has(key)) {
+    agents.set(key, {
+      costUsd: 0,
+      outputTokens: 0,
+      messages: 0,
+      runs: 0,
+      // dayKey -> { costUsd, outputTokens, messages, runs }, same shape as
+      // workflows'/skills' byDay so the Usage tab range toggle can consume
+      // this dimension the same way (per the task spec).
+      byDay: new Map(),
+    });
+  }
+  const a = agents.get(key);
+  a.runs += 1;
+
+  for (const e of entries) {
+    const family = modelFamily(e.model);
+    const cost = estimateCost(family, e, e.timestamp);
+    const dayKey = localDay(e.timestamp);
+    a.costUsd += cost;
+    a.outputTokens += e.output_tokens || 0;
+    a.messages += 1;
+    if (!a.byDay.has(dayKey)) {
+      a.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0, runs: 0 });
+    }
+    const d = a.byDay.get(dayKey);
+    d.costUsd += cost;
+    d.outputTokens += e.output_tokens || 0;
+    d.messages += 1;
+  }
+
+  // The run (file) itself is attributed to its FIRST in-window day only, so
+  // sum(byDay.runs) === a.runs even when a single file's usage spans more
+  // than one calendar day -- same choice applyTranscriptToAggregates makes
+  // for skills' per-run attribution.
+  const firstDayKey = localDay(entries[0].timestamp);
+  a.byDay.get(firstDayKey).runs += 1;
 }
 
 // Bridge session ids: values of ~/.aios/bridge/data/sessions.json (chatId -> session uuid).
@@ -672,6 +766,10 @@ async function main() {
   const workflows = new Map();
   // skillKey -> { costUsd, outputTokens, messages, runs }
   const skills = new Map();
+  // agentType -> { costUsd, outputTokens, messages, runs, byDay } (System-browser
+  // Agents section, Phase 3, 2026-08-05). Populated only from nested subagent
+  // transcripts (a top-level session is never itself "an agent run").
+  const agents = new Map();
 
   // Top-level session files must be classified BEFORE any nested subagent
   // file, because a subagent's cost rolls up to its PARENT session's
@@ -703,7 +801,10 @@ async function main() {
   }
 
   for (const { filePath, project, sessionId } of nested) {
-    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
+    const { entries, firstUserContent, firstCommand, skillRuns, attributionAgent } = await parseTranscript(
+      filePath,
+      cutoffMs
+    );
     const projectName = prettifyProject(project);
     // Prefer the parent session's own classification. Fall back to
     // classifying off this file's content only if the parent session's
@@ -726,6 +827,7 @@ async function main() {
       skills,
       isSubagent: true,
     });
+    applyAgentTranscript(agents, attributionAgent, entries);
   }
 
   const sortedDays = [...days.keys()].sort();
@@ -764,6 +866,19 @@ async function main() {
     })
     .sort((a, b) => b.costUsd - a.costUsd);
 
+  // Sorted by total cost, same convention as workflowList/skillList. `label`
+  // mirrors skillList's own key-as-label choice (System tab joins by `key`
+  // against ops-map's roster ids and only uses `label` as an unmapped
+  // fallback display name), so this can reuse the same JSON shape/TS type
+  // as UsageSkillStat.
+  const agentList = [...agents.entries()]
+    .map(([key, v]) => {
+      const byDay = {};
+      for (const [dayKey, d] of [...v.byDay.entries()].sort()) byDay[dayKey] = d;
+      return { key, label: key, ...v, byDay, avgCostUsd: v.runs > 0 ? v.costUsd / v.runs : 0 };
+    })
+    .sort((a, b) => b.costUsd - a.costUsd);
+
   const todayKey = localDay(now.toISOString());
   const sevenDaysAgoMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
   const thirtyDaysAgoMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
@@ -785,6 +900,7 @@ async function main() {
     projects: projectList,
     workflows: workflowList,
     skills: skillList,
+    agents: agentList,
     totals: { last7DaysCostUsd, last30DaysCostUsd, todayCostUsd },
   };
 
@@ -803,9 +919,13 @@ async function main() {
   const topSkillText = topSkill
     ? `, top skill /${topSkill.label} $${topSkill.avgCostUsd.toFixed(2)}/run x${topSkill.runs}`
     : "";
+  const topAgent = agentList[0];
+  const topAgentText = topAgent
+    ? `, top agent ${topAgent.key} $${topAgent.costUsd.toFixed(2)} x${topAgent.runs} run(s)`
+    : "";
   console.log(
     `usage-stats: ${transcripts.length} transcript(s), ${totalMessages} message(s), ` +
-      `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText} -> ${outFile}`
+      `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText}${topAgentText} -> ${outFile}`
   );
 }
 

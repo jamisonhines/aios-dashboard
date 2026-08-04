@@ -1727,10 +1727,20 @@ export const SYSTEM_SKILLS_SUITE_PREFIXES = [
   "printing-press-",
 ];
 
-// Returns the suite's display label ("blog", "gsd", ...) for a skill id that
-// matches one of the known generic-suite prefixes, or null for a standalone
-// skill.
+// Returns the suite's display label ("blog", "gsd", "superpowers", ...) for
+// a skill id that either (a) is colon-namespaced -- every plugin-origin
+// skill id (superpowers:brainstorming, context-mode:*), grouped the same
+// way the generic hyphenated suites below are (Reviewer cosmetic minor,
+// phase-2 report, 2026-08-04: the 35 plugin skills previously rendered as
+// 35 standalone rows instead of grouped suites) -- or (b) matches one of the
+// known generic-suite prefixes. Returns null for a genuinely standalone
+// skill. Colon-namespacing is checked first: a plugin could theoretically
+// ship a skill whose bare id also happens to start with a generic prefix
+// (e.g. "gsd-tools" inside some future "gsd:" plugin), and the namespace is
+// the more specific, more useful grouping in that case.
 export function systemSkillsSuiteFor(id, prefixes = SYSTEM_SKILLS_SUITE_PREFIXES) {
+  const colonIdx = id.indexOf(":");
+  if (colonIdx > 0) return id.slice(0, colonIdx);
   const hit = prefixes.find((p) => id.startsWith(p));
   return hit ? hit.slice(0, -1) : null;
 }
@@ -1814,9 +1824,24 @@ export function computeSystemSkillsView(opsMap, usageStats, filterText) {
       standalone.push(row);
     }
   }
-  const groups = [...groupsByLabel.entries()]
-    .map(([suite, groupRows]) => ({ suite, rows: groupRows, count: groupRows.length }))
-    .sort((a, b) => b.count - a.count || a.suite.localeCompare(b.suite));
+  // Cheap nit (Reviewer, 2026-08-05): a suite with exactly ONE matching skill
+  // gets no benefit from the collapse-behind-a-count UI (there's nothing to
+  // hide), so it renders as a plain standalone row instead of a 1-member
+  // group header. `separator` (":" for a colon-namespaced plugin suite like
+  // superpowers:*, "-" for a generic hyphen-prefixed suite like gsd-*) is
+  // derived once here from the group's own first row id, so the renderer
+  // never has to re-guess it from suite text alone.
+  const groups = [];
+  for (const [suite, groupRows] of groupsByLabel) {
+    if (groupRows.length === 1) {
+      standalone.push(...groupRows);
+      continue;
+    }
+    const separator = groupRows[0].id.startsWith(suite + ":") ? ":" : "-";
+    groups.push({ suite, rows: groupRows, count: groupRows.length, separator });
+  }
+  standalone.sort((a, b) => a.id.localeCompare(b.id));
+  groups.sort((a, b) => b.count - a.count || a.suite.localeCompare(b.suite));
 
   return {
     totalCount: skillNodes.length,
@@ -1844,4 +1869,126 @@ export function computeSystemSkillsView(opsMap, usageStats, filterText) {
 export function systemSkillsGroupIsOpen(suite, expandedGroups, filterActive) {
   if (filterActive) return true;
   return Boolean(expandedGroups && expandedGroups.has(suite));
+}
+
+// ---------------------------------------------------------------------------
+// System tab: Agents section (Phase 3, 2026-08-05). Pure view-model joining
+// ops-map.json's roster agent nodes (name, model, one-line description,
+// contract path) with their wired-to edges (workflows/SOPs/skills their
+// contract references) and usage-stats.json's optional `agents` array (cost,
+// runs, byDay), keyed by the SAME id the exporter uses for both (ops-map
+// agent node id === usage-stats attributionAgent value for every roster
+// name: capture/coder/curate/recruit/research/reviewer/tooling/web-builder).
+// No Obsidian deps; unit tested in a systemAgentsModel-focused test file.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves one agent node's outgoing edges into the three wired-to buckets
+ * the System tab shows: workflows, sops, and skills. Guidelines and other
+ * agents are deliberately excluded -- the task asks for "the workflows,
+ * SOPs, and skills its contract references", not the full edge set. Each
+ * row carries a clickable path for internal (non-external) nodes, same
+ * convention as systemSkillUsedByRows.
+ */
+export function systemAgentWiredToRows(agentId, edges, nodesById) {
+  const workflows = [];
+  const sops = [];
+  const skills = [];
+  for (const e of edges) {
+    if (e.from !== agentId) continue;
+    const target = nodesById.get(e.to);
+    if (!target) continue;
+    const row = { id: target.id, label: target.label || target.id, path: target.external ? undefined : target.path };
+    if (target.type === "workflow") workflows.push(row);
+    else if (target.type === "sop") sops.push(row);
+    else if (target.type === "skill") skills.push(row);
+  }
+  const byLabel = (a, b) => a.label.localeCompare(b.label);
+  return { workflows: workflows.sort(byLabel), sops: sops.sort(byLabel), skills: skills.sort(byLabel) };
+}
+
+/**
+ * Joins one ops-map agent node with its usage-stats `agents[]` row (if any).
+ * Returns null (not a dash) for cost/runs/avgCostUsd when no usage row
+ * exists, mirroring systemSkillRowFromNode -- the renderer decides the dash
+ * presentation, not the model.
+ */
+export function systemAgentRowFromNode(node, edges, nodesById, usageByKey) {
+  const usage = usageByKey.get(node.id);
+  return {
+    id: node.id,
+    label: node.label || node.id,
+    model: node.model || null,
+    description: node.description || "(no description)",
+    path: node.path,
+    wiredTo: systemAgentWiredToRows(node.id, edges, nodesById),
+    costUsd: usage ? usage.costUsd : null,
+    runs: usage ? usage.runs : null,
+    avgCostUsd: usage ? usage.avgCostUsd : null,
+  };
+}
+
+/**
+ * One row in the "Generic subagents" group: a usage-stats.agents entry whose
+ * key does NOT match any roster agent node id (general-purpose, Explore,
+ * workflow-subagent, Plan, seo-*, claude-code-guide, the UNKNOWN_AGENT_TYPE
+ * fallback, and any future non-roster subagent_type). No contract, no
+ * model badge, no wired-to -- these are real dollars with no specialist
+ * behind them, plain cost/runs/avg rows only.
+ */
+export function systemGenericSubagentRowFromUsage(usage) {
+  return {
+    id: usage.key,
+    label: usage.label || usage.key,
+    costUsd: usage.costUsd,
+    runs: usage.runs,
+    avgCostUsd: usage.avgCostUsd,
+  };
+}
+
+/**
+ * Full System tab Agents-section view: one row per roster agent node
+ * (ops-map's type:"agent" nodes), in the order export-ops-map.mjs discovered
+ * them (alphabetical by id, since agentFiles comes from a sorted readdir),
+ * plus a `genericSubagents` group (Dispatch escalation, 2026-08-05): every
+ * usage-stats.agents entry that does NOT match a roster agent id, sorted by
+ * cost descending, so the section's totals stop hiding the (often majority)
+ * share of delegated spend that has no specialist contract behind it.
+ */
+export function computeSystemAgentsView(opsMap, usageStats) {
+  const nodes = (opsMap && opsMap.nodes) || [];
+  const edges = (opsMap && opsMap.edges) || [];
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+  const usageEntries = (usageStats && usageStats.agents) || [];
+  const usageByKey = new Map(usageEntries.map((a) => [a.key, a]));
+  const agentNodes = nodes.filter((n) => n.type === "agent");
+  const rosterIds = new Set(agentNodes.map((n) => n.id));
+
+  const genericSubagents = usageEntries
+    .filter((a) => !rosterIds.has(a.key))
+    .map(systemGenericSubagentRowFromUsage)
+    .sort((a, b) => b.costUsd - a.costUsd);
+
+  return {
+    totalCount: agentNodes.length,
+    rows: agentNodes.map((n) => systemAgentRowFromNode(n, edges, nodesById, usageByKey)),
+    genericSubagents,
+    genericSubagentsCostUsd: genericSubagents.reduce((sum, r) => sum + r.costUsd, 0),
+  };
+}
+
+/**
+ * "Available hires" view: pass-through of export-ops-map.mjs's
+ * `availableHires` (parsed from SOP-001's "Reference pattern" section when
+ * present) shaped for the renderer, which always needs a clickable fallback
+ * link to SOP-001 regardless of whether parsing found a heading.
+ */
+export function computeAvailableHiresView(opsMap) {
+  const raw = (opsMap && opsMap.availableHires) || { found: false, items: [] };
+  return {
+    found: Boolean(raw.found),
+    items: Array.isArray(raw.items) ? raw.items : [],
+    sopId: raw.sopId || "SOP-001-how-to-add-a-new-specialist",
+    sopPath: raw.sopPath,
+  };
 }

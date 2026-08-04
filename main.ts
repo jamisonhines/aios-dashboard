@@ -51,6 +51,8 @@ import {
   usageScopedRangeLabel,
   computeSystemSkillsView,
   systemSkillsGroupIsOpen,
+  computeSystemAgentsView,
+  computeAvailableHiresView,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -544,6 +546,13 @@ interface UsageStats {
   // Optional: absent in JSON written before build 2.9. Same hide-when-missing
   // rule as workflows.
   skills?: UsageSkillStat[];
+  // Optional: absent in JSON written before Phase 3 (System-browser Agents
+  // section, 2026-08-05). Keyed by the host-level subagent type (e.g.
+  // "coder", "general-purpose") -- NOT yet mapped onto the AIOS roster; the
+  // System tab's Agents section does that join by matching this `key`
+  // against ops-map.json's agent node ids. Same byDay shape as skills, for
+  // the same future range-toggle reason.
+  agents?: UsageSkillStat[];
   totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
 }
 
@@ -687,6 +696,10 @@ interface OpsMapNode {
   disableModelInvocation?: boolean; // SKILL.md frontmatter `disable-model-invocation: true`
   usedBy?: string[]; // node ids with an edge -> this skill (denormalized by export-ops-map.mjs)
   origin?: "skills-dir" | "plugin" | "command"; // where the skill was discovered (Reviewer M3, 2026-08-04)
+  // Agent-only field (System-browser Agents section, Phase 3, 2026-08-05):
+  // the shim's `model:` frontmatter line. Absent (not empty string) for a
+  // shim written before that convention existed.
+  model?: string;
 }
 
 interface OpsMapEdge {
@@ -695,10 +708,27 @@ interface OpsMapEdge {
   viaType: string;
 }
 
+// "Available hires" (System-browser Agents section, Phase 3, 2026-08-05):
+// parsed from SOP-001's "Reference pattern" section when present. See
+// parseAvailableHires' own comment (export-ops-map.mjs) for why found:false
+// is the honest, current-file-accurate outcome, not a bug.
+interface OpsMapAvailableHireItem {
+  label: string;
+  description: string;
+}
+
+interface OpsMapAvailableHires {
+  found: boolean;
+  items: OpsMapAvailableHireItem[];
+  sopId: string;
+  sopPath: string;
+}
+
 interface OpsMapManifest {
   generatedAt?: string;
   nodes: OpsMapNode[];
   edges: OpsMapEdge[];
+  availableHires?: OpsMapAvailableHires;
 }
 
 interface OpsMapLayoutOpts {
@@ -2238,7 +2268,11 @@ function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
     const tr = tbody.createEl("tr");
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
     nameCell.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + row.family });
-    nameCell.createSpan({ text: " " + row.label });
+    nameCell.createSpan({
+      cls: "aios-usage-table-name-text",
+      text: row.label,
+      attr: { title: row.label },
+    });
     tr.createEl("td", { text: String(row.messages) });
     tr.createEl("td", { text: formatCompactNumber(row.inputTokens) });
     tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
@@ -2331,7 +2365,11 @@ function renderUsageBreakdownTable(
     const tr = tbody.createEl("tr");
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
     if (row.nameDotClass) nameCell.createSpan({ cls: "aios-usage-dot " + row.nameDotClass });
-    nameCell.createSpan({ text: row.nameText });
+    nameCell.createSpan({
+      cls: "aios-usage-table-name-text",
+      text: row.nameText,
+      attr: { title: row.nameText.trim() },
+    });
     if (row.nameSuffix) {
       nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: row.nameSuffix });
     }
@@ -3041,6 +3079,9 @@ interface SystemSkillGroup {
   suite: string;
   rows: SystemSkillRow[];
   count: number;
+  // Cheap nit (Reviewer, 2026-08-05): ":" for a colon-namespaced plugin
+  // suite (superpowers:*), "-" for a generic hyphen-prefixed suite (gsd-*).
+  separator: string;
 }
 
 interface SystemSkillsView {
@@ -3153,7 +3194,7 @@ function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemS
     const tr = tbody.createEl("tr");
 
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
-    nameCell.createSpan({ text: row.id });
+    nameCell.createSpan({ cls: "aios-usage-table-name-text", text: row.id, attr: { title: row.id } });
     nameCell.createSpan({
       cls: "aios-system-skill-origin-badge aios-system-skill-origin-" + row.origin,
       text: SYSTEM_SKILL_ORIGIN_LABELS[row.origin],
@@ -3199,7 +3240,7 @@ function renderSystemSkillsGroup(
   });
   head.createSpan({
     cls: "aios-system-skills-group-label",
-    text: `${group.suite}-* (${group.count} skill${group.count === 1 ? "" : "s"})`,
+    text: `${group.suite}${group.separator}* (${group.count} skill${group.count === 1 ? "" : "s"})`,
   });
   head.createSpan({ cls: "aios-system-skills-group-toggle", text: isOpen ? "Hide" : "Show" });
   head.addEventListener("click", () => {
@@ -3296,6 +3337,228 @@ function renderSystemSkillsSection(
   redraw();
 }
 
+// ---------------------------------------------------------------------------
+// System tab: Agents section (Phase 3, 2026-08-05). One row per roster
+// agent (ops-map's type:"agent" nodes): name, model, one-line role,
+// clickable contract link, what it's wired to (workflows/SOPs/skills its
+// contract references, clickable where a vault path exists), and usage
+// (cost/runs) joined from usage-stats.json's `agents` array where the
+// roster name matches a transcript agent type -- dashes where unknown, same
+// convention as the Skills section above. Followed by an "Available hires"
+// subsection (SOP-001 reference patterns not currently hired).
+// ---------------------------------------------------------------------------
+
+interface SystemAgentWiredRow {
+  id: string;
+  label: string;
+  path?: string;
+}
+
+interface SystemAgentWiredTo {
+  workflows: SystemAgentWiredRow[];
+  sops: SystemAgentWiredRow[];
+  skills: SystemAgentWiredRow[];
+}
+
+interface SystemAgentRow {
+  id: string;
+  label: string;
+  model: string | null;
+  description: string;
+  path?: string;
+  wiredTo: SystemAgentWiredTo;
+  costUsd: number | null;
+  runs: number | null;
+  avgCostUsd: number | null;
+}
+
+// Dispatch escalation (2026-08-05): a usage-stats.agents entry with no
+// matching roster agent node -- general-purpose, Explore, workflow-subagent,
+// Plan, seo-*, claude-code-guide, the exporter's UNKNOWN_AGENT_TYPE fallback,
+// and any future non-roster subagent_type. Real spend, no contract behind it.
+interface SystemGenericSubagentRow {
+  id: string;
+  label: string;
+  costUsd: number;
+  runs: number;
+  avgCostUsd: number;
+}
+
+interface SystemAgentsView {
+  totalCount: number;
+  rows: SystemAgentRow[];
+  genericSubagents: SystemGenericSubagentRow[];
+  genericSubagentsCostUsd: number;
+}
+
+// Flattens the three wired-to buckets into one ordered list (workflows,
+// then SOPs, then skills) for the shared used-by-style cell renderer.
+// SystemAgentWiredRow and SystemSkillUsedByRow are structurally identical
+// ({id, label, path?}), so renderSystemSkillUsedByCell renders these too --
+// no duplicate cell-renderer needed for a second table.
+function flattenAgentWiredTo(wiredTo: SystemAgentWiredTo): SystemSkillUsedByRow[] {
+  return [...wiredTo.workflows, ...wiredTo.sops, ...wiredTo.skills];
+}
+
+function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[]) {
+  const headers = ["Agent", "Cost", "Runs", "Description", "Wired to", "Avg/run"];
+
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", {
+    cls: "aios-usage-table aios-usage-breakdown-table aios-system-skills-table aios-system-agents-table",
+  });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of headers) headRow.createEl("th", { text: h });
+
+  const tbody = el.createEl("tbody");
+  for (const row of rows) {
+    const tr = tbody.createEl("tr");
+
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    if (row.path) {
+      const link = nameCell.createEl("a", {
+        text: row.label,
+        cls: "aios-system-skill-usedby-link aios-system-agent-name-link aios-usage-table-name-text",
+        href: "#",
+        attr: { title: row.label },
+      });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        app.workspace.openLinkText(row.path as string, "", false);
+      });
+    } else {
+      nameCell.createSpan({
+        cls: "aios-system-agent-name aios-usage-table-name-text",
+        text: row.label,
+        attr: { title: row.label },
+      });
+    }
+    nameCell.createSpan({
+      cls: "aios-system-skill-origin-badge aios-system-agent-model-badge",
+      text: row.model || "no model set",
+    });
+
+    tr.createEl("td", { text: row.costUsd == null ? "–" : formatUsd(row.costUsd) });
+    tr.createEl("td", { text: row.runs == null ? "–" : formatCompactNumber(row.runs) });
+    tr.createEl("td", { cls: "aios-system-skills-desc", text: row.description });
+
+    const wiredCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
+    renderSystemSkillUsedByCell(app, wiredCell, flattenAgentWiredTo(row.wiredTo));
+
+    tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
+  }
+}
+
+// "Generic subagents" (Dispatch escalation, 2026-08-05): visually distinct
+// from the roster table -- no name links, no model badge, no wired-to
+// column (there's no contract to link) -- so it reads as "real spend, not a
+// specialist" rather than an incomplete roster row. Reuses the same
+// breakdown-table column grid (Cost/Runs/Avg-per-run line up with every
+// other table on the page) via the shared padded-columns helper.
+function renderSystemGenericSubagentsTable(container: HTMLElement, rows: SystemGenericSubagentRow[]) {
+  renderUsageBreakdownTable(
+    container,
+    ["Subagent type", "Cost", "Runs", "", "", "Avg/run"],
+    rows.map((row) => ({
+      nameText: row.label,
+      cells: [formatUsd(row.costUsd), formatCompactNumber(row.runs), "", "", formatUsd(row.avgCostUsd)],
+    }))
+  );
+}
+
+// "Available hires": SOP-001 reference patterns not currently on the
+// roster. Add/delete is a request, not a button (per the task spec's
+// design direction) -- each row states the sentence to say, it never
+// mutates anything itself.
+function renderSystemAvailableHires(app: App, container: HTMLElement, manifest: OpsMapManifest) {
+  const view = computeAvailableHiresView(manifest);
+  const section = container.createDiv({ cls: "aios-system-section aios-system-available-hires" });
+  section.createDiv({ cls: "aios-section-eyebrow", text: "Available hires" });
+
+  const openSop = (ev: MouseEvent) => {
+    ev.preventDefault();
+    if (view.sopPath) app.workspace.openLinkText(view.sopPath, "", false);
+  };
+
+  if (!view.found || view.items.length === 0) {
+    const fallback = section.createDiv({ cls: "aios-system-available-hires-fallback" });
+    fallback.createSpan({ text: "No catalog of not-yet-hired roster patterns is parseable right now. See " });
+    const link = fallback.createEl("a", { text: view.sopId, href: "#" });
+    link.addEventListener("click", openSop);
+    fallback.createSpan({ text: " and ask Dispatch to hire via Recruit." });
+    return;
+  }
+
+  const list = section.createDiv({ cls: "aios-system-available-hires-list" });
+  for (const item of view.items) {
+    const row = list.createDiv({ cls: "aios-system-available-hires-item" });
+    row.createSpan({ cls: "aios-system-available-hires-label", text: item.label });
+    if (item.description) {
+      row.createSpan({ cls: "aios-system-available-hires-desc", text: " " + item.description });
+    }
+    row.createSpan({ cls: "aios-system-available-hires-ask", text: " Not hired here; ask Dispatch to hire via Recruit." });
+  }
+}
+
+function renderSystemAgentsSection(
+  app: App,
+  container: HTMLElement,
+  manifest: OpsMapManifest,
+  stats: UsageStats | null
+) {
+  const section = container.createDiv({ cls: "aios-system-section" });
+  const headRow = section.createDiv({ cls: "aios-system-section-head" });
+  headRow.createDiv({ cls: "aios-section-eyebrow", text: "Agents" });
+  // Same honest-window caption convention as the Skills section: usage here
+  // is NOT range-scoped, it is everything the exporter's fixed window covers.
+  if (stats && typeof stats.windowDays === "number") {
+    headRow.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `usage: last ${stats.windowDays} day${stats.windowDays === 1 ? "" : "s"}`,
+    });
+  }
+
+  const view: SystemAgentsView = computeSystemAgentsView(manifest, stats);
+  if (view.totalCount === 0) {
+    renderEmptyState(
+      section,
+      "No agents yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+    );
+  } else {
+    section.createDiv({
+      cls: "aios-system-skills-count",
+      text: `${view.totalCount} hired agent${view.totalCount === 1 ? "" : "s"}`,
+    });
+    renderSystemAgentsTable(app, section, view.rows);
+  }
+
+  // "Generic subagents" (Dispatch escalation, 2026-08-05): non-roster
+  // subagent spend (general-purpose, Explore, workflow-subagent, Plan,
+  // seo-*, claude-code-guide, ...) is often the MAJORITY of delegated
+  // dollars -- rendering it below the roster, visually distinct (no
+  // contract link, no model badge), keeps the section's totals honest
+  // instead of implying the 8 roster agents are the whole story.
+  if (view.genericSubagents.length > 0) {
+    const genericSection = container.createDiv({
+      cls: "aios-system-section aios-system-generic-subagents",
+    });
+    const genericHead = genericSection.createDiv({ cls: "aios-system-section-head" });
+    genericHead.createDiv({ cls: "aios-section-eyebrow", text: "Generic subagents" });
+    genericHead.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `${formatUsd(view.genericSubagentsCostUsd)} total, no specialist contract behind these`,
+    });
+    genericSection.createDiv({
+      cls: "aios-system-generic-subagents-note",
+      text: "Not part of the hired roster -- real spend from generic Task-tool dispatches (subagent_type not matched to a specialist).",
+    });
+    renderSystemGenericSubagentsTable(genericSection, view.genericSubagents);
+  }
+
+  renderSystemAvailableHires(app, container, manifest);
+}
+
 // System tab: async load (ops-map + usage-stats, both already-loaded shapes
 // via the existing loaders) + render. Renders a hint when ops-map.json has
 // not been generated yet, same convention as the Ops map tab.
@@ -3320,14 +3583,13 @@ function renderSystemTab(
 
       renderSystemSkillsSection(app, wrap, viewState, manifest, stats);
 
-      // Sibling sections (build order per the task spec): Agents next
-      // (runs/cost + wired-to skills/workflows), then Workflows/SOPs with
-      // firing counts. Placeholders keep the tab's final section order
-      // visible now so later phases only fill these in, never restructure.
-      const agentsSection = wrap.createDiv({ cls: "aios-system-section aios-system-section-placeholder" });
-      agentsSection.createDiv({ cls: "aios-section-eyebrow", text: "Agents" });
-      renderEmptyState(agentsSection, "Coming in a later phase.");
+      // Agents section (Phase 3, 2026-08-05): roster cards + usage +
+      // wired-to, plus the "Available hires" subsection.
+      renderSystemAgentsSection(app, wrap, manifest, stats);
 
+      // Sibling section (build order per the task spec): Workflows/SOPs
+      // with firing counts lands in a later phase. Placeholder keeps the
+      // tab's final section order visible now.
       const workflowsSection = wrap.createDiv({
         cls: "aios-system-section aios-system-section-placeholder",
       });

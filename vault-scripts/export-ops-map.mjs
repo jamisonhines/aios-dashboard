@@ -249,6 +249,12 @@ export async function buildAgentNode(vaultRoot, filePath) {
     type: "agent",
     label,
     description: (fm.description || "").slice(0, 140),
+    // System-browser Agents section (Phase 3, 2026-08-05): the shim's
+    // `model:` frontmatter line is the same value ops-map's Coder/Recruit
+    // shim template documents as mandatory (SOP-001 step 5). Undefined
+    // (never empty string) when the shim predates that convention, so the
+    // plugin can render an honest dash instead of a blank cell.
+    model: fm.model || undefined,
     path: primaryContract
       ? vaultRelative(vaultRoot, primaryContract)
       : vaultRelative(vaultRoot, filePath),
@@ -291,6 +297,71 @@ async function buildSkillNode(skill, origin = "skills-dir") {
     origin,
     body: text,
   };
+}
+
+// ---------------------------------------------------------------------------
+// System-browser "Available hires" (Phase 3, 2026-08-05): SOP-001's
+// procedure describes how to hire a specialist, not a catalog of
+// off-the-shelf roster patterns, so it currently has no "Reference
+// pattern" heading to parse (checked against the real file on this
+// machine). Parses defensively for a future heading matching
+// /reference pattern/i anyway, so the day Recruit adds one this starts
+// working with no exporter change; today (and for any SOP-001 that never
+// gains the heading) it returns found:false, and the caller renders a
+// graceful "see SOP-001" fallback row instead of fabricating a hardcoded
+// list (task requirement: a hardcoded-in-exporter list is NOT acceptable).
+//
+// When found, each bullet under the heading becomes one item: a bullet like
+// "- **Label**: rest of the line" (colon, hyphen, or a longer dash
+// separator, bold or plain) splits into {label, description}; a bullet with
+// no separator becomes {label: the whole line, description: ""}. Stops at
+// the next heading of equal-or-shallower depth, or end of file.
+// ---------------------------------------------------------------------------
+
+// Longer-dash separators built from code points, not literal glyphs, so
+// this file never contains a literal long-dash character (repo-wide
+// writing rule). Covers en dash (U+2013) and em dash (U+2014).
+const DASH_CLASS = "[-" + String.fromCharCode(0x2013) + String.fromCharCode(0x2014) + "]";
+
+export function parseAvailableHires(body) {
+  if (!body) return { found: false, items: [] };
+  const lines = body.split("\n");
+  const headingRe = /^(#{1,6})\s+(.*)$/;
+  let startIdx = -1;
+  let startDepth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = headingRe.exec(lines[i]);
+    if (m && /reference pattern/i.test(m[2])) {
+      startIdx = i + 1;
+      startDepth = m[1].length;
+      break;
+    }
+  }
+  if (startIdx === -1) return { found: false, items: [] };
+
+  const items = [];
+  const bulletRe = /^\s*-\s+(.*)$/;
+  const boldRe = new RegExp("^\\*\\*(.+?)\\*\\*\\s*(?:" + DASH_CLASS + "|:)?\\s*(.*)$");
+  const plainRe = new RegExp("^(.+?)\\s+(?::|" + DASH_CLASS + ")\\s+(.*)$");
+  for (let i = startIdx; i < lines.length; i++) {
+    const h = headingRe.exec(lines[i]);
+    if (h && h[1].length <= startDepth) break;
+    const b = bulletRe.exec(lines[i]);
+    if (!b) continue;
+    const rest = b[1].trim();
+    const boldMatch = rest.match(boldRe);
+    if (boldMatch) {
+      items.push({ label: boldMatch[1].trim(), description: boldMatch[2].trim() });
+      continue;
+    }
+    const plainMatch = rest.match(plainRe);
+    if (plainMatch) {
+      items.push({ label: plainMatch[1].trim(), description: plainMatch[2].trim() });
+      continue;
+    }
+    items.push({ label: rest, description: "" });
+  }
+  return { found: items.length > 0, items };
 }
 
 // ---------------------------------------------------------------------------
@@ -476,10 +547,23 @@ async function main() {
   // extraction).
   const outNodes = nodes.map(({ body, ...rest }) => rest);
 
+  // System-browser "Available hires" (Phase 3, 2026-08-05): see
+  // parseAvailableHires' own comment for why this is usually found:false on
+  // the real SOP-001 today, and why that's the graceful, correct outcome
+  // rather than a bug.
+  const sop001Path = path.join(vaultRoot, "Operations", "SOPs", "SOP-001-how-to-add-a-new-specialist.md");
+  const sop001Body = await readCapped(sop001Path);
+  const availableHires = {
+    ...parseAvailableHires(sop001Body),
+    sopId: "SOP-001-how-to-add-a-new-specialist",
+    sopPath: vaultRelative(vaultRoot, sop001Path),
+  };
+
   const output = {
     generatedAt: new Date().toISOString(),
     nodes: outNodes,
     edges,
+    availableHires,
   };
 
   await fs.mkdir(outDir, { recursive: true });
