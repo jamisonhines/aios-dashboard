@@ -50,7 +50,19 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
   min-height: 100%;
-  overflow-y: auto;
+  /* NOT overflow-y:auto (bug fixed 2026-08, sticky-header-polish): this
+     root has no bounded height of its own (min-height only), so it never
+     actually scrolls -- Obsidian's real .view-content (the pane this root
+     is mounted into, see DashboardView.render in main.ts) is the true
+     scrolling ancestor. But `overflow` != visible still makes an element a
+     *candidate* scrolling container for position:sticky's containing-block
+     resolution regardless of whether it currently overflows, so this
+     redundant declaration was silently stealing the sticky containing
+     block away from .view-content -- position:sticky then computed "stuck"
+     relative to a box that never scrolls, so it just scrolled off with
+     everything else. Confirmed by headless-Chrome measurement (rect.top
+     dropped to -745 at scrollTop 800 with this rule present; sticks
+     correctly once removed). Do not re-add. */
 }
 
 /* Numbers everywhere read as a table: stats, counts, costs, table cells. */
@@ -1903,28 +1915,61 @@
   padding-top: 10px;
 }
 
-/* Sticky period header (Phase 1 System-browser range toggle, 2026-08-04):
-   pinned to the top of the scrolling dashboard root (.aios-dashboard-root
-   itself is the scroll container -- see its overflow-y:auto) while the
-   Usage tab's body scrolls underneath it, so the active period ("Last 7
-   days", plus the concrete date range) and the range/paging controls stay
-   visible and every breakdown below stays unambiguous about which period
-   it's showing. Matches the root background so scrolled content doesn't
-   show through, and sits above table rows/hover states (z-index). */
+/* Sticky period header (Phase 1 System-browser range toggle, 2026-08-04;
+   polish pass 2026-08): pinned to the top of the REAL scrolling ancestor,
+   Obsidian's own .view-content pane (see the .aios-dashboard-root comment
+   on why it is not itself the scroll container), while the Usage tab's
+   body scrolls underneath it, so the active period ("Last 7 days", plus
+   the concrete date range) and the range/paging controls stay visible and
+   every breakdown below stays unambiguous about which period it's
+   showing. Sits above table rows/hover states (z-index).
+
+   Horizontal/vertical padding lives ON THIS BOX (not inherited from the
+   root's own 22px inset) so the label and controls read as an inset bar
+   with breathing room on every side, not flush text -- this is Jaymo's
+   defect 1 report from the real app.
+
+   Gap-above-sticky fix (defect 2): .view-content is outside this
+   plugin's control and can carry its own top padding depending on
+   Obsidian's version/theme (measured ~12px against a representative
+   harness), which position:sticky pins BELOW (a sticky element sticks at
+   the scrollport's padding edge, not its border edge -- confirmed by
+   headless-Chrome measurement, gap == the ancestor's own padding-top,
+   independent of anything this plugin sets). We cannot cancel an ancestor
+   padding we don't own with a negative margin, so instead the sticky's
+   own opaque background is extended upward past its box via ::before,
+   comfortably past any plausible ancestor inset, so body content
+   scrolling underneath is never visible through that strip even though a
+   few px of true "top of pane" inset remains (matches normal Obsidian
+   pane framing). Opaque in both Obsidian themes because --aios-bg is a
+   fixed dark literal, not a theme-reactive var -- this dashboard's whole
+   design intentionally stays dark regardless of the host theme (see the
+   file-header comment), so no light-theme leak is possible; verified by
+   measuring computed background-color under both html.theme-light and
+   html.theme-dark. */
 .aios-dashboard-root .aios-usage-sticky {
   position: sticky;
   top: 0;
   z-index: 5;
   background: var(--aios-bg);
-  padding: 10px 0 8px;
+  padding: 14px 22px 12px;
   border-bottom: 1px solid var(--aios-border);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
+.aios-dashboard-root .aios-usage-sticky::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -100px;
+  height: 100px;
+  background: var(--aios-bg);
+}
 .aios-dashboard-root .aios-usage-sticky-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
 }
 .aios-dashboard-root .aios-usage-period-label {

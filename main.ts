@@ -2500,6 +2500,27 @@ function renderBudgetWarning(
 // chart, model breakdown, workflows, skills -- recomputes from the same
 // selected window instead of the old split where only the chart reacted to
 // the range toggle and everything else stayed pinned to a fixed 30 days.
+
+// Finds the real scrolling ancestor of `el` by walking up the DOM and
+// checking for both an overflow-y that establishes a scroll box AND actual
+// overflow (scrollHeight > clientHeight) -- not assumed to be any specific
+// element, since in real Obsidian it's `.view-content` (the pane this
+// plugin mounts into via DashboardView; see the .aios-dashboard-root CSS
+// comment on why the plugin's own root is deliberately NOT given
+// overflow-y itself). Falls back to the document's own scrolling element.
+function findScrollAncestor(el: HTMLElement): HTMLElement {
+  let node: HTMLElement | null = el.parentElement;
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    const overflowsY = style.overflowY === "auto" || style.overflowY === "scroll";
+    if (overflowsY && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return (document.scrollingElement as HTMLElement) || document.documentElement;
+}
+
 function renderUsageTab(
   app: App,
   container: HTMLElement,
@@ -2536,6 +2557,22 @@ function renderUsageTab(
     const body = wrap.createDiv({ cls: "aios-usage-body" });
 
     const draw = () => {
+      // Scroll-position fix (defect 3, 2026-08): sticky.empty()/body.empty()
+      // below synchronously drops this tab's content to near-zero height
+      // before the rebuild re-adds it. If the real scrolling ancestor's
+      // scrollTop was deeper than that momentary (near-zero) scrollHeight,
+      // the browser clamps scrollTop down immediately -- and does NOT
+      // restore it once the rebuilt content re-grows the scrollHeight back.
+      // So every range/paging toggle silently snapped the user back to the
+      // top. Fix: capture scrollTop on the actual scrolling ancestor (found
+      // by walking up from wrap, not assumed to be any particular element --
+      // in real Obsidian it's .view-content, not this plugin's own root)
+      // before emptying, then restore it (clamped to the new scrollHeight)
+      // after the rebuild. Re-queried fresh on every call so rapid repeated
+      // clicks each capture/restore from wherever the user currently is.
+      const scrollEl = findScrollAncestor(wrap);
+      const prevScrollTop = scrollEl ? scrollEl.scrollTop : 0;
+
       sticky.empty();
       body.empty();
 
@@ -2566,6 +2603,11 @@ function renderUsageTab(
         cls: "aios-foot",
         text: "API-equivalent value at standard rates; subscription billing differs.",
       });
+
+      if (scrollEl) {
+        const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+        scrollEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);
+      }
     };
 
     draw();
