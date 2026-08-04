@@ -21,6 +21,8 @@ import {
   SONNET_STANDARD_RATE,
   SONNET_INTRO_CUTOFF_DAY,
   foldWorkflowEntry,
+  foldWorkflowSession,
+  localDay,
   parseTranscript,
   applyTranscriptToAggregates,
   findTranscripts,
@@ -215,6 +217,39 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   assert.equal(seg.finish()[0].key, "superpowers:brainstorming", "colon-namespaced key preserved");
 }
 
+// --- skill segmenter: per-run byDay breakdown (Phase 1 System-browser range
+// toggle, 2026-08-04). Mirrors foldWorkflowEntry's per-day fold, but scoped
+// to one run instead of one workflow. ---
+{
+  // localDay() uses LOCAL getters, so timestamps are spaced >36h apart
+  // (comfortably more than any UTC offset can shift) to make the "same
+  // day" / "different day" split deterministic regardless of the test
+  // runner's timezone.
+  const seg = createSkillSegmenter();
+  seg.boundary(marker("close-session"));
+  seg.usage("opus", { ...OPUS, timestamp: "2026-07-27T10:00:00Z" });
+  seg.usage("opus", { ...OPUS, timestamp: "2026-07-27T11:00:00Z" });
+  // A long-lived run CAN cross a calendar-day boundary; both days must be
+  // tracked, not just the run's first day.
+  seg.usage("opus", { ...OPUS, timestamp: "2026-07-29T10:00:00Z" });
+  const run = seg.finish()[0];
+  assert.equal(run.byDay.size, 2, "two distinct days recorded for this one run");
+  const firstDayKey = localDay("2026-07-27T10:00:00Z");
+  const secondDayKey = localDay("2026-07-29T10:00:00Z");
+  assert.equal(run.byDay.get(firstDayKey).messages, 2, "two usage entries landed on the first day");
+  assert.equal(run.byDay.get(secondDayKey).messages, 1, "one usage entry landed on the second day");
+  const sumCost = [...run.byDay.values()].reduce((s, d) => s + d.costUsd, 0);
+  assert.ok(Math.abs(sumCost - run.costUsd) < 1e-9, "sum(byDay.costUsd) matches the run total");
+
+  // A usage entry with no timestamp degrades gracefully (no byDay pollution).
+  const seg2 = createSkillSegmenter();
+  seg2.boundary(marker("no-timestamp-skill"));
+  seg2.usage("opus", OPUS); // OPUS has no `timestamp` field
+  const run2 = seg2.finish()[0];
+  assert.equal(run2.byDay.size, 0, "missing timestamp -> no byDay entry, but the run itself still counts");
+  assert.equal(run2.messages, 1, "the run's own totals are unaffected by the missing timestamp");
+}
+
 // tool_result user entries are harness plumbing, never run boundaries.
 {
   assert.equal(isToolResultContent([{ type: "tool_result", content: "ok" }]), true, "tool_result detected");
@@ -257,8 +292,8 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   foldWorkflowEntry(acc, "2026-07-28", 2.0, 2000);
 
   assert.equal(acc.byDay.size, 2, "two distinct days recorded, not padded across the window");
-  assert.deepEqual(acc.byDay.get("2026-07-27"), { costUsd: 2.0, outputTokens: 1500, messages: 2 });
-  assert.deepEqual(acc.byDay.get("2026-07-28"), { costUsd: 2.0, outputTokens: 2000, messages: 1 });
+  assert.deepEqual(acc.byDay.get("2026-07-27"), { costUsd: 2.0, outputTokens: 1500, messages: 2, sessions: 0 });
+  assert.deepEqual(acc.byDay.get("2026-07-28"), { costUsd: 2.0, outputTokens: 2000, messages: 1, sessions: 0 });
 
   const sumCost = [...acc.byDay.values()].reduce((s, d) => s + d.costUsd, 0);
   const sumTokens = [...acc.byDay.values()].reduce((s, d) => s + d.outputTokens, 0);
@@ -266,6 +301,25 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
   assert.equal(sumCost, acc.costUsd, "sum(byDay.costUsd) matches the top-level total");
   assert.equal(sumTokens, acc.outputTokens, "sum(byDay.outputTokens) matches the top-level total");
   assert.equal(sumMessages, acc.messages, "sum(byDay.messages) matches the top-level total");
+}
+
+// --- foldWorkflowSession: per-day session-start counting (Phase 1
+// System-browser range toggle, 2026-08-04). Independent of foldWorkflowEntry
+// -- a session can post entries across several days, but only counts once,
+// on the day its first in-window entry landed. ---
+{
+  const acc = { costUsd: 0, outputTokens: 0, messages: 0, byDay: new Map() };
+  foldWorkflowSession(acc, "2026-07-27");
+  foldWorkflowSession(acc, "2026-07-27");
+  foldWorkflowSession(acc, "2026-07-28");
+
+  assert.equal(acc.byDay.get("2026-07-27").sessions, 2, "two sessions attributed to the same day");
+  assert.equal(acc.byDay.get("2026-07-28").sessions, 1, "a third session on a different day");
+
+  // Interleaved with foldWorkflowEntry: the two must not clobber each other's
+  // fields on the same byDay bucket.
+  foldWorkflowEntry(acc, "2026-07-27", 1.0, 100);
+  assert.deepEqual(acc.byDay.get("2026-07-27"), { costUsd: 1.0, outputTokens: 100, messages: 1, sessions: 2 });
 }
 
 // --- parseTranscript: entries are windowed by their OWN timestamp, not the
@@ -550,6 +604,62 @@ const marker = (name) => `<command-name>/${name}</command-name>`;
     2,
     "project aggregate DOES include the subagent's messages (cost/tokens roll up, only `sessions` is exempt)"
   );
+}
+
+// --- applyTranscriptToAggregates: skill byDay merges into the aggregate
+// skills map, and a skillRun with no byDay (e.g. a hand-built test fixture,
+// or old callers) degrades gracefully rather than throwing. Also verifies
+// the workflow-level session-day fold lands on entries[0]'s day. ---
+{
+  const days = new Map();
+  const projects = new Map();
+  const workflows = new Map();
+  const skills = new Map();
+  const rule = { key: "interactive", label: "Interactive" };
+  const entry = {
+    timestamp: "2026-07-27T12:00:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+
+  const runWithByDay = {
+    key: "close-session",
+    costUsd: 3,
+    outputTokens: 100,
+    messages: 2,
+    byDay: new Map([
+      ["2026-07-27", { costUsd: 2, outputTokens: 60, messages: 1 }],
+      ["2026-07-28", { costUsd: 1, outputTokens: 40, messages: 1 }],
+    ]),
+  };
+  const runWithoutByDay = { key: "legacy-skill", costUsd: 1, outputTokens: 10, messages: 1 };
+
+  applyTranscriptToAggregates({
+    entries: [entry],
+    skillRuns: [runWithByDay, runWithoutByDay],
+    projectName: "AIOS",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+  });
+
+  const s = skills.get("close-session");
+  assert.equal(s.byDay.size, 2, "both days from the run's byDay carried through");
+  assert.deepEqual(s.byDay.get("2026-07-27"), { costUsd: 2, outputTokens: 60, messages: 1, runs: 1 });
+  assert.deepEqual(s.byDay.get("2026-07-28"), { costUsd: 1, outputTokens: 40, messages: 1, runs: 0 });
+  assert.equal(s.runs, 1, "the run itself still counts once at the top level");
+
+  const legacy = skills.get("legacy-skill");
+  assert.equal(legacy.byDay.size, 0, "a run with no byDay contributes no per-day data, but still aggregates");
+  assert.equal(legacy.runs, 1, "legacy run still counts toward the total");
+
+  const w = workflows.get("interactive");
+  assert.equal(w.byDay.get("2026-07-27").sessions, 1, "the session is attributed to entries[0]'s day");
 }
 
 function estimateCostForEntry(entry) {

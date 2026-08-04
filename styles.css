@@ -1458,6 +1458,32 @@
   gap: 6px;
 }
 
+/* Column alignment (Phase 1 System-browser range toggle, 2026-08-04):
+   workflows/skills/future-agents-and-models breakdown tables share this
+   class so their common columns (Cost, Runs, Output tokens, Msgs) land at
+   the same fixed percentage widths regardless of which table it is -- the
+   name column takes the rest. table-layout:fixed makes the widths hold even
+   though each table's cell text differs. */
+.aios-dashboard-root .aios-usage-breakdown-table {
+  table-layout: fixed;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:first-child,
+.aios-dashboard-root .aios-usage-breakdown-table td:first-child {
+  width: 34%;
+  text-align: left;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:not(:first-child),
+.aios-dashboard-root .aios-usage-breakdown-table td:not(:first-child) {
+  width: 13.2%;
+  text-align: right;
+}
+.aios-dashboard-root .aios-usage-table-name-suffix {
+  color: var(--aios-faint);
+  font-size: 10.5px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------------
    Ops map tab: deterministic layered SVG graph.
 --------------------------------------------------------------------- */
@@ -1852,11 +1878,43 @@
   padding: 0;
 }
 
-/* Usage chart zone: range toggle + paging + full-width chart. */
-.aios-dashboard-root .aios-usage-chart-zone {
+/* Usage tab body: everything below the sticky header (tiles, chart, model
+   breakdown, workflows, skills, projects). */
+.aios-dashboard-root .aios-usage-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 10px;
+}
+
+/* Sticky period header (Phase 1 System-browser range toggle, 2026-08-04):
+   pinned to the top of the scrolling dashboard root (.aios-dashboard-root
+   itself is the scroll container -- see its overflow-y:auto) while the
+   Usage tab's body scrolls underneath it, so the active period ("Last 7
+   days", plus the concrete date range) and the range/paging controls stay
+   visible and every breakdown below stays unambiguous about which period
+   it's showing. Matches the root background so scrolled content doesn't
+   show through, and sits above table rows/hover states (z-index). */
+.aios-dashboard-root .aios-usage-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--aios-bg);
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--aios-border);
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.aios-dashboard-root .aios-usage-sticky-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.aios-dashboard-root .aios-usage-period-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--aios-text);
 }
 .aios-dashboard-root .aios-usage-controls {
   display: flex;

@@ -18,6 +18,11 @@ import {
   SPIKE_MIN_RECENT_COST_USD,
   SPIKE_MIN_SHARE_INCREASE_PP,
   SPIKE_MIN_SHARE_MULTIPLIER,
+  USAGE_RANGE_LABELS,
+  usageFamilyBreakdown,
+  computeUsageRangeTiles,
+  computeWorkflowsViewForRange,
+  computeSkillsViewForRange,
 } from "./model.mjs";
 
 // --- formatCompactNumber ---
@@ -369,6 +374,235 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   assert.equal(SPIKE_MIN_RECENT_COST_USD, 1.0);
   assert.equal(SPIKE_MIN_SHARE_INCREASE_PP, 10);
   assert.equal(SPIKE_MIN_SHARE_MULTIPLIER, 1.5);
+}
+
+// --- computeUsageWindow: "all" range (Phase 1 System-browser range toggle,
+// 2026-08-04) ---
+{
+  const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
+  const day = (date, cost) => ({ date, models: { opus: bucket(cost) }, totalCostUsd: cost, totalOutputTokens: 1 });
+  const today = new Date(2026, 6, 14); // 2026-07-14 local
+
+  const days = [day("2026-07-14", 5), day("2026-07-10", 2), day("2026-06-20", 7)];
+  const wAll = computeUsageWindow(days, "all", 0, today);
+  assert.equal(wAll.days[0].date, "2026-06-20", "all: window starts at the earliest day present");
+  assert.equal(wAll.days[wAll.days.length - 1].date, "2026-07-14", "all: window ends today");
+  assert.equal(wAll.days.length, 25, "all: continuous zero-filled span, Jun 20 - Jul 14 inclusive");
+  assert.equal(wAll.canPrev, false, "all: paging always disabled");
+  assert.equal(wAll.canNext, false, "all: paging always disabled");
+  assert.equal(wAll.offset, 0, "all: offset always resets to 0 regardless of what was passed in");
+  const wAllPaged = computeUsageWindow(days, "all", 3, today);
+  assert.equal(wAllPaged.days[0].date, "2026-06-20", "all: offset is ignored entirely");
+
+  // No data at all: falls back to a single-day window (today), same
+  // graceful-degradation shape as the other ranges' empty-data case.
+  const wAllEmpty = computeUsageWindow([], "all", 0, today);
+  assert.equal(wAllEmpty.days.length, 1, "all with no data: single-day fallback");
+  assert.equal(wAllEmpty.days[0].date, "2026-07-14", "all with no data: fallback day is today");
+  assert.equal(wAllEmpty.canPrev, false, "all with no data: still no paging");
+}
+
+// --- USAGE_RANGE_LABELS: sticky-header human labels ---
+{
+  assert.equal(USAGE_RANGE_LABELS["1d"], "Today");
+  assert.equal(USAGE_RANGE_LABELS["7d"], "Last 7 days");
+  assert.equal(USAGE_RANGE_LABELS["30d"], "Last 30 days");
+  assert.equal(USAGE_RANGE_LABELS.all, "All available");
+}
+
+// --- usageFamilyBreakdown: extracted helper matches computeUsageView's old
+// inline behavior exactly (regression guard for the refactor) ---
+{
+  const now = new Date(2026, 6, 11);
+  const stats = {
+    generatedAt: now.toISOString(),
+    windowDays: 35,
+    days: [
+      {
+        date: "2026-07-11",
+        models: {
+          opus: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: 4 },
+          sonnet: { inputTokens: 2, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: 6 },
+        },
+        totalCostUsd: 10,
+        totalOutputTokens: 4,
+      },
+    ],
+    projects: [],
+    totals: { last7DaysCostUsd: 0, last30DaysCostUsd: 0, todayCostUsd: 0 },
+  };
+  const view = computeUsageView(stats, now);
+  // Same window computeUsageView builds internally: only 2026-07-11 has
+  // real data, the other 29 days are zero-cost placeholders and contribute
+  // nothing to the family totals either way.
+  const direct = usageFamilyBreakdown(stats.days);
+  assert.deepEqual(direct.legend, view.legend, "usageFamilyBreakdown legend matches computeUsageView's");
+  assert.deepEqual(direct.table, view.table, "usageFamilyBreakdown table matches computeUsageView's");
+}
+
+// --- computeUsageRangeTiles: sums cost/tokens over an arbitrary window ---
+{
+  const windowDays = [
+    { date: "2026-07-12", totalCostUsd: 2, totalOutputTokens: 100 },
+    { date: "2026-07-13", totalCostUsd: 0, totalOutputTokens: 0 },
+    { date: "2026-07-14", totalCostUsd: 5, totalOutputTokens: 900 },
+  ];
+  const tiles = computeUsageRangeTiles(windowDays, "Last 7 days");
+  assert.equal(tiles.rangeLabel, "Last 7 days", "rangeLabel passes through unchanged");
+  assert.equal(tiles.costUsd, 7, "cost sums across the window");
+  assert.equal(tiles.outputTokens, 1000, "output tokens sum across the window");
+  assert.equal(tiles.outputTokensCompact, "1.0k", "compact formatting applied");
+
+  const empty = computeUsageRangeTiles([], "Today");
+  assert.equal(empty.costUsd, 0, "empty window -> zero cost, no throw");
+}
+
+// --- computeWorkflowsViewForRange: recomputes from byDay over a window ---
+{
+  const windowDays = [
+    { date: "2026-07-08" }, { date: "2026-07-09" }, { date: "2026-07-10" },
+    { date: "2026-07-11" }, { date: "2026-07-12" }, { date: "2026-07-13" }, { date: "2026-07-14" },
+  ];
+  const stats = {
+    workflows: [
+      {
+        key: "interactive",
+        label: "Interactive",
+        costUsd: 100,
+        outputTokens: 5000,
+        messages: 50,
+        sessions: 10,
+        byDay: {
+          "2026-07-01": { costUsd: 80, outputTokens: 4000, messages: 40, sessions: 8 }, // outside the 7d window
+          "2026-07-10": { costUsd: 15, outputTokens: 700, messages: 7, sessions: 1 },
+          "2026-07-14": { costUsd: 5, outputTokens: 300, messages: 3, sessions: 1 },
+        },
+      },
+      {
+        // No activity at all inside the window -> dropped from range-scoped rows.
+        key: "email-router",
+        label: "Email router",
+        costUsd: 20,
+        outputTokens: 500,
+        messages: 5,
+        sessions: 2,
+        byDay: { "2026-06-01": { costUsd: 20, outputTokens: 500, messages: 5, sessions: 2 } },
+      },
+      {
+        // Pre-slice-2 shape: no byDay at all -> shown as a partial/all-time row.
+        key: "legacy-workflow",
+        label: "Legacy workflow",
+        costUsd: 9,
+        outputTokens: 90,
+        messages: 9,
+        sessions: 3,
+      },
+    ],
+  };
+
+  const view = computeWorkflowsViewForRange(stats, windowDays, "7d");
+  assert.equal(view.hasData, true, "at least one row survives -> hasData true");
+  const byKey = Object.fromEntries(view.table.map((r) => [r.key, r]));
+
+  assert.equal(byKey.interactive.costUsd, 20, "interactive: only the two in-window days sum (15 + 5), not the full $100");
+  assert.equal(byKey.interactive.sessions, 2, "interactive: sessions sum from byDay, not the all-time total of 10");
+  assert.equal(byKey["email-router"], undefined, "email-router has zero activity in-window -> dropped entirely");
+  assert.ok(byKey["legacy-workflow"], "legacy-workflow (no byDay) still appears");
+  assert.equal(byKey["legacy-workflow"].costUsd, 9, "legacy-workflow falls back to its all-time total");
+  assert.equal(byKey["legacy-workflow"].partial, true, "legacy-workflow is flagged partial so the caller can label it honestly");
+  assert.equal(byKey.interactive.partial, false, "a workflow with real byDay data is never flagged partial");
+  assert.equal(view.table.length, 2, "exactly the two rows with in-window (or unscoped) activity survive");
+}
+
+// Sort order over range-scoped totals (byDay-derived cost, not the all-time total).
+{
+  const windowDays = [{ date: "2026-07-14" }];
+  const stats = {
+    workflows: [
+      { key: "big", label: "Big", costUsd: 1, outputTokens: 0, messages: 0, sessions: 0, byDay: { "2026-07-14": { costUsd: 20, outputTokens: 0, messages: 1, sessions: 1 } } },
+      { key: "small", label: "Small", costUsd: 1, outputTokens: 0, messages: 0, sessions: 0, byDay: { "2026-07-14": { costUsd: 5, outputTokens: 0, messages: 1, sessions: 1 } } },
+    ],
+  };
+  const view = computeWorkflowsViewForRange(stats, windowDays, "1d");
+  assert.deepEqual(view.table.map((r) => r.key), ["big", "small"], "range-scoped rows sort by their scoped cost desc");
+
+  const sumShares = view.shareBar.reduce((s, seg) => s + seg.sharePercent, 0);
+  assert.ok(Math.abs(sumShares - 100) < 1e-9, "shares still sum to 100% over the range-scoped totals");
+
+  // Missing/empty workflows: unchanged hasData:false contract.
+  assert.equal(computeWorkflowsViewForRange({}, windowDays, "1d").hasData, false);
+  assert.equal(computeWorkflowsViewForRange({ workflows: [] }, windowDays, "1d").hasData, false);
+}
+
+// --- computeSkillsViewForRange: recomputes from byDay over a window;
+// section-level fallback when byDay is missing on ANY skill ---
+{
+  const windowDays = [
+    { date: "2026-07-08" }, { date: "2026-07-09" }, { date: "2026-07-10" },
+    { date: "2026-07-11" }, { date: "2026-07-12" }, { date: "2026-07-13" }, { date: "2026-07-14" },
+  ];
+
+  // All skills have byDay -> range-scoped recompute.
+  const statsSupported = {
+    skills: [
+      {
+        key: "close-session",
+        label: "close-session",
+        costUsd: 10,
+        outputTokens: 1000,
+        messages: 10,
+        runs: 5,
+        avgCostUsd: 2,
+        byDay: {
+          "2026-07-01": { costUsd: 8, outputTokens: 800, messages: 8, runs: 4 }, // outside window
+          "2026-07-12": { costUsd: 2, outputTokens: 200, messages: 2, runs: 1 },
+        },
+      },
+    ],
+  };
+  const supported = computeSkillsViewForRange(statsSupported, windowDays, "7d", false);
+  assert.equal(supported.rangeSupported, true, "every skill has byDay -> range-scoped");
+  assert.equal(supported.rows[0].costUsd, 2, "recomputed from the in-window day only");
+  assert.equal(supported.rows[0].runs, 1, "runs recomputed from byDay, not the all-time total of 5");
+  assert.equal(supported.rows[0].avgCostUsd, 2, "avg recomputed as costUsd/runs for the window");
+
+  // "all" range always uses full totals even when byDay is present (there's
+  // nothing to scope out).
+  const allRange = computeSkillsViewForRange(statsSupported, windowDays, "all", false);
+  assert.equal(allRange.rows[0].costUsd, 10, "'all' range shows the full all-time total");
+
+  // A skill missing byDay (pre-Phase-1 JSON) -> whole section falls back.
+  const statsMixed = {
+    skills: [
+      { ...statsSupported.skills[0] },
+      { key: "old-skill", label: "old-skill", costUsd: 3, outputTokens: 300, messages: 3, runs: 1, avgCostUsd: 3 },
+    ],
+  };
+  const mixed = computeSkillsViewForRange(statsMixed, windowDays, "7d", false);
+  assert.equal(mixed.rangeSupported, false, "one skill missing byDay -> whole section falls back");
+  const mixedByKey = Object.fromEntries(mixed.rows.map((r) => [r.key, r]));
+  assert.equal(mixedByKey["close-session"].costUsd, 10, "fallback shows all-time totals, not the range-scoped $2");
+
+  // Missing/empty skills: unchanged hasData:false contract.
+  assert.equal(computeSkillsViewForRange({}, windowDays, "7d", false).hasData, false);
+  assert.equal(computeSkillsViewForRange({ skills: [] }, windowDays, "7d", false).hasData, false);
+
+  // Top-N collapse still applies to the range-scoped rows.
+  const many = {
+    skills: Array.from({ length: 9 }, (_, i) => ({
+      key: "s" + i,
+      label: "s" + i,
+      costUsd: 9 - i,
+      outputTokens: 0,
+      messages: 0,
+      runs: 1,
+      avgCostUsd: 9 - i,
+      byDay: { "2026-07-14": { costUsd: 9 - i, outputTokens: 0, messages: 0, runs: 1 } },
+    })),
+  };
+  const collapsed = computeSkillsViewForRange(many, windowDays, "7d", false);
+  assert.equal(collapsed.rows.length, USAGE_SKILLS_TOP_N, "collapsed shows exactly the top N even after range-scoping");
+  assert.equal(collapsed.hiddenCount, 4, "hiddenCount reflects the range-scoped total, not the raw skills.length");
 }
 
 console.log("usageModel: all assertions passed");

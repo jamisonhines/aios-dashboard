@@ -28,8 +28,6 @@ import {
   computeHealth,
   formatCompactNumber,
   computeUsageView,
-  computeWorkflowsView,
-  computeSkillsView,
   computeOpsMapLayout,
   OPS_MAP_DEFAULTS,
   buildLaunchCommand,
@@ -46,6 +44,11 @@ import {
   usageDayFamilyBars,
   computeWorkflowSpikes,
   computeSpendSparkline,
+  USAGE_RANGE_LABELS,
+  usageFamilyBreakdown,
+  computeUsageRangeTiles,
+  computeWorkflowsViewForRange,
+  computeSkillsViewForRange,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -183,7 +186,7 @@ interface ViewState {
   expanded: Set<string>; // keys of expanded project cards and phase cards
   openOff: Set<string>; // project slugs whose Open toggle is OFF (default: Open ON)
   completeOn: Set<string>; // project slugs whose Complete toggle is ON (default: Complete OFF)
-  usageRange: "1d" | "7d" | "30d"; // Usage chart window length (build 2.8)
+  usageRange: "1d" | "7d" | "30d" | "all"; // Usage chart window length (build 2.8; "all" added Phase 1 System-browser)
   usageOffset: number; // windows back from the one ending today (0 = current)
   systemsOpen: boolean; // right-side systems drawer visibility (build 2.8)
 }
@@ -465,6 +468,9 @@ interface UsageWorkflowDayStat {
   costUsd: number;
   outputTokens: number;
   messages: number;
+  // Optional: absent in JSON written before Phase 1 (2026-08-04). Powers the
+  // range-scoped "Runs" column (computeWorkflowsViewForRange).
+  sessions?: number;
 }
 
 interface UsageWorkflowStat {
@@ -493,6 +499,13 @@ interface WorkflowSpikeAlert {
   baselineSharePercent: number;
 }
 
+interface UsageSkillDayStat {
+  costUsd: number;
+  outputTokens: number;
+  messages: number;
+  runs: number;
+}
+
 // Per-invocation skill spend: one entry per slash-command/skill, aggregated
 // over its runs (a run = marker -> next human message, subagents included).
 interface UsageSkillStat {
@@ -503,6 +516,12 @@ interface UsageSkillStat {
   messages: number;
   runs: number;
   avgCostUsd: number;
+  // Optional: absent in JSON written before Phase 1 (2026-08-04). When
+  // present on EVERY skill, powers range-scoped recompute
+  // (computeSkillsViewForRange); when any skill lacks it the whole section
+  // falls back to all-time totals rather than mixing scoped and unscoped
+  // rows in one table.
+  byDay?: Record<string, UsageSkillDayStat>;
 }
 
 interface UsageStats {
@@ -599,6 +618,11 @@ interface UsageWorkflowShareRow {
 
 interface UsageWorkflowTableRow extends UsageWorkflowStat {
   colorIndex: number;
+  // true when this workflow had no per-day breakdown to scope by range, so
+  // the row shows its all-time total regardless of the selected range
+  // (computeWorkflowsViewForRange). Absent on the fixed all-time
+  // computeWorkflowsView output.
+  partial?: boolean;
 }
 
 interface UsageSkillsView {
@@ -607,12 +631,25 @@ interface UsageSkillsView {
   hiddenCount: number;
   expanded: boolean;
   totalCount: number;
+  // true when every skill in the exported set had `byDay` data, so the rows
+  // are genuinely scoped to the selected range. false means the section
+  // fell back to all-time totals (computeSkillsViewForRange only).
+  rangeSupported?: boolean;
 }
 
 interface UsageWorkflowsView {
   hasData: boolean;
   shareBar: UsageWorkflowShareRow[];
   table: UsageWorkflowTableRow[];
+}
+
+// Range-scoped spend/tokens tiles (Phase 1 System-browser range toggle,
+// 2026-08-04): replaces the old fixed Today/7d/30d tile set.
+interface UsageRangeTiles {
+  rangeLabel: string;
+  costUsd: number;
+  outputTokens: number;
+  outputTokensCompact: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1829,17 +1866,19 @@ async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats |
   }
 }
 
-function renderUsageTiles(container: HTMLElement, view: UsageView) {
+// Two tiles, both scoped to the selected range (Phase 1 System-browser range
+// toggle, 2026-08-04): replaces the old fixed Today/7d/30d/Output-tokens-30d
+// set. Every number on this pane now follows the same toggle, so the tiles
+// never disagree with the chart/tables below them.
+function renderUsageTiles(container: HTMLElement, tiles: UsageRangeTiles) {
   const row = container.createDiv({ cls: "aios-usage-tiles" });
   const mk = (label: string, value: string) => {
     const tile = row.createDiv({ cls: "aios-health-tile aios-usage-tile" });
     tile.createSpan({ cls: "aios-health-tile-label", text: label });
     tile.createSpan({ cls: "aios-health-tile-count", text: value });
   };
-  mk("Today", formatUsd(view.tiles.todayCostUsd));
-  mk("Last 7 days", formatUsd(view.tiles.last7DaysCostUsd));
-  mk("Last 30 days", formatUsd(view.tiles.last30DaysCostUsd));
-  mk("Output tokens (30d)", view.tiles.last30DaysOutputTokensCompact);
+  mk("Spend (" + tiles.rangeLabel + ")", formatUsd(tiles.costUsd));
+  mk("Output tokens (" + tiles.rangeLabel + ")", tiles.outputTokensCompact);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -2049,92 +2088,86 @@ function renderUsageDayChart(
   wrap.appendChild(svg);
 }
 
-// Chart zone: range toggle (1D/7D/30D) + prev/next paging + window label +
-// the chart itself. Re-renders locally on control clicks and on pane resize
-// (ResizeObserver, >20px width change) without a full dashboard refresh.
-function renderUsageChartZone(
+// Range buttons (Phase 1 System-browser range toggle, 2026-08-04): 1D/7D/30D
+// plus ALL, everything the exporter scanned. Order matches USAGE_RANGE_DAYS.
+const USAGE_RANGE_OPTIONS = ["1d", "7d", "30d", "all"] as const;
+
+// Sticky period header: range toggle + prev/next paging + the human period
+// label ("Last 7 days") + the concrete date-range label ("Jul 8 - Jul 14").
+// Pinned via CSS position:sticky (styles.css) so the active period stays
+// legible while scrolling past the chart/tables/sections below it -- every
+// breakdown on the page is unambiguous about which period it's showing.
+function renderUsageStickyHeader(
   container: HTMLElement,
-  stats: UsageStats,
+  win: ReturnType<typeof computeUsageWindow>,
+  viewState: ViewState,
+  redraw: () => void
+) {
+  const sticky = container.createDiv({ cls: "aios-usage-sticky" });
+  const head = sticky.createDiv({ cls: "aios-usage-sticky-head" });
+  head.createSpan({ cls: "aios-usage-period-label", text: USAGE_RANGE_LABELS[viewState.usageRange] });
+  const dateLabel = head.createSpan({ cls: "aios-usage-window-label", text: win.label });
+  dateLabel.setAttr("aria-live", "polite");
+
+  const controls = sticky.createDiv({ cls: "aios-usage-controls" });
+  const spacer = controls.createDiv({ cls: "aios-usage-controls-spacer" });
+  void spacer;
+
+  const seg = controls.createDiv({ cls: "aios-usage-range" });
+  for (const r of USAGE_RANGE_OPTIONS) {
+    const b = seg.createEl("button", {
+      cls: "aios-usage-range-btn" + (viewState.usageRange === r ? " aios-usage-range-on" : ""),
+      text: r.toUpperCase(),
+    });
+    b.addEventListener("click", () => {
+      if (viewState.usageRange === r) return;
+      viewState.usageRange = r;
+      viewState.usageOffset = 0;
+      redraw();
+    });
+  }
+
+  const nav = controls.createDiv({ cls: "aios-usage-nav" });
+  const prev = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
+  prev.setAttr("aria-label", "Previous window");
+  setIcon(prev, "chevron-left");
+  prev.disabled = !win.canPrev;
+  prev.addEventListener("click", () => {
+    if (!win.canPrev) return;
+    viewState.usageOffset += 1;
+    redraw();
+  });
+  const next = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
+  next.setAttr("aria-label", "Next window");
+  setIcon(next, "chevron-right");
+  next.disabled = !win.canNext;
+  next.addEventListener("click", () => {
+    if (!win.canNext) return;
+    viewState.usageOffset -= 1;
+    redraw();
+  });
+}
+
+// The chart alone (no controls -- those live in the sticky header now).
+// Re-measures its own width so the SVG genuinely fills the pane; called from
+// the parent draw() both on range/paging changes and on pane resize.
+function renderUsageChartHost(
+  container: HTMLElement,
+  win: ReturnType<typeof computeUsageWindow>,
   viewState: ViewState
 ) {
-  const zone = container.createDiv({ cls: "aios-usage-chart-zone" });
-
-  const draw = () => {
-    zone.empty();
-    const win = computeUsageWindow(
-      stats.days || [],
-      viewState.usageRange,
-      viewState.usageOffset,
-      new Date()
+  const chartHost = container.createDiv({ cls: "aios-usage-chart-host" });
+  const width = Math.floor(chartHost.getBoundingClientRect().width) || container.clientWidth || 600;
+  if (viewState.usageRange === "1d") {
+    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0]), width);
+  } else {
+    renderUsageChart(
+      chartHost,
+      usageChartFromWindow(win.days),
+      width,
+      `Daily API-equivalent cost, ${win.label}, stacked by model family`
     );
-
-    const controls = zone.createDiv({ cls: "aios-usage-controls" });
-    const label = controls.createDiv({ cls: "aios-usage-window-label", text: win.label });
-    label.setAttr("aria-live", "polite");
-    const spacer = controls.createDiv({ cls: "aios-usage-controls-spacer" });
-    void spacer;
-
-    const seg = controls.createDiv({ cls: "aios-usage-range" });
-    for (const r of ["1d", "7d", "30d"] as const) {
-      const b = seg.createEl("button", {
-        cls: "aios-usage-range-btn" + (viewState.usageRange === r ? " aios-usage-range-on" : ""),
-        text: r.toUpperCase(),
-      });
-      b.addEventListener("click", () => {
-        if (viewState.usageRange === r) return;
-        viewState.usageRange = r;
-        viewState.usageOffset = 0;
-        draw();
-      });
-    }
-
-    const nav = controls.createDiv({ cls: "aios-usage-nav" });
-    const prev = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
-    prev.setAttr("aria-label", "Previous window");
-    setIcon(prev, "chevron-left");
-    prev.disabled = !win.canPrev;
-    prev.addEventListener("click", () => {
-      if (!win.canPrev) return;
-      viewState.usageOffset += 1;
-      draw();
-    });
-    const next = nav.createEl("button", { cls: "aios-icon-btn aios-usage-nav-btn" });
-    next.setAttr("aria-label", "Next window");
-    setIcon(next, "chevron-right");
-    next.disabled = !win.canNext;
-    next.addEventListener("click", () => {
-      if (!win.canNext) return;
-      viewState.usageOffset -= 1;
-      draw();
-    });
-
-    const chartHost = zone.createDiv({ cls: "aios-usage-chart-host" });
-    const width = Math.floor(chartHost.getBoundingClientRect().width) || zone.clientWidth || 600;
-    if (viewState.usageRange === "1d") {
-      renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0]), width);
-    } else {
-      renderUsageChart(
-        chartHost,
-        usageChartFromWindow(win.days),
-        width,
-        `Daily API-equivalent cost, ${win.label}, stacked by model family`
-      );
-    }
-  };
-
-  draw();
-
-  let lastWidth = zone.getBoundingClientRect().width;
-  const ro = new ResizeObserver((entries) => {
-    for (const entry of entries) {
-      const w = entry.contentRect.width;
-      if (Math.abs(w - lastWidth) > 20) {
-        lastWidth = w;
-        draw();
-      }
-    }
-  });
-  ro.observe(zone);
+  }
 }
 
 function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
@@ -2212,25 +2245,56 @@ function renderUsageWorkflowShareBar(container: HTMLElement, shareBar: UsageWork
   }
 }
 
-function renderUsageWorkflowTable(container: HTMLElement, table: UsageWorkflowTableRow[]) {
+// Shared breakdown-table renderer (Phase 1 System-browser range toggle,
+// 2026-08-04): workflows, skills, and any future breakdown (agents, models)
+// render through this one function so their shared columns (Cost, Runs,
+// Output tokens, Msgs) land at the same table-layout column positions across
+// sections -- alignment without a bespoke grid system. `nameDotClass` is
+// optional (workflows show a colored dot next to the name; skills don't).
+// `nameSuffix`, when present, renders a small muted note after the name
+// (used for the "all-time" honesty flag on partial/unscoped rows).
+function renderUsageBreakdownTable(
+  container: HTMLElement,
+  headers: string[],
+  rows: { nameText: string; nameDotClass?: string; nameSuffix?: string; cells: string[] }[]
+) {
   const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
-  const el = wrap.createEl("table", { cls: "aios-usage-table" });
+  const el = wrap.createEl("table", { cls: "aios-usage-table aios-usage-breakdown-table" });
   const thead = el.createEl("thead");
   const headRow = thead.createEl("tr");
-  for (const h of ["Workflow", "Cost", "Output tokens", "Msgs", "Sessions"]) {
-    headRow.createEl("th", { text: h });
-  }
+  for (const h of headers) headRow.createEl("th", { text: h });
   const tbody = el.createEl("tbody");
-  for (const row of table) {
+  for (const row of rows) {
     const tr = tbody.createEl("tr");
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
-    nameCell.createSpan({ cls: "aios-usage-dot aios-workflow-color-" + row.colorIndex });
-    nameCell.createSpan({ text: " " + row.label });
-    tr.createEl("td", { text: formatUsd(row.costUsd) });
-    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
-    tr.createEl("td", { text: String(row.messages) });
-    tr.createEl("td", { text: String(row.sessions) });
+    if (row.nameDotClass) nameCell.createSpan({ cls: "aios-usage-dot " + row.nameDotClass });
+    nameCell.createSpan({ text: row.nameText });
+    if (row.nameSuffix) {
+      nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: row.nameSuffix });
+    }
+    for (const c of row.cells) tr.createEl("td", { text: c });
   }
+}
+
+// Common columns across workflows/skills: Cost, Runs, Output tokens, Msgs --
+// same order, same index, in both tables, so those columns align vertically
+// even though each table also carries a section-specific extra column.
+function renderUsageWorkflowTable(container: HTMLElement, table: UsageWorkflowTableRow[]) {
+  renderUsageBreakdownTable(
+    container,
+    ["Workflow", "Cost", "Runs", "Output tokens", "Msgs"],
+    table.map((row) => ({
+      nameText: " " + row.label,
+      nameDotClass: "aios-workflow-color-" + row.colorIndex,
+      nameSuffix: row.partial ? "(all-time)" : undefined,
+      cells: [
+        formatUsd(row.costUsd),
+        String(row.sessions),
+        formatCompactNumber(row.outputTokens),
+        String(row.messages),
+      ],
+    }))
+  );
 }
 
 // Spike alerts (build 2.9 slice 3): quiet by design. Renders nothing when
@@ -2254,17 +2318,45 @@ function renderWorkflowSpikeAlerts(container: HTMLElement, alerts: WorkflowSpike
 }
 
 // Missing `workflows` field (old JSON) or an empty window renders nothing at
-// all -- no section header, no error.
+// all -- no section header, no error. `rangeLabel` names the active period
+// in the subhead ("Workflows (Last 7 days)") so this section is never
+// ambiguous even scrolled away from the sticky header.
 function renderUsageWorkflowsSection(
   container: HTMLElement,
   view: UsageWorkflowsView,
-  spikeAlerts: WorkflowSpikeAlert[]
+  spikeAlerts: WorkflowSpikeAlert[],
+  rangeLabel: string
 ) {
   if (!view.hasData) return;
-  container.createDiv({ cls: "aios-usage-subhead", text: "Workflows (30d)" });
+  const anyPartial = view.table.some((r) => r.partial);
+  container.createDiv({
+    cls: "aios-usage-subhead",
+    text: "Workflows (" + rangeLabel + (anyPartial ? ", some all-time" : "") + ")",
+  });
   renderWorkflowSpikeAlerts(container, spikeAlerts);
   renderUsageWorkflowShareBar(container, view.shareBar);
   renderUsageWorkflowTable(container, view.table);
+}
+
+// Skills table shares the same column order/positions as the workflow table
+// (Cost, Runs, Output tokens, Msgs) plus one trailing skill-only column
+// (Avg/run), so the shared columns line up vertically between the two
+// sections (Phase 1 System-browser range toggle, 2026-08-04, item 3).
+function renderUsageSkillsTable(container: HTMLElement, rows: UsageSkillStat[]) {
+  renderUsageBreakdownTable(
+    container,
+    ["Skill", "Cost", "Runs", "Output tokens", "Msgs", "Avg/run"],
+    rows.map((row) => ({
+      nameText: "/" + row.label,
+      cells: [
+        formatUsd(row.costUsd),
+        String(row.runs),
+        formatCompactNumber(row.outputTokens),
+        String(row.messages),
+        formatUsd(row.avgCostUsd),
+      ],
+    }))
+  );
 }
 
 // Skills section: per-invocation spend, top 5 collapsed with a show-more
@@ -2274,41 +2366,31 @@ function renderUsageWorkflowsSection(
 // viewState.expanded set, so it survives live re-renders like everything else.
 const USAGE_SKILLS_EXPAND_KEY = "usage-skills";
 
-function renderUsageSkillsTable(container: HTMLElement, rows: UsageSkillStat[]) {
-  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
-  const el = wrap.createEl("table", { cls: "aios-usage-table" });
-  const thead = el.createEl("thead");
-  const headRow = thead.createEl("tr");
-  for (const h of ["Skill", "Runs", "Cost", "Avg/run", "Output tokens"]) {
-    headRow.createEl("th", { text: h });
-  }
-  const tbody = el.createEl("tbody");
-  for (const row of rows) {
-    const tr = tbody.createEl("tr");
-    tr.createEl("td", { cls: "aios-usage-table-name", text: "/" + row.label });
-    tr.createEl("td", { text: String(row.runs) });
-    tr.createEl("td", { text: formatUsd(row.costUsd) });
-    tr.createEl("td", { text: formatUsd(row.avgCostUsd) });
-    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
-  }
-}
-
 function renderUsageSkillsSection(
   container: HTMLElement,
   stats: UsageStats,
+  win: ReturnType<typeof computeUsageWindow>,
   viewState: ViewState
 ) {
   const section = container.createDiv({ cls: "aios-usage-skills" });
 
   const draw = () => {
     section.empty();
-    const view: UsageSkillsView = computeSkillsView(
+    const view: UsageSkillsView = computeSkillsViewForRange(
       stats,
+      win.days,
+      viewState.usageRange,
       viewState.expanded.has(USAGE_SKILLS_EXPAND_KEY)
     );
     if (!view.hasData) return;
 
-    section.createDiv({ cls: "aios-usage-subhead", text: "Skills (30d, per invocation)" });
+    // Honest label (Phase 1 System-browser range toggle, 2026-08-04): only
+    // claim the numbers follow the selected range when they genuinely do.
+    // A pre-Phase-1 export (any skill missing byDay) falls back to all-time
+    // totals -- the subhead says so instead of silently mislabeling a 30d
+    // number as if it were scoped to the active toggle.
+    const label = view.rangeSupported ? USAGE_RANGE_LABELS[viewState.usageRange] : "All available data";
+    section.createDiv({ cls: "aios-usage-subhead", text: "Skills (" + label + ", per invocation)" });
     renderUsageSkillsTable(section, view.rows);
 
     if (view.hiddenCount === 0 && !view.expanded) return;
@@ -2340,32 +2422,15 @@ function renderBudgetWarning(
   container.createDiv({ cls: "aios-budget-warn" }).setText(guardrail.message);
 }
 
-function renderUsageView(
-  container: HTMLElement,
-  stats: UsageStats,
-  view: UsageView,
-  workflowsView: UsageWorkflowsView,
-  spikeAlerts: WorkflowSpikeAlert[],
-  dailyBudgetUsd: number,
-  viewState: ViewState
-) {
-  renderBudgetWarning(container, budgetGuardrail(view.tiles.todayCostUsd, dailyBudgetUsd));
-  renderUsageTiles(container, view);
-  renderUsageChartZone(container, stats, viewState);
-  renderUsageLegend(container, view.legend);
-  container.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (30d)" });
-  renderUsageTable(container, view.table);
-  renderUsageWorkflowsSection(container, workflowsView, spikeAlerts);
-  renderUsageSkillsSection(container, stats, viewState);
-  renderUsageProjectsTable(container, view.projects);
-  container.createDiv({
-    cls: "aios-foot",
-    text: "API-equivalent value at standard rates; subscription billing differs.",
-  });
-}
-
 // Usage tab: async load + render. Renders a hint when the exporter has not
 // run yet (no usage-stats.json at settings.usageStatsPath).
+//
+// Phase 1 System-browser range toggle (2026-08-04): the whole tab body below
+// the sticky header now lives in one redraw() closure keyed off
+// viewState.usageRange/usageOffset, so every number on the page -- tiles,
+// chart, model breakdown, workflows, skills -- recomputes from the same
+// selected window instead of the old split where only the chart reacted to
+// the range toggle and everything else stayed pinned to a fixed 30 days.
 function renderUsageTab(
   app: App,
   container: HTMLElement,
@@ -2383,10 +2448,61 @@ function renderUsageTab(
       );
       return;
     }
-    const view = computeUsageView(stats, new Date());
-    const workflowsView = computeWorkflowsView(stats);
+
+    // Static across range changes: today's own cost (for the budget
+    // guardrail, which is a real daily-budget alert independent of whatever
+    // range the user is browsing) and the all-time project table (projects
+    // have no per-day breakdown to scope by range -- see computeUsageView's
+    // note).
+    const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date());
+    const todayCostUsd = todayWin.days[0]?.totalCostUsd || 0;
+    const projects = computeUsageView(stats, new Date()).projects;
     const spikeAlerts = computeWorkflowSpikes(stats, new Date());
-    renderUsageView(wrap, stats, view, workflowsView, spikeAlerts, settings.dailyBudgetUsd, viewState);
+
+    const sticky = wrap.createDiv();
+    const body = wrap.createDiv({ cls: "aios-usage-body" });
+
+    const draw = () => {
+      sticky.empty();
+      body.empty();
+
+      const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date());
+      renderUsageStickyHeader(sticky, win, viewState, draw);
+
+      renderBudgetWarning(body, budgetGuardrail(todayCostUsd, settings.dailyBudgetUsd));
+      renderUsageTiles(body, computeUsageRangeTiles(win.days, USAGE_RANGE_LABELS[viewState.usageRange]));
+      renderUsageChartHost(body, win, viewState);
+
+      const breakdown = usageFamilyBreakdown(win.days);
+      renderUsageLegend(body, breakdown.legend);
+      body.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (" + USAGE_RANGE_LABELS[viewState.usageRange] + ")" });
+      renderUsageTable(body, breakdown.table);
+
+      const workflowsView = computeWorkflowsViewForRange(stats, win.days, viewState.usageRange);
+      renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, USAGE_RANGE_LABELS[viewState.usageRange]);
+
+      renderUsageSkillsSection(body, stats, win, viewState);
+
+      renderUsageProjectsTable(body, projects);
+      body.createDiv({
+        cls: "aios-foot",
+        text: "API-equivalent value at standard rates; subscription billing differs.",
+      });
+    };
+
+    draw();
+
+    let lastWidth = wrap.getBoundingClientRect().width;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        if (Math.abs(w - lastWidth) > 20) {
+          lastWidth = w;
+          draw();
+        }
+      }
+    });
+    ro.observe(wrap);
   });
 }
 
