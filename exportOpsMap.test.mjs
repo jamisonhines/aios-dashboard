@@ -17,6 +17,7 @@ import {
   listSkillDirs,
   buildAgentNode,
   listPluginSkillDirs,
+  parseAvailableHires,
 } from "./vault-scripts/export-ops-map.mjs";
 
 // --- token refs: numbered tokens map by id prefix ---
@@ -291,6 +292,110 @@ import {
     assert.equal(node.path, ".claude/agents/new-hire.md", "falls back to the shim path when no contract folder exists yet");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- buildAgentNode: model field (System-browser Agents section, Phase 3,
+// 2026-08-05) ---
+{
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "buildAgentNode-model-test-"));
+  try {
+    const shimDir = path.join(root, ".claude", "agents");
+    await fs.mkdir(shimDir, { recursive: true });
+    const shimPath = path.join(shimDir, "coder.md");
+    await fs.writeFile(
+      shimPath,
+      "---\nname: coder\ndescription: Coder.\nmodel: sonnet\n---\n\nBody.\n"
+    );
+    const node = await buildAgentNode(root, shimPath);
+    assert.equal(node.model, "sonnet", "model parsed from the shim's frontmatter");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+
+  // A shim written before the model: convention existed (or one that never
+  // got the mandatory line) must not surface an empty string -- the plugin
+  // needs undefined so it can render an honest dash, not a blank cell.
+  const root2 = await fs.mkdtemp(path.join(os.tmpdir(), "buildAgentNode-nomodel-test-"));
+  try {
+    const shimDir = path.join(root2, ".claude", "agents");
+    await fs.mkdir(shimDir, { recursive: true });
+    const shimPath = path.join(shimDir, "old-hire.md");
+    await fs.writeFile(shimPath, "---\nname: old-hire\ndescription: No model line.\n---\n\nBody.\n");
+    const node = await buildAgentNode(root2, shimPath);
+    assert.equal(node.model, undefined, "missing model: line resolves to undefined, not empty string");
+  } finally {
+    await fs.rm(root2, { recursive: true, force: true });
+  }
+}
+
+// --- parseAvailableHires: "Reference pattern" heading parsing (System-browser
+// Agents section, Phase 3, 2026-08-05). The graceful fallback matters as much
+// as the happy path: the real SOP-001 on this machine has NO such heading
+// today (it documents the hiring PROCEDURE, not a catalog), so found:false
+// is the honest, correct outcome for the current file, not a bug. ---
+{
+  const found = parseAvailableHires([
+    "# SOP-001",
+    "",
+    "## Reference pattern",
+    "",
+    "- **Code team**: Coder + Reviewer, for any project with a codebase.",
+    "- **Content team**: Web Builder alone, for copy/SEO-only sites.",
+    "- No separator here at all",
+    "",
+    "## Next section",
+    "",
+    "- Not a hire pattern, this is under a different heading.",
+  ].join("\n"));
+
+  assert.equal(found.found, true, "heading located, items extracted");
+  assert.equal(found.items.length, 3, "stops at the next heading, does not bleed into the following section");
+  assert.deepEqual(found.items[0], {
+    label: "Code team",
+    description: "Coder + Reviewer, for any project with a codebase.",
+  });
+  assert.deepEqual(found.items[1], {
+    label: "Content team",
+    description: "Web Builder alone, for copy/SEO-only sites.",
+  });
+  assert.deepEqual(found.items[2], { label: "No separator here at all", description: "" }, "no separator -> whole line as label");
+}
+{
+  // No "Reference pattern" heading anywhere -> graceful fallback, not a crash
+  // and not a fabricated list.
+  const found = parseAvailableHires("# SOP-001\n\n## Steps\n\n- Step one.\n- Step two.\n");
+  assert.equal(found.found, false, "no matching heading -> found:false");
+  assert.deepEqual(found.items, [], "no items fabricated when the heading is absent");
+}
+{
+  // Empty/missing body degrades gracefully.
+  assert.deepEqual(parseAvailableHires(""), { found: false, items: [] });
+  assert.deepEqual(parseAvailableHires(undefined), { found: false, items: [] });
+}
+{
+  // Real file on this machine, read live: confirms the graceful fallback is
+  // what actually happens today, not just what the synthetic fixture says.
+  const realSop001 = path.join(
+    os.homedir(),
+    "AIOS",
+    "Operations",
+    "SOPs",
+    "SOP-001-how-to-add-a-new-specialist.md"
+  );
+  let realBody = "";
+  try {
+    realBody = await fs.readFile(realSop001, "utf8");
+  } catch {
+    // Machine without ~/AIOS -- skip this specific live-file assertion.
+  }
+  if (realBody) {
+    const found = parseAvailableHires(realBody);
+    assert.equal(
+      found.found,
+      false,
+      "the real SOP-001 on this machine has no Reference pattern heading today -- confirms the graceful fallback path, not the hardcoded-list anti-pattern"
+    );
   }
 }
 

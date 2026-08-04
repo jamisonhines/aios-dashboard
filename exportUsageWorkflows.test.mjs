@@ -25,6 +25,8 @@ import {
   localDay,
   parseTranscript,
   applyTranscriptToAggregates,
+  applyAgentTranscript,
+  UNKNOWN_AGENT_TYPE,
   findTranscripts,
 } from "./vault-scripts/export-usage-stats.mjs";
 
@@ -668,6 +670,186 @@ function estimateCostForEntry(entry) {
   // (through 2026-08-31), so the intro rate applies.
   const rate = SONNET_INTRO_RATE;
   return (entry.input_tokens * rate.in + entry.output_tokens * rate.out) / 1e6;
+}
+
+// --- parseTranscript: extracts attributionAgent from a subagent transcript
+// (System-browser Agents section, Phase 3, 2026-08-05). Real subagent
+// transcripts carry `attributionAgent` on every line once the Task tool
+// resolves a subagent_type; captured from the FIRST line that has it, even
+// if earlier lines lack the field (e.g. a leading `user` line with no
+// message yet). ---
+{
+  const now = Date.now();
+  const cutoffMs = now - 35 * 24 * 60 * 60 * 1000;
+  const ts = new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString();
+  const lines = [
+    { type: "user", timestamp: ts, isSidechain: true, message: { content: "dispatch prompt" } },
+    {
+      type: "assistant",
+      timestamp: ts,
+      attributionAgent: "coder",
+      message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 20 } },
+    },
+  ];
+  const tmpFile = path.join(os.tmpdir(), `parseTranscript-attribution-test-${process.pid}.jsonl`);
+  await fs.writeFile(tmpFile, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+  try {
+    const { attributionAgent, entries } = await parseTranscript(tmpFile, cutoffMs);
+    assert.equal(attributionAgent, "coder", "attributionAgent captured from the assistant line");
+    assert.equal(entries.length, 1, "usage entry still parsed normally");
+  } finally {
+    await fs.rm(tmpFile, { force: true });
+  }
+
+  // A top-level session transcript (no attributionAgent anywhere) resolves
+  // to undefined, not a stray empty string or throw.
+  const noAttrLines = [
+    {
+      type: "assistant",
+      timestamp: ts,
+      message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 20 } },
+    },
+  ];
+  const tmpFile2 = path.join(os.tmpdir(), `parseTranscript-no-attribution-test-${process.pid}.jsonl`);
+  await fs.writeFile(tmpFile2, noAttrLines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+  try {
+    const { attributionAgent } = await parseTranscript(tmpFile2, cutoffMs);
+    assert.equal(attributionAgent, undefined, "no attributionAgent field anywhere -> undefined, not a crash");
+  } finally {
+    await fs.rm(tmpFile2, { force: true });
+  }
+}
+
+// --- applyAgentTranscript: pure accumulator (System-browser Agents section,
+// Phase 3, 2026-08-05). One file = one run, attributed to entries[0]'s day;
+// cost/tokens/messages sum across entries; byDay mirrors the top-level
+// totals the same way skills'/workflows' byDay does. ---
+{
+  const agents = new Map();
+  const e1 = {
+    timestamp: "2026-07-27T10:00:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 100,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  const e2 = { ...e1, timestamp: "2026-07-27T14:00:00Z" };
+  applyAgentTranscript(agents, "coder", [e1, e2]);
+
+  const a = agents.get("coder");
+  assert.ok(a, "agent bucket created for a new key");
+  assert.equal(a.runs, 1, "one file = one run, even with multiple usage entries inside it");
+  assert.equal(a.messages, 2, "both entries counted toward messages");
+  const dayKey = localDay("2026-07-27T10:00:00Z");
+  assert.equal(a.byDay.get(dayKey).runs, 1, "the run is attributed to entries[0]'s day");
+  assert.equal(a.byDay.get(dayKey).messages, 2, "both entries landed on the same day in byDay");
+  const sumCost = [...a.byDay.values()].reduce((s, d) => s + d.costUsd, 0);
+  assert.ok(Math.abs(sumCost - a.costUsd) < 1e-9, "sum(byDay.costUsd) matches the agent's top-level total");
+
+  // A second file for the SAME agent type accumulates rather than replacing.
+  const e3 = { ...e1, timestamp: "2026-07-28T09:00:00Z" };
+  applyAgentTranscript(agents, "coder", [e3]);
+  assert.equal(agents.get("coder").runs, 2, "a second subagent file for the same type is a second run");
+  assert.equal(agents.get("coder").messages, 3, "messages accumulate across files");
+
+  // A different agent type gets its own independent bucket.
+  applyAgentTranscript(agents, "reviewer", [e1]);
+  assert.equal(agents.size, 2, "distinct agent types get distinct buckets");
+  assert.equal(agents.get("reviewer").runs, 1, "the new bucket starts fresh, unaffected by coder's totals");
+
+  // Zero entries contributes nothing (mirrors applyTranscriptToAggregates'
+  // zero-in-window-entries guard) -- no bucket is fabricated out of nothing.
+  const emptyAgents = new Map();
+  applyAgentTranscript(emptyAgents, "capture", []);
+  assert.equal(emptyAgents.size, 0, "an empty entries array creates no bucket at all");
+
+  // Missing/undefined agentType falls back to the named UNKNOWN_AGENT_TYPE
+  // bucket instead of crashing or silently dropping real spend.
+  const unknownAgents = new Map();
+  applyAgentTranscript(unknownAgents, undefined, [e1]);
+  assert.equal(unknownAgents.has(UNKNOWN_AGENT_TYPE), true, "missing agentType falls back to UNKNOWN_AGENT_TYPE");
+  assert.equal(unknownAgents.get(UNKNOWN_AGENT_TYPE).runs, 1, "the run still counts under the fallback bucket");
+}
+
+// --- Double-count reconciliation (task-mandated correctness check,
+// 2026-08-05): folding a subagent transcript into BOTH the pre-existing
+// days/projects/workflows aggregates (applyTranscriptToAggregates,
+// isSubagent: true) AND the new `agents` dimension (applyAgentTranscript)
+// must not inflate the headline workflow/day/project totals -- `agents` is
+// an orthogonal breakdown over the SAME already-counted-once entries, not a
+// second charge. This models exactly what main() does: both calls receive
+// the identical `entries` array from one parseTranscript() call. ---
+{
+  const days = new Map();
+  const projects = new Map();
+  const workflows = new Map();
+  const skills = new Map();
+  const agents = new Map();
+  const rule = { key: "interactive", label: "Interactive" };
+
+  const parentEntry = {
+    timestamp: "2026-07-20T09:00:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 100,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  const subagentEntry = {
+    timestamp: "2026-07-20T09:05:00Z",
+    model: "claude-sonnet-5",
+    input_tokens: 1000,
+    output_tokens: 2000,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+
+  // Parent session transcript (isSubagent: false).
+  applyTranscriptToAggregates({
+    entries: [parentEntry],
+    skillRuns: [],
+    projectName: "AIOS",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+    isSubagent: false,
+  });
+  // Its one dispatched subagent (isSubagent: true) -- same entries object
+  // fed to BOTH the existing fold and the new agents fold, exactly as
+  // main()'s nested-transcript loop does.
+  applyTranscriptToAggregates({
+    entries: [subagentEntry],
+    skillRuns: [],
+    projectName: "AIOS",
+    rule,
+    days,
+    projects,
+    workflows,
+    skills,
+    isSubagent: true,
+  });
+  applyAgentTranscript(agents, "coder", [subagentEntry]);
+
+  const expectedParentCost = estimateCostForEntry(parentEntry);
+  const expectedSubagentCost = estimateCostForEntry(subagentEntry);
+  const w = workflows.get("interactive");
+
+  assert.ok(
+    Math.abs(w.costUsd - (expectedParentCost + expectedSubagentCost)) < 1e-9,
+    "workflow total is parent + subagent cost, counted exactly once each (not doubled by the agents fold)"
+  );
+  assert.equal(w.sessions, 1, "still exactly one real session -- the subagent never inflates session count");
+  assert.ok(
+    Math.abs(agents.get("coder").costUsd - expectedSubagentCost) < 1e-9,
+    "the agents-dimension total equals the subagent's own cost, not the combined parent+subagent total"
+  );
+  assert.ok(
+    agents.get("coder").costUsd < w.costUsd,
+    "the agents dimension is a SLICE of the workflow total, never larger than it -- proves no doubling"
+  );
 }
 
 console.log("exportUsageWorkflows: all assertions passed");

@@ -26,6 +26,20 @@ import {
 }
 assert.ok(SYSTEM_SKILLS_SUITE_PREFIXES.includes("blog-"), "default prefix list includes blog-");
 
+// --- systemSkillsSuiteFor: colon-namespaced plugin skills group by
+// namespace (Reviewer cosmetic minor, phase-2 report, 2026-08-04: the 35
+// plugin skills previously rendered as 35 standalone rows) ---
+{
+  assert.equal(systemSkillsSuiteFor("superpowers:brainstorming"), "superpowers", "groups by the part before the first colon");
+  assert.equal(systemSkillsSuiteFor("context-mode:ctx-search"), "context-mode", "namespace itself contains a hyphen, still splits on the colon");
+  assert.equal(systemSkillsSuiteFor("skill-creator:main"), "skill-creator", "single-skill plugin still gets a namespace suite");
+  assert.equal(
+    systemSkillsSuiteFor("gsd-executor"),
+    "gsd",
+    "a hyphen-prefixed non-namespaced id is unaffected by the colon check"
+  );
+}
+
 // --- systemSkillUsedByRows: resolves ids against the node index ---
 {
   const nodesById = new Map([

@@ -51,6 +51,8 @@ import {
   usageScopedRangeLabel,
   computeSystemSkillsView,
   systemSkillsGroupIsOpen,
+  computeSystemAgentsView,
+  computeAvailableHiresView,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -544,6 +546,13 @@ interface UsageStats {
   // Optional: absent in JSON written before build 2.9. Same hide-when-missing
   // rule as workflows.
   skills?: UsageSkillStat[];
+  // Optional: absent in JSON written before Phase 3 (System-browser Agents
+  // section, 2026-08-05). Keyed by the host-level subagent type (e.g.
+  // "coder", "general-purpose") -- NOT yet mapped onto the AIOS roster; the
+  // System tab's Agents section does that join by matching this `key`
+  // against ops-map.json's agent node ids. Same byDay shape as skills, for
+  // the same future range-toggle reason.
+  agents?: UsageSkillStat[];
   totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
 }
 
@@ -687,6 +696,10 @@ interface OpsMapNode {
   disableModelInvocation?: boolean; // SKILL.md frontmatter `disable-model-invocation: true`
   usedBy?: string[]; // node ids with an edge -> this skill (denormalized by export-ops-map.mjs)
   origin?: "skills-dir" | "plugin" | "command"; // where the skill was discovered (Reviewer M3, 2026-08-04)
+  // Agent-only field (System-browser Agents section, Phase 3, 2026-08-05):
+  // the shim's `model:` frontmatter line. Absent (not empty string) for a
+  // shim written before that convention existed.
+  model?: string;
 }
 
 interface OpsMapEdge {
@@ -695,10 +708,27 @@ interface OpsMapEdge {
   viaType: string;
 }
 
+// "Available hires" (System-browser Agents section, Phase 3, 2026-08-05):
+// parsed from SOP-001's "Reference pattern" section when present. See
+// parseAvailableHires' own comment (export-ops-map.mjs) for why found:false
+// is the honest, current-file-accurate outcome, not a bug.
+interface OpsMapAvailableHireItem {
+  label: string;
+  description: string;
+}
+
+interface OpsMapAvailableHires {
+  found: boolean;
+  items: OpsMapAvailableHireItem[];
+  sopId: string;
+  sopPath: string;
+}
+
 interface OpsMapManifest {
   generatedAt?: string;
   nodes: OpsMapNode[];
   edges: OpsMapEdge[];
+  availableHires?: OpsMapAvailableHires;
 }
 
 interface OpsMapLayoutOpts {
@@ -3296,6 +3326,169 @@ function renderSystemSkillsSection(
   redraw();
 }
 
+// ---------------------------------------------------------------------------
+// System tab: Agents section (Phase 3, 2026-08-05). One row per roster
+// agent (ops-map's type:"agent" nodes): name, model, one-line role,
+// clickable contract link, what it's wired to (workflows/SOPs/skills its
+// contract references, clickable where a vault path exists), and usage
+// (cost/runs) joined from usage-stats.json's `agents` array where the
+// roster name matches a transcript agent type -- dashes where unknown, same
+// convention as the Skills section above. Followed by an "Available hires"
+// subsection (SOP-001 reference patterns not currently hired).
+// ---------------------------------------------------------------------------
+
+interface SystemAgentWiredRow {
+  id: string;
+  label: string;
+  path?: string;
+}
+
+interface SystemAgentWiredTo {
+  workflows: SystemAgentWiredRow[];
+  sops: SystemAgentWiredRow[];
+  skills: SystemAgentWiredRow[];
+}
+
+interface SystemAgentRow {
+  id: string;
+  label: string;
+  model: string | null;
+  description: string;
+  path?: string;
+  wiredTo: SystemAgentWiredTo;
+  costUsd: number | null;
+  runs: number | null;
+  avgCostUsd: number | null;
+}
+
+interface SystemAgentsView {
+  totalCount: number;
+  rows: SystemAgentRow[];
+}
+
+// Flattens the three wired-to buckets into one ordered list (workflows,
+// then SOPs, then skills) for the shared used-by-style cell renderer.
+// SystemAgentWiredRow and SystemSkillUsedByRow are structurally identical
+// ({id, label, path?}), so renderSystemSkillUsedByCell renders these too --
+// no duplicate cell-renderer needed for a second table.
+function flattenAgentWiredTo(wiredTo: SystemAgentWiredTo): SystemSkillUsedByRow[] {
+  return [...wiredTo.workflows, ...wiredTo.sops, ...wiredTo.skills];
+}
+
+function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[]) {
+  const headers = ["Agent", "Cost", "Runs", "Description", "Wired to", "Avg/run"];
+
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", {
+    cls: "aios-usage-table aios-usage-breakdown-table aios-system-skills-table aios-system-agents-table",
+  });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of headers) headRow.createEl("th", { text: h });
+
+  const tbody = el.createEl("tbody");
+  for (const row of rows) {
+    const tr = tbody.createEl("tr");
+
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    if (row.path) {
+      const link = nameCell.createEl("a", {
+        text: row.label,
+        cls: "aios-system-skill-usedby-link aios-system-agent-name-link",
+        href: "#",
+      });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        app.workspace.openLinkText(row.path as string, "", false);
+      });
+    } else {
+      nameCell.createSpan({ cls: "aios-system-agent-name", text: row.label });
+    }
+    nameCell.createSpan({
+      cls: "aios-system-skill-origin-badge aios-system-agent-model-badge",
+      text: row.model || "no model set",
+    });
+
+    tr.createEl("td", { text: row.costUsd == null ? "–" : formatUsd(row.costUsd) });
+    tr.createEl("td", { text: row.runs == null ? "–" : formatCompactNumber(row.runs) });
+    tr.createEl("td", { cls: "aios-system-skills-desc", text: row.description });
+
+    const wiredCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
+    renderSystemSkillUsedByCell(app, wiredCell, flattenAgentWiredTo(row.wiredTo));
+
+    tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
+  }
+}
+
+// "Available hires": SOP-001 reference patterns not currently on the
+// roster. Add/delete is a request, not a button (per the task spec's
+// design direction) -- each row states the sentence to say, it never
+// mutates anything itself.
+function renderSystemAvailableHires(app: App, container: HTMLElement, manifest: OpsMapManifest) {
+  const view = computeAvailableHiresView(manifest);
+  const section = container.createDiv({ cls: "aios-system-section aios-system-available-hires" });
+  section.createDiv({ cls: "aios-section-eyebrow", text: "Available hires" });
+
+  const openSop = (ev: MouseEvent) => {
+    ev.preventDefault();
+    if (view.sopPath) app.workspace.openLinkText(view.sopPath, "", false);
+  };
+
+  if (!view.found || view.items.length === 0) {
+    const fallback = section.createDiv({ cls: "aios-system-available-hires-fallback" });
+    fallback.createSpan({ text: "No catalog of not-yet-hired roster patterns is parseable right now. See " });
+    const link = fallback.createEl("a", { text: view.sopId, href: "#" });
+    link.addEventListener("click", openSop);
+    fallback.createSpan({ text: " and ask Dispatch to hire via Recruit." });
+    return;
+  }
+
+  const list = section.createDiv({ cls: "aios-system-available-hires-list" });
+  for (const item of view.items) {
+    const row = list.createDiv({ cls: "aios-system-available-hires-item" });
+    row.createSpan({ cls: "aios-system-available-hires-label", text: item.label });
+    if (item.description) {
+      row.createSpan({ cls: "aios-system-available-hires-desc", text: " " + item.description });
+    }
+    row.createSpan({ cls: "aios-system-available-hires-ask", text: " Not hired here; ask Dispatch to hire via Recruit." });
+  }
+}
+
+function renderSystemAgentsSection(
+  app: App,
+  container: HTMLElement,
+  manifest: OpsMapManifest,
+  stats: UsageStats | null
+) {
+  const section = container.createDiv({ cls: "aios-system-section" });
+  const headRow = section.createDiv({ cls: "aios-system-section-head" });
+  headRow.createDiv({ cls: "aios-section-eyebrow", text: "Agents" });
+  // Same honest-window caption convention as the Skills section: usage here
+  // is NOT range-scoped, it is everything the exporter's fixed window covers.
+  if (stats && typeof stats.windowDays === "number") {
+    headRow.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `usage: last ${stats.windowDays} day${stats.windowDays === 1 ? "" : "s"}`,
+    });
+  }
+
+  const view: SystemAgentsView = computeSystemAgentsView(manifest, stats);
+  if (view.totalCount === 0) {
+    renderEmptyState(
+      section,
+      "No agents yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+    );
+  } else {
+    section.createDiv({
+      cls: "aios-system-skills-count",
+      text: `${view.totalCount} hired agent${view.totalCount === 1 ? "" : "s"}`,
+    });
+    renderSystemAgentsTable(app, section, view.rows);
+  }
+
+  renderSystemAvailableHires(app, container, manifest);
+}
+
 // System tab: async load (ops-map + usage-stats, both already-loaded shapes
 // via the existing loaders) + render. Renders a hint when ops-map.json has
 // not been generated yet, same convention as the Ops map tab.
@@ -3320,14 +3513,13 @@ function renderSystemTab(
 
       renderSystemSkillsSection(app, wrap, viewState, manifest, stats);
 
-      // Sibling sections (build order per the task spec): Agents next
-      // (runs/cost + wired-to skills/workflows), then Workflows/SOPs with
-      // firing counts. Placeholders keep the tab's final section order
-      // visible now so later phases only fill these in, never restructure.
-      const agentsSection = wrap.createDiv({ cls: "aios-system-section aios-system-section-placeholder" });
-      agentsSection.createDiv({ cls: "aios-section-eyebrow", text: "Agents" });
-      renderEmptyState(agentsSection, "Coming in a later phase.");
+      // Agents section (Phase 3, 2026-08-05): roster cards + usage +
+      // wired-to, plus the "Available hires" subsection.
+      renderSystemAgentsSection(app, wrap, manifest, stats);
 
+      // Sibling section (build order per the task spec): Workflows/SOPs
+      // with firing counts lands in a later phase. Placeholder keeps the
+      // tab's final section order visible now.
       const workflowsSection = wrap.createDiv({
         cls: "aios-system-section aios-system-section-placeholder",
       });
