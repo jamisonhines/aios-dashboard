@@ -1458,23 +1458,39 @@
   gap: 6px;
 }
 
-/* Column alignment (Phase 1 System-browser range toggle, 2026-08-04):
-   workflows/skills/future-agents-and-models breakdown tables share this
-   class so their common columns (Cost, Runs, Output tokens, Msgs) land at
-   the same fixed percentage widths regardless of which table it is -- the
-   name column takes the rest. table-layout:fixed makes the widths hold even
-   though each table's cell text differs. */
+/* Column alignment (Phase 1 System-browser range toggle, 2026-08-04;
+   re-fixed per Reviewer M2, 2026-08-04 -- the first attempt below was
+   MEASURED to still misalign, see main.ts's USAGE_BREAKDOWN_TOTAL_COLUMNS
+   comment for why per-table percentage math can never make this work).
+   Every breakdown table (workflows, skills, and any future one) now renders
+   the SAME NUMBER of columns (main.ts pads a shorter table's rows with
+   blank trailing cells), so a single set of nth-child width rules applies
+   identically to every table -- there is no per-table variance left for
+   two tables to disagree about, and table-layout:fixed has nothing to
+   redistribute because the declared widths already sum to exactly 100%
+   for every table, always. */
 .aios-dashboard-root .aios-usage-breakdown-table {
   table-layout: fixed;
 }
 .aios-dashboard-root .aios-usage-breakdown-table th:first-child,
 .aios-dashboard-root .aios-usage-breakdown-table td:first-child {
-  width: 34%;
+  width: 32%;
   text-align: left;
 }
-.aios-dashboard-root .aios-usage-breakdown-table th:not(:first-child),
-.aios-dashboard-root .aios-usage-breakdown-table td:not(:first-child) {
-  width: 13.2%;
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(3),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(3),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(5),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(5) {
+  width: 15%;
+  text-align: right;
+}
+.aios-dashboard-root .aios-usage-breakdown-table th:nth-child(6),
+.aios-dashboard-root .aios-usage-breakdown-table td:nth-child(6) {
+  width: 8%;
   text-align: right;
 }
 .aios-dashboard-root .aios-usage-table-name-suffix {

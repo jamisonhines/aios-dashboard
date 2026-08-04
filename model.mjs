@@ -656,6 +656,21 @@ export function computeUsageWindow(days, range, offset, todayDate) {
 }
 
 /**
+ * Offset-aware period label (Reviewer M4, 2026-08-04): USAGE_RANGE_LABELS is
+ * only true at offset 0 -- "Last 7 days" paged back one window is actually
+ * last-last week, and "Today" paged back one day is actually yesterday.
+ * Falls back to the window's own concrete date-range label (`win.label`,
+ * e.g. "Jul 1 - Jul 7") whenever offset != 0, so a scoped number is never
+ * shown under a period name that no longer describes it. "all" never pages
+ * (computeUsageWindow always returns offset: 0 for it), so it always reads
+ * "All available" here.
+ */
+export function usageScopedRangeLabel(win) {
+  if (win.offset === 0) return USAGE_RANGE_LABELS[win.range] || win.label;
+  return win.label;
+}
+
+/**
  * Total spend + output tokens tiles for an arbitrary continuous day window
  * (Phase 1 System-browser range toggle, 2026-08-04). Replaces the old fixed
  * Today/7d/30d tiles: the Usage tab now shows exactly two numbers, both
@@ -803,6 +818,19 @@ export function computeWorkflowsView(stats) {
  * honestly rather than silently mislabeling an all-time number as
  * range-scoped. Workflows with `byDay` but zero activity inside the window
  * are dropped (nothing to show for that range). Sorted by costUsd desc.
+ *
+ * Reviewer M3 (2026-08-04, found against Jaymo's live usage-stats.json):
+ * `byDay` can exist WITHOUT a `sessions` key on its day buckets -- that's
+ * exactly the shape every workflow in JSON written before the per-day
+ * session fold (this same Phase 1 slice) has. Cost/tokens/messages are
+ * still genuinely scoped from that byDay, but summing a missing `sessions`
+ * key silently produces 0 for every range, which reads as "this workflow
+ * had zero runs this week" -- a wrong number, not an honest one. Detected
+ * per-workflow (`hasSessionsPerDay`) and, when absent, the Runs column
+ * falls back to the workflow's all-time session count and the row is
+ * flagged `sessionsPartial: true` so the renderer can label just that
+ * column honestly, without also declaring the (correctly scoped)
+ * cost/tokens/messages partial.
  */
 export function computeWorkflowsViewForRange(stats, windowDays, range) {
   const workflows = stats.workflows;
@@ -822,9 +850,12 @@ export function computeWorkflowsViewForRange(stats, windowDays, range) {
         messages: w.messages,
         sessions: w.sessions,
         partial: true,
+        sessionsPartial: true,
       });
       continue;
     }
+    const hasSessionsPerDay = Object.values(w.byDay).some((d) => typeof d.sessions === "number");
+
     // "all" already covers the workflow's whole recorded history (its
     // byDay never has entries outside what windowDays spans), so summing
     // over the exact same date keys is correct for every range including
@@ -836,10 +867,27 @@ export function computeWorkflowsViewForRange(stats, windowDays, range) {
       costUsd += d.costUsd;
       outputTokens += d.outputTokens;
       messages += d.messages;
-      sessions += d.sessions || 0;
+      if (hasSessionsPerDay) sessions += d.sessions || 0;
     }
-    if (costUsd <= 0 && messages === 0 && sessions === 0) continue;
-    rows.push({ key: w.key, label: w.label, costUsd, outputTokens, messages, sessions, partial: false });
+    // The Runs/sessions fallback uses the workflow's ALL-TIME session count
+    // when there's no per-day session data to scope -- honestly wrong-scope
+    // (a real number, just not range-limited) instead of silently wrong
+    // (zero, which reads as "no activity"). The zero-activity drop below
+    // deliberately ignores `sessions` for this reason: a workflow with zero
+    // in-window cost/messages must still be dropped even though its
+    // fallback `sessions` value is a nonzero all-time count.
+    if (!hasSessionsPerDay) sessions = w.sessions || 0;
+    if (costUsd <= 0 && messages === 0) continue;
+    rows.push({
+      key: w.key,
+      label: w.label,
+      costUsd,
+      outputTokens,
+      messages,
+      sessions,
+      partial: false,
+      sessionsPartial: !hasSessionsPerDay,
+    });
   }
   rows.sort((a, b) => b.costUsd - a.costUsd);
 

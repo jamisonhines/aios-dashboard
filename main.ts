@@ -44,11 +44,11 @@ import {
   usageDayFamilyBars,
   computeWorkflowSpikes,
   computeSpendSparkline,
-  USAGE_RANGE_LABELS,
   usageFamilyBreakdown,
   computeUsageRangeTiles,
   computeWorkflowsViewForRange,
   computeSkillsViewForRange,
+  usageScopedRangeLabel,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -623,6 +623,11 @@ interface UsageWorkflowTableRow extends UsageWorkflowStat {
   // (computeWorkflowsViewForRange). Absent on the fixed all-time
   // computeWorkflowsView output.
   partial?: boolean;
+  // true when cost/tokens/messages ARE range-scoped but the Runs (sessions)
+  // column specifically fell back to the all-time total, because this
+  // workflow's byDay has no per-day session counts (Reviewer M3, 2026-08-04
+  // -- exactly the shape of JSON written before this same Phase 1 slice).
+  sessionsPartial?: boolean;
 }
 
 interface UsageSkillsView {
@@ -2103,13 +2108,28 @@ function renderUsageStickyHeader(
   viewState: ViewState,
   redraw: () => void
 ) {
-  const sticky = container.createDiv({ cls: "aios-usage-sticky" });
-  const head = sticky.createDiv({ cls: "aios-usage-sticky-head" });
-  head.createSpan({ cls: "aios-usage-period-label", text: USAGE_RANGE_LABELS[viewState.usageRange] });
-  const dateLabel = head.createSpan({ cls: "aios-usage-window-label", text: win.label });
-  dateLabel.setAttr("aria-live", "polite");
+  // `container` IS the .aios-usage-sticky element (Reviewer M1, 2026-08-04):
+  // an earlier version wrapped this in an unclassed div and put the sticky
+  // class on a child, which makes position:sticky a no-op -- the sticky
+  // element's containing block was that wrapper, whose height equals the
+  // header's own height, so there was zero room to travel. The class must
+  // be on the element that is itself a normal-flow child of the scrolling
+  // body (.aios-usage-tab), not on a grandchild.
+  const head = container.createDiv({ cls: "aios-usage-sticky-head" });
+  // M4 (Reviewer, 2026-08-04): at offset 0 the human label ("Last 7 days")
+  // is accurate; paged back, it isn't -- usageScopedRangeLabel falls back to
+  // the concrete date range instead of claiming to be "Last 7 days" while
+  // showing a week from three windows ago. When it does, the redundant
+  // second date-range span below is skipped so the header doesn't repeat
+  // the same text twice.
+  const label = usageScopedRangeLabel(win);
+  head.createSpan({ cls: "aios-usage-period-label", text: label });
+  if (win.offset === 0) {
+    const dateLabel = head.createSpan({ cls: "aios-usage-window-label", text: win.label });
+    dateLabel.setAttr("aria-live", "polite");
+  }
 
-  const controls = sticky.createDiv({ cls: "aios-usage-controls" });
+  const controls = container.createDiv({ cls: "aios-usage-controls" });
   const spacer = controls.createDiv({ cls: "aios-usage-controls-spacer" });
   void spacer;
 
@@ -2119,6 +2139,13 @@ function renderUsageStickyHeader(
       cls: "aios-usage-range-btn" + (viewState.usageRange === r ? " aios-usage-range-on" : ""),
       text: r.toUpperCase(),
     });
+    // Reviewer n11 (2026-08-04): "All" isn't literally unbounded history --
+    // it's everything the exporter's fixed scan window covers (currently
+    // ~35 days; see export-usage-stats.mjs's WINDOW_DAYS comment for why
+    // that's a fixed constant, not a wider live scan).
+    if (r === "all") {
+      b.setAttr("title", "Every day in the exporter's export window (currently ~35 days), not unbounded history");
+    }
     b.addEventListener("click", () => {
       if (viewState.usageRange === r) return;
       viewState.usageRange = r;
@@ -2208,7 +2235,7 @@ function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
 
 function renderUsageProjectsTable(container: HTMLElement, projects: UsageProjectRow[]) {
   if (projects.length === 0) return;
-  container.createDiv({ cls: "aios-usage-subhead", text: "Top projects" });
+  container.createDiv({ cls: "aios-usage-subhead", text: "Top projects (all-time)" });
   const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
   const el = wrap.createEl("table", { cls: "aios-usage-table" });
   const thead = el.createEl("thead");
@@ -2246,23 +2273,45 @@ function renderUsageWorkflowShareBar(container: HTMLElement, shareBar: UsageWork
 }
 
 // Shared breakdown-table renderer (Phase 1 System-browser range toggle,
-// 2026-08-04): workflows, skills, and any future breakdown (agents, models)
-// render through this one function so their shared columns (Cost, Runs,
-// Output tokens, Msgs) land at the same table-layout column positions across
-// sections -- alignment without a bespoke grid system. `nameDotClass` is
+// 2026-08-04; alignment fix Reviewer M2, 2026-08-04). `nameDotClass` is
 // optional (workflows show a colored dot next to the name; skills don't).
 // `nameSuffix`, when present, renders a small muted note after the name
 // (used for the "all-time" honesty flag on partial/unscoped rows).
+//
+// M2 background: giving each table its OWN name-column width (so its own
+// columns summed to 100%, avoiding table-layout:fixed's redistribution) was
+// tried and MEASURED to still misalign -- a table-layout:fixed column's
+// pixel position depends on every column BEFORE it, so two tables with
+// different name-column widths (40% vs 32%, needed so each summed to 100%
+// with a different total column count) put "Cost" at a different left edge
+// in each table even though "Cost" itself was the same 15% wide in both
+// (measured 69-103px apart at 900-1200px width). There is no percentage
+// split that satisfies both "every table's own columns sum to 100%" and
+// "the name column is identical width in every table" when the tables have
+// different column counts -- the two constraints are mutually exclusive.
+//
+// The actual fix: every breakdown table renders the SAME NUMBER of columns
+// (headers.length is padded up to `totalColumns` with blank trailing
+// columns), so every table's per-position CSS width in styles.css is
+// literally the same declaration applying to the same column count, and
+// they can never diverge. `totalColumns` is currently 6 (the skills table's
+// column count, the largest breakdown table today); a workflow row with
+// only 5 real columns gets one blank trailing cell.
+const USAGE_BREAKDOWN_TOTAL_COLUMNS = 6;
+
 function renderUsageBreakdownTable(
   container: HTMLElement,
   headers: string[],
   rows: { nameText: string; nameDotClass?: string; nameSuffix?: string; cells: string[] }[]
 ) {
+  const paddedHeaders = headers.slice();
+  while (paddedHeaders.length < USAGE_BREAKDOWN_TOTAL_COLUMNS) paddedHeaders.push("");
+
   const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
   const el = wrap.createEl("table", { cls: "aios-usage-table aios-usage-breakdown-table" });
   const thead = el.createEl("thead");
   const headRow = thead.createEl("tr");
-  for (const h of headers) headRow.createEl("th", { text: h });
+  for (const h of paddedHeaders) headRow.createEl("th", { text: h });
   const tbody = el.createEl("tbody");
   for (const row of rows) {
     const tr = tbody.createEl("tr");
@@ -2272,8 +2321,22 @@ function renderUsageBreakdownTable(
     if (row.nameSuffix) {
       nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: row.nameSuffix });
     }
-    for (const c of row.cells) tr.createEl("td", { text: c });
+    const paddedCells = row.cells.slice();
+    while (paddedCells.length < USAGE_BREAKDOWN_TOTAL_COLUMNS - 1) paddedCells.push("");
+    for (const c of paddedCells) tr.createEl("td", { text: c });
   }
+}
+
+// Honest per-row suffix (Reviewer M3, 2026-08-04): a fully partial row (no
+// byDay at all) shows "(all-time)" since EVERY column is unscoped; a row
+// whose cost/tokens/messages genuinely scoped but whose Runs column fell
+// back (byDay present, but its day buckets carry no `sessions` count) shows
+// the narrower "(runs: all-time)" so the honesty flag doesn't overstate how
+// much of the row is actually unscoped.
+function workflowRowSuffix(row: UsageWorkflowTableRow): string | undefined {
+  if (row.partial) return "(all-time)";
+  if (row.sessionsPartial) return "(runs: all-time)";
+  return undefined;
 }
 
 // Common columns across workflows/skills: Cost, Runs, Output tokens, Msgs --
@@ -2286,7 +2349,7 @@ function renderUsageWorkflowTable(container: HTMLElement, table: UsageWorkflowTa
     table.map((row) => ({
       nameText: " " + row.label,
       nameDotClass: "aios-workflow-color-" + row.colorIndex,
-      nameSuffix: row.partial ? "(all-time)" : undefined,
+      nameSuffix: workflowRowSuffix(row),
       cells: [
         formatUsd(row.costUsd),
         String(row.sessions),
@@ -2329,9 +2392,15 @@ function renderUsageWorkflowsSection(
 ) {
   if (!view.hasData) return;
   const anyPartial = view.table.some((r) => r.partial);
+  const anySessionsPartial = view.table.some((r) => r.sessionsPartial && !r.partial);
+  const honestySuffix = anyPartial
+    ? ", some all-time"
+    : anySessionsPartial
+      ? ", some runs all-time"
+      : "";
   container.createDiv({
     cls: "aios-usage-subhead",
-    text: "Workflows (" + rangeLabel + (anyPartial ? ", some all-time" : "") + ")",
+    text: "Workflows (" + rangeLabel + honestySuffix + ")",
   });
   renderWorkflowSpikeAlerts(container, spikeAlerts);
   renderUsageWorkflowShareBar(container, view.shareBar);
@@ -2389,7 +2458,7 @@ function renderUsageSkillsSection(
     // A pre-Phase-1 export (any skill missing byDay) falls back to all-time
     // totals -- the subhead says so instead of silently mislabeling a 30d
     // number as if it were scoped to the active toggle.
-    const label = view.rangeSupported ? USAGE_RANGE_LABELS[viewState.usageRange] : "All available data";
+    const label = view.rangeSupported ? usageScopedRangeLabel(win) : "All available data";
     section.createDiv({ cls: "aios-usage-subhead", text: "Skills (" + label + ", per invocation)" });
     renderUsageSkillsTable(section, view.rows);
 
@@ -2459,7 +2528,11 @@ function renderUsageTab(
     const projects = computeUsageView(stats, new Date()).projects;
     const spikeAlerts = computeWorkflowSpikes(stats, new Date());
 
-    const sticky = wrap.createDiv();
+    // M1 (Reviewer, 2026-08-04): `sticky` must be a DIRECT child of `wrap`
+    // (.aios-usage-tab) carrying the sticky class itself -- no unclassed
+    // wrapper div in between. See renderUsageStickyHeader's comment for why
+    // that wrapper made position:sticky a no-op.
+    const sticky = wrap.createDiv({ cls: "aios-usage-sticky" });
     const body = wrap.createDiv({ cls: "aios-usage-body" });
 
     const draw = () => {
@@ -2468,18 +2541,23 @@ function renderUsageTab(
 
       const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date());
       renderUsageStickyHeader(sticky, win, viewState, draw);
+      // M4 (Reviewer, 2026-08-04): every subhead/tile below uses the SAME
+      // offset-aware label the sticky header just showed, so a paged-back
+      // window never claims to be "Last 7 days" while the numbers are from
+      // three windows ago.
+      const scopedLabel = usageScopedRangeLabel(win);
 
       renderBudgetWarning(body, budgetGuardrail(todayCostUsd, settings.dailyBudgetUsd));
-      renderUsageTiles(body, computeUsageRangeTiles(win.days, USAGE_RANGE_LABELS[viewState.usageRange]));
+      renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
       renderUsageChartHost(body, win, viewState);
 
       const breakdown = usageFamilyBreakdown(win.days);
       renderUsageLegend(body, breakdown.legend);
-      body.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (" + USAGE_RANGE_LABELS[viewState.usageRange] + ")" });
+      body.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (" + scopedLabel + ")" });
       renderUsageTable(body, breakdown.table);
 
       const workflowsView = computeWorkflowsViewForRange(stats, win.days, viewState.usageRange);
-      renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, USAGE_RANGE_LABELS[viewState.usageRange]);
+      renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, scopedLabel);
 
       renderUsageSkillsSection(body, stats, win, viewState);
 

@@ -23,6 +23,7 @@ import {
   computeUsageRangeTiles,
   computeWorkflowsViewForRange,
   computeSkillsViewForRange,
+  usageScopedRangeLabel,
 } from "./model.mjs";
 
 // --- formatCompactNumber ---
@@ -603,6 +604,120 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   const collapsed = computeSkillsViewForRange(many, windowDays, "7d", false);
   assert.equal(collapsed.rows.length, USAGE_SKILLS_TOP_N, "collapsed shows exactly the top N even after range-scoping");
   assert.equal(collapsed.hiddenCount, 4, "hiddenCount reflects the range-scoped total, not the raw skills.length");
+}
+
+// --- Reviewer M3 regression (2026-08-04): computeWorkflowsViewForRange must
+// not silently zero the Runs column when byDay exists but its day buckets
+// lack a `sessions` key -- exactly the shape Jaymo's LIVE
+// Operations/usage/usage-stats.json has right now (byDay written before
+// this Phase 1 slice added per-day session folding). Cost/tokens/messages
+// ARE genuinely scoped from real byDay data; only Runs falls back, and only
+// Runs gets flagged partial. ---
+{
+  const windowDays = [
+    { date: "2026-07-08" }, { date: "2026-07-09" }, { date: "2026-07-10" },
+    { date: "2026-07-11" }, { date: "2026-07-12" }, { date: "2026-07-13" }, { date: "2026-07-14" },
+  ];
+  const stats = {
+    workflows: [
+      {
+        key: "interactive",
+        label: "Interactive",
+        costUsd: 9422.49,
+        outputTokens: 500000,
+        messages: 6000,
+        sessions: 180,
+        // Pre-Phase-1 byDay shape: cost/outputTokens/messages present, no
+        // `sessions` field on any day bucket at all (matches the live file).
+        byDay: {
+          "2026-07-10": { costUsd: 20, outputTokens: 700, messages: 7 },
+          "2026-07-14": { costUsd: 5, outputTokens: 300, messages: 3 },
+        },
+      },
+    ],
+  };
+
+  const view = computeWorkflowsViewForRange(stats, windowDays, "7d");
+  const row = view.table[0];
+  assert.equal(row.costUsd, 25, "cost still scopes correctly from real byDay data (20 + 5)");
+  assert.equal(row.messages, 10, "messages still scope correctly (7 + 3)");
+  assert.notEqual(row.sessions, 0, "Runs must NOT silently zero out just because byDay lacks a sessions key");
+  assert.equal(row.sessions, 180, "Runs falls back to the workflow's all-time session count, honestly");
+  assert.equal(row.sessionsPartial, true, "the row is flagged so the caller can label the Runs column honestly");
+  assert.equal(row.partial, false, "cost/tokens/messages are real range-scoped data -- the WHOLE row is not partial");
+
+  // A workflow with real per-day sessions data is unaffected (not flagged).
+  const statsWithSessions = {
+    workflows: [
+      {
+        key: "email-router",
+        label: "Email router",
+        costUsd: 50,
+        outputTokens: 1000,
+        messages: 20,
+        sessions: 4,
+        byDay: {
+          "2026-07-10": { costUsd: 50, outputTokens: 1000, messages: 20, sessions: 4 },
+        },
+      },
+    ],
+  };
+  const viewWithSessions = computeWorkflowsViewForRange(statsWithSessions, windowDays, "7d");
+  assert.equal(viewWithSessions.table[0].sessionsPartial, false, "real per-day sessions data -> not flagged partial");
+  assert.equal(viewWithSessions.table[0].sessions, 4, "real per-day sessions data is used as-is, not the all-time fallback");
+
+  // A workflow with zero in-window cost/messages is still dropped even
+  // though its sessions fallback would be a nonzero all-time count (the
+  // zero-activity check must not be fooled by the fallback).
+  const statsZeroActivity = {
+    workflows: [
+      {
+        key: "idle",
+        label: "Idle",
+        costUsd: 30,
+        outputTokens: 300,
+        messages: 3,
+        sessions: 3,
+        byDay: { "2026-06-01": { costUsd: 30, outputTokens: 300, messages: 3 } }, // outside the 7d window
+      },
+    ],
+  };
+  const viewZeroActivity = computeWorkflowsViewForRange(statsZeroActivity, windowDays, "7d");
+  assert.equal(viewZeroActivity.table.length, 0, "zero in-window activity is still dropped despite the sessions fallback");
+}
+
+// --- Reviewer M4 regression (2026-08-04): usageScopedRangeLabel must not
+// claim a period name ("Last 7 days", "Today") once paging has moved the
+// window away from the one ending today -- it should fall back to the
+// window's own concrete date-range label instead. ---
+{
+  // offset 0: the human label is accurate for every range.
+  assert.equal(usageScopedRangeLabel({ range: "7d", offset: 0, label: "Jul 8 - Jul 14" }), "Last 7 days");
+  assert.equal(usageScopedRangeLabel({ range: "1d", offset: 0, label: "Jul 14" }), "Today");
+  assert.equal(usageScopedRangeLabel({ range: "30d", offset: 0, label: "Jun 15 - Jul 14" }), "Last 30 days");
+  assert.equal(usageScopedRangeLabel({ range: "all", offset: 0, label: "Jun 20 - Jul 14" }), "All available");
+
+  // offset != 0: "Last 7 days" / "Today" would be wrong -- fall back to the
+  // window's concrete date range instead of a stale period name.
+  assert.equal(
+    usageScopedRangeLabel({ range: "7d", offset: 1, label: "Jul 1 - Jul 7" }),
+    "Jul 1 - Jul 7",
+    "paged-back 7d window shows its real date range, not 'Last 7 days'"
+  );
+  assert.equal(
+    usageScopedRangeLabel({ range: "1d", offset: 3, label: "Jul 11" }),
+    "Jul 11",
+    "paged-back 1d window shows its real date, not 'Today'"
+  );
+  assert.equal(
+    usageScopedRangeLabel({ range: "30d", offset: 2, label: "Apr 17 - May 16" }),
+    "Apr 17 - May 16",
+    "paged-back 30d window shows its real date range, not 'Last 30 days'"
+  );
+
+  // "all" never pages (computeUsageWindow always returns offset: 0 for it),
+  // so it's included above at offset 0 only -- there is no offset != 0 case
+  // to regress.
 }
 
 console.log("usageModel: all assertions passed");
