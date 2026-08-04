@@ -20,7 +20,7 @@ import { computeOpsMapLayout } from "./model.mjs";
 {
   const manifest = {
     nodes: [
-      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "capture", type: "agent", label: "Capture", path: "Agents/Capture/AGENTS.md" },
       { id: "WS-001-daily-journaling", type: "workflow", label: "WS-001", path: "Operations/Workflows/WS-001-daily-journaling.md" },
     ],
     edges: [
@@ -41,7 +41,7 @@ import { computeOpsMapLayout } from "./model.mjs";
     nodes: [
       { id: "blog-write", type: "skill", label: "blog-write", path: "/skills/blog-write" },
       { id: "blog-outline", type: "skill", label: "blog-outline", path: "/skills/blog-outline" },
-      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "capture", type: "agent", label: "Capture", path: "Agents/Capture/AGENTS.md" },
     ],
     edges: [{ from: "capture", to: "blog-write", viaType: "skill" }],
   };
@@ -85,7 +85,7 @@ import { computeOpsMapLayout } from "./model.mjs";
 {
   const manifest = {
     nodes: [
-      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "capture", type: "agent", label: "Capture", path: "Agents/Capture/AGENTS.md" },
       { id: "brief", type: "skill", label: "brief", path: "/skills/brief" },
       { id: "scope", type: "skill", label: "scope", path: "/skills/scope" },
       { id: "humanizer", type: "skill", label: "humanizer", path: "/skills/humanizer" },
@@ -152,9 +152,9 @@ import { computeOpsMapLayout } from "./model.mjs";
 {
   const manifest = {
     nodes: [
-      { id: "web-builder", type: "agent", label: "Web Builder", path: ".claude/agents/web-builder.md" },
-      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
-      { id: "recruit", type: "agent", label: "Recruit", path: ".claude/agents/recruit.md" },
+      { id: "web-builder", type: "agent", label: "Web Builder", path: "Agents/Web Builder/AGENTS.md" },
+      { id: "capture", type: "agent", label: "Capture", path: "Agents/Capture/AGENTS.md" },
+      { id: "recruit", type: "agent", label: "Recruit", path: "Agents/Recruit/AGENTS.md" },
     ],
     edges: [],
   };
@@ -167,7 +167,7 @@ import { computeOpsMapLayout } from "./model.mjs";
 {
   const manifest = {
     nodes: [
-      { id: "capture", type: "agent", label: "Capture", path: ".claude/agents/capture.md" },
+      { id: "capture", type: "agent", label: "Capture", path: "Agents/Capture/AGENTS.md" },
       { id: "SOP-001-x", type: "sop", label: "SOP-001", path: "Operations/SOPs/SOP-001-x.md" },
     ],
     edges: [],

@@ -8,6 +8,7 @@ import {
   systemSkillUsedByRows,
   systemSkillRowFromNode,
   computeSystemSkillsView,
+  systemSkillsGroupIsOpen,
 } from "./model.mjs";
 
 // --- systemSkillsSuiteFor: prefix match / standalone ---
@@ -71,6 +72,23 @@ assert.ok(SYSTEM_SKILLS_SUITE_PREFIXES.includes("blog-"), "default prefix list i
   assert.equal(row.disableModelInvocation, false, "defaults false when absent");
 }
 
+// --- systemSkillRowFromNode: origin (Reviewer M3, 2026-08-04) ---
+{
+  const node = { id: "superpowers:brainstorming", origin: "plugin", usedBy: [] };
+  const row = systemSkillRowFromNode(node, new Map(), new Map());
+  assert.equal(row.origin, "plugin");
+}
+{
+  const node = { id: "close-session", origin: "command", usedBy: [] };
+  const row = systemSkillRowFromNode(node, new Map(), new Map());
+  assert.equal(row.origin, "command");
+}
+{
+  const node = { id: "blog-write", usedBy: [] }; // pre-M3 node, no origin field
+  const row = systemSkillRowFromNode(node, new Map(), new Map());
+  assert.equal(row.origin, "skills-dir", "defaults to skills-dir for a node written before this field existed");
+}
+
 // --- computeSystemSkillsView: filter, join, group ---
 function makeOpsMap(skillIds) {
   return {
@@ -108,6 +126,35 @@ function makeOpsMap(skillIds) {
   const opsMap = makeOpsMap(["seo-a", "seo-b", "seo-c", "gsd-a", "gsd-b"]);
   const view = computeSystemSkillsView(opsMap, { skills: [] }, "");
   assert.deepEqual(view.groups.map((g) => g.suite), ["seo", "gsd"], "3-member group sorts before 2-member group");
+}
+
+// --- computeSystemSkillsView: filterActive (Reviewer M6, 2026-08-04) ---
+{
+  const opsMap = makeOpsMap(["blog-analyze", "blog-write"]);
+  assert.equal(computeSystemSkillsView(opsMap, { skills: [] }, "").filterActive, false, "empty filter text is not active");
+  assert.equal(computeSystemSkillsView(opsMap, { skills: [] }, "   ").filterActive, false, "whitespace-only filter text is not active");
+  assert.equal(computeSystemSkillsView(opsMap, { skills: [] }, "blog").filterActive, true, "non-empty filter text is active");
+}
+
+// --- systemSkillsGroupIsOpen (Reviewer M6, 2026-08-04): a filtered-in group
+// auto-expands regardless of the user's manual state; a fresh view state
+// (nothing manually expanded, no filter) stays collapsed; clearing the
+// filter falls back to whatever the user had manually expanded, with no
+// mutation performed by the filter itself. ---
+{
+  const expanded = new Set(); // fresh view state
+  assert.equal(systemSkillsGroupIsOpen("gsd", expanded, false), false, "fresh state, no filter: collapsed");
+  assert.equal(systemSkillsGroupIsOpen("gsd", expanded, true), true, "filter active: auto-expanded regardless of manual state");
+  assert.equal(expanded.has("gsd"), false, "the filter never mutates the manual expand set");
+}
+{
+  const expanded = new Set(["gsd"]); // user had manually expanded gsd
+  assert.equal(systemSkillsGroupIsOpen("gsd", expanded, false), true, "manually expanded group stays open with no filter");
+  assert.equal(systemSkillsGroupIsOpen("blog", expanded, false), false, "an untouched group stays collapsed");
+  assert.equal(systemSkillsGroupIsOpen("gsd", expanded, true), true, "still open while filtering");
+  // Filter clears: falls straight back to the untouched manual set.
+  assert.equal(systemSkillsGroupIsOpen("gsd", expanded, false), true, "restored to manually-expanded after the filter clears");
+  assert.equal(systemSkillsGroupIsOpen("blog", expanded, false), false, "restored to manually-collapsed after the filter clears");
 }
 
 console.log("systemSkillsModel: all assertions passed");

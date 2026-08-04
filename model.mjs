@@ -1763,6 +1763,12 @@ export function systemSkillRowFromNode(node, nodesById, usageByKey) {
     disableModelInvocation: Boolean(node.disableModelInvocation),
     path: node.path,
     external: Boolean(node.external),
+    // Reviewer M3 (2026-08-04): "skills-dir" (~/.claude/skills, the original
+    // and still-default source), "plugin" (an installed Claude Code
+    // plugin's own skills/, namespaced pluginName:skillId), or "command"
+    // (the vault's .claude/commands/*.md slash commands). Falls back to
+    // "skills-dir" for a node written before this field existed.
+    origin: node.origin || "skills-dir",
     usedBy: systemSkillUsedByRows(node, nodesById),
     costUsd: usage ? usage.costUsd : null,
     runs: usage ? usage.runs : null,
@@ -1815,7 +1821,27 @@ export function computeSystemSkillsView(opsMap, usageStats, filterText) {
   return {
     totalCount: skillNodes.length,
     filteredCount: rows.length,
+    // Reviewer M6 (2026-08-04): the caller needs to know whether a filter is
+    // ACTUALLY narrowing the set (not just present-but-empty) to decide
+    // whether a group should auto-expand -- see systemSkillsGroupIsOpen.
+    filterActive: needle.length > 0,
     standalone,
     groups,
   };
+}
+
+// Reviewer M6 (2026-08-04, measured): typing a filter updated each group's
+// count in the header but left the group itself collapsed, so a search that
+// matched exactly one skill inside a 65-member group showed "gsd-* (1
+// skill)" with nothing visible underneath until the user also clicked
+// Show. A group present in `view.groups` after filtering ALREADY contains
+// only rows that matched (computeSystemSkillsView filters before grouping),
+// so while a filter is active every surviving group should render open.
+// The caller's `expandedGroups` set (the user's own manual Show/Hide
+// choices) is read but NEVER mutated by the filter -- clearing the filter
+// falls straight back to whatever the user had manually expanded before,
+// with no extra bookkeeping needed to "restore" it.
+export function systemSkillsGroupIsOpen(suite, expandedGroups, filterActive) {
+  if (filterActive) return true;
+  return Boolean(expandedGroups && expandedGroups.has(suite));
 }

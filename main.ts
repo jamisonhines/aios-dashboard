@@ -50,6 +50,7 @@ import {
   computeSkillsViewForRange,
   usageScopedRangeLabel,
   computeSystemSkillsView,
+  systemSkillsGroupIsOpen,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -685,6 +686,7 @@ interface OpsMapNode {
   hasDescription?: boolean; // false when the SKILL.md had no frontmatter description (rendered description is then the "(no description)" fallback)
   disableModelInvocation?: boolean; // SKILL.md frontmatter `disable-model-invocation: true`
   usedBy?: string[]; // node ids with an edge -> this skill (denormalized by export-ops-map.mjs)
+  origin?: "skills-dir" | "plugin" | "command"; // where the skill was discovered (Reviewer M3, 2026-08-04)
 }
 
 interface OpsMapEdge {
@@ -2986,6 +2988,7 @@ interface SystemSkillRow {
   disableModelInvocation: boolean;
   path?: string;
   external: boolean;
+  origin: "skills-dir" | "plugin" | "command";
   usedBy: SystemSkillUsedByRow[];
   costUsd: number | null;
   runs: number | null;
@@ -3001,8 +3004,80 @@ interface SystemSkillGroup {
 interface SystemSkillsView {
   totalCount: number;
   filteredCount: number;
+  filterActive: boolean;
   standalone: SystemSkillRow[];
   groups: SystemSkillGroup[];
+}
+
+// Origin badge text (Reviewer M3, 2026-08-04): short enough to sit inline
+// next to a skill name without dominating the row.
+const SYSTEM_SKILL_ORIGIN_LABELS: Record<SystemSkillRow["origin"], string> = {
+  "skills-dir": "skill",
+  plugin: "plugin",
+  command: "command",
+};
+
+// Cap the "Used by" list per row (Reviewer minor, 2026-08-04, measured): a
+// handful of heavily-referenced skills had 20+ used-by entries, producing
+// 525px-tall rows. Shows the first N inline; the rest sit behind a
+// same-row "+N more" toggle that expands in place (no redraw, no viewState
+// -- purely local DOM state) so the row grows once, deliberately, on click.
+const SYSTEM_SKILLS_USED_BY_VISIBLE = 6;
+
+// Renders the "Used by" cell's content: the first
+// SYSTEM_SKILLS_USED_BY_VISIBLE entries inline, then (Reviewer minor,
+// 2026-08-04) a "+N more" toggle that reveals the rest in place -- pure
+// local DOM state, no redraw, so a 20+-reference row only grows once, on
+// deliberate click, instead of always rendering at full height.
+function renderSystemSkillUsedByCell(app: App, cell: HTMLElement, usedBy: SystemSkillUsedByRow[]) {
+  if (usedBy.length === 0) {
+    cell.createSpan({ cls: "aios-usage-table-name-suffix", text: "–" });
+    return;
+  }
+
+  const renderEntry = (host: HTMLElement, u: SystemSkillUsedByRow) => {
+    if (u.path) {
+      const link = host.createEl("a", { text: u.label, cls: "aios-system-skill-usedby-link", href: "#" });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        app.workspace.openLinkText(u.path as string, "", false);
+      });
+    } else {
+      host.createSpan({ text: u.label });
+    }
+  };
+
+  const visible = usedBy.slice(0, SYSTEM_SKILLS_USED_BY_VISIBLE);
+  const rest = usedBy.slice(SYSTEM_SKILLS_USED_BY_VISIBLE);
+
+  visible.forEach((u, i) => {
+    if (i > 0) cell.createSpan({ text: ", " });
+    renderEntry(cell, u);
+  });
+
+  if (rest.length === 0) return;
+
+  cell.createSpan({ text: ", " });
+  const restHost = cell.createSpan({ cls: "aios-system-skill-usedby-rest" });
+  restHost.hide();
+  rest.forEach((u, i) => {
+    if (i > 0) restHost.createSpan({ text: ", " });
+    renderEntry(restHost, u);
+  });
+
+  const moreBtn = cell.createEl("button", {
+    cls: "aios-system-skill-usedby-more",
+    text: `+${rest.length} more`,
+  });
+  moreBtn.addEventListener("click", () => {
+    if (restHost.isShown()) {
+      restHost.hide();
+      moreBtn.setText(`+${rest.length} more`);
+    } else {
+      restHost.show();
+      moreBtn.setText("less");
+    }
+  });
 }
 
 // Renders one skills table (either the standalone rows or one expanded
@@ -3011,13 +3086,17 @@ interface SystemSkillsView {
 // clickable elements per row (Obsidian openLinkText for internal nodes,
 // plain text for external skill/skill refs), which that helper's
 // text-only cells can't produce -- but it reuses the same table CSS classes
-// and the same USAGE_BREAKDOWN_TOTAL_COLUMNS padding so Cost/Runs still line
-// up in the same column position as every other breakdown table on the page
-// (immediately after the name column, same as Workflow/Skill/Agent tables).
+// so Cost/Runs still line up in the same column position as every other
+// breakdown table on the page (Reviewer M4, 2026-08-04, measured: columns
+// 1/2/3/6 carry no per-table override at all, so they are byte-identical to
+// the shared rule and cannot drift; see styles.css's comment on this
+// table's nth-child(4)/(5) overrides for the measured before/after). Six
+// real headers (Skill/Cost/Runs/Description/Used by/Avg per run) fill
+// USAGE_BREAKDOWN_TOTAL_COLUMNS exactly -- same shape as the Usage tab's own
+// Skills sub-table (renderUsageSkillsTable), which is the closer sibling to
+// compare against, not the 5-header Workflow table.
 function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemSkillRow[]) {
-  const headers = ["Skill", "Cost", "Runs", "Description", "Used by"];
-  const paddedHeaders = headers.slice();
-  while (paddedHeaders.length < USAGE_BREAKDOWN_TOTAL_COLUMNS) paddedHeaders.push("");
+  const headers = ["Skill", "Cost", "Runs", "Description", "Used by", "Avg/run"];
 
   const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
   const el = wrap.createEl("table", {
@@ -3025,7 +3104,7 @@ function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemS
   });
   const thead = el.createEl("thead");
   const headRow = thead.createEl("tr");
-  for (const h of paddedHeaders) headRow.createEl("th", { text: h });
+  for (const h of headers) headRow.createEl("th", { text: h });
 
   const tbody = el.createEl("tbody");
   for (const row of rows) {
@@ -3033,56 +3112,45 @@ function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemS
 
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
     nameCell.createSpan({ text: row.id });
+    nameCell.createSpan({
+      cls: "aios-system-skill-origin-badge aios-system-skill-origin-" + row.origin,
+      text: SYSTEM_SKILL_ORIGIN_LABELS[row.origin],
+    });
     if (row.disableModelInvocation) {
       nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: "(slash-only)" });
     }
 
     tr.createEl("td", { text: row.costUsd == null ? "–" : formatUsd(row.costUsd) });
-    tr.createEl("td", { text: row.runs == null ? "–" : String(row.runs) });
+    tr.createEl("td", { text: row.runs == null ? "–" : formatCompactNumber(row.runs) });
     tr.createEl("td", { cls: "aios-system-skills-desc", text: row.description });
 
     const usedByCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
-    if (row.usedBy.length === 0) {
-      usedByCell.createSpan({ cls: "aios-usage-table-name-suffix", text: "–" });
-    } else {
-      row.usedBy.forEach((u, i) => {
-        if (i > 0) usedByCell.createSpan({ text: ", " });
-        if (u.path) {
-          const link = usedByCell.createEl("a", {
-            text: u.label,
-            cls: "aios-system-skill-usedby-link",
-            href: "#",
-          });
-          link.addEventListener("click", (ev) => {
-            ev.preventDefault();
-            app.workspace.openLinkText(u.path as string, "", false);
-          });
-        } else {
-          usedByCell.createSpan({ text: u.label });
-        }
-      });
-    }
+    renderSystemSkillUsedByCell(app, usedByCell, row.usedBy);
 
-    // Match the padded header count so the grid stays literally the same
-    // shape as every other breakdown table (see USAGE_BREAKDOWN_TOTAL_COLUMNS's
-    // comment on renderUsageBreakdownTable, above).
-    while (tr.children.length < USAGE_BREAKDOWN_TOTAL_COLUMNS) tr.createEl("td");
+    tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
   }
 }
 
 // One generic-suite group (e.g. "gsd-*, 65 skills"): collapsed by default,
 // expands in place on click. Expand state lives in
-// viewState.systemSkillsExpandedGroups so it survives the filter-triggered
-// redraws below.
+// viewState.systemSkillsExpandedGroups (the user's own manual choices) so
+// it survives the filter-triggered redraws below, but the actual open/
+// closed decision routes through the pure systemSkillsGroupIsOpen (Reviewer
+// M6, 2026-08-04): while a filter is active every surviving group (it only
+// survives if it contains a match) renders open regardless of the manual
+// set, and the manual set itself is never written to by the filter -- only
+// by an explicit click on this button -- so clearing the filter always
+// falls straight back to whatever the user had manually expanded before.
 function renderSystemSkillsGroup(
   app: App,
   container: HTMLElement,
   viewState: ViewState,
   group: SystemSkillGroup,
+  filterActive: boolean,
   redraw: () => void
 ) {
   const wrap = container.createDiv({ cls: "aios-system-skills-group" });
-  const isOpen = viewState.systemSkillsExpandedGroups.has(group.suite);
+  const isOpen = systemSkillsGroupIsOpen(group.suite, viewState.systemSkillsExpandedGroups, filterActive);
 
   const head = wrap.createEl("button", {
     cls: "aios-system-skills-group-head" + (isOpen ? " aios-system-skills-group-open" : ""),
@@ -3093,8 +3161,15 @@ function renderSystemSkillsGroup(
   });
   head.createSpan({ cls: "aios-system-skills-group-toggle", text: isOpen ? "Hide" : "Show" });
   head.addEventListener("click", () => {
-    if (isOpen) viewState.systemSkillsExpandedGroups.delete(group.suite);
-    else viewState.systemSkillsExpandedGroups.add(group.suite);
+    // Toggles the MANUAL set regardless of why the group is currently open
+    // (own choice or filter-forced); systemSkillsGroupIsOpen recomputes the
+    // actual render decision from this set plus the current filter state on
+    // the next redraw.
+    if (viewState.systemSkillsExpandedGroups.has(group.suite)) {
+      viewState.systemSkillsExpandedGroups.delete(group.suite);
+    } else {
+      viewState.systemSkillsExpandedGroups.add(group.suite);
+    }
     redraw();
   });
 
@@ -3126,7 +3201,9 @@ function renderSystemSkillsView(
   });
 
   if (view.standalone.length > 0) renderSystemSkillsTable(app, container, view.standalone);
-  for (const group of view.groups) renderSystemSkillsGroup(app, container, viewState, group, redraw);
+  for (const group of view.groups) {
+    renderSystemSkillsGroup(app, container, viewState, group, view.filterActive, redraw);
+  }
 }
 
 // Skills section: owns its own container and redraws itself in place on
@@ -3140,7 +3217,19 @@ function renderSystemSkillsSection(
   stats: UsageStats | null
 ) {
   const section = container.createDiv({ cls: "aios-system-section" });
-  section.createDiv({ cls: "aios-section-eyebrow", text: "Skills" });
+  const headRow = section.createDiv({ cls: "aios-system-section-head" });
+  headRow.createDiv({ cls: "aios-section-eyebrow", text: "Skills" });
+  // Reviewer M5 (2026-08-04): Cost/Runs were bare numbers under headers that
+  // gave no indication of the window they cover, easy to mistake for the
+  // Usage tab's own range-scoped numbers. usage-stats.json's own windowDays
+  // is the honest caption -- these are NOT range-scoped like the Usage tab,
+  // they are simply "everything the exporter's fixed window covers".
+  if (stats && typeof stats.windowDays === "number") {
+    headRow.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `usage: last ${stats.windowDays} day${stats.windowDays === 1 ? "" : "s"}`,
+    });
+  }
 
   const filterWrap = section.createDiv({ cls: "aios-system-skills-filter" });
   const input = filterWrap.createEl("input", {
