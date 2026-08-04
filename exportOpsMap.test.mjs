@@ -9,6 +9,8 @@ import {
   extractAgentRefs,
   extractSkillRefs,
   dedupeEdges,
+  firstSentenceDescription,
+  parseDisableModelInvocation,
 } from "./vault-scripts/export-ops-map.mjs";
 
 // --- token refs: numbered tokens map by id prefix ---
@@ -93,6 +95,65 @@ import {
   assert.equal(out.length, 2, "self-edge dropped, duplicate from/to pair collapsed to one");
   assert.ok(out.some((e) => e.from === "capture" && e.to === "WS-001-daily-journaling"));
   assert.ok(out.some((e) => e.from === "curate" && e.to === "WS-001-daily-journaling"));
+}
+
+// --- firstSentenceDescription: System-browser Skills section (2026-08-04) ---
+{
+  const out = firstSentenceDescription("");
+  assert.equal(out, "(no description)", "empty/missing description falls back");
+}
+{
+  const out = firstSentenceDescription(undefined);
+  assert.equal(out, "(no description)", "undefined description falls back");
+}
+{
+  const out = firstSentenceDescription(
+    "When the user wants to optimize content for AI search engines, get cited by LLMs, or appear in AI-generated answers. Also use when the user mentions 'AI SEO.'"
+  );
+  assert.equal(
+    out,
+    "When the user wants to optimize content for AI search engines, get cited by LLMs, or appear in AI-generated answers.",
+    "takes only the first sentence, drops the rest"
+  );
+}
+{
+  const out = firstSentenceDescription("No terminal punctuation here at all just prose that runs on");
+  assert.equal(
+    out,
+    "No terminal punctuation here at all just prose that runs on",
+    "no sentence-ending punctuation: whole (short) text is kept"
+  );
+}
+{
+  const longNoSentence = "word ".repeat(40).trim(); // 199 chars, no punctuation
+  const out = firstSentenceDescription(longNoSentence);
+  assert.ok(out.length <= 141, "hard-truncated when the single sentence exceeds maxLen");
+  assert.ok(out.endsWith("…"), "truncation adds an ellipsis");
+  assert.ok(!out.includes("  "), "truncation does not leave a partial trailing word glued together");
+}
+{
+  const out = firstSentenceDescription("Multi   \n  space   text.  Second sentence.");
+  assert.equal(out, "Multi space text.", "whitespace is collapsed before sentence-splitting");
+}
+
+// --- parseDisableModelInvocation: tolerant of absence and casing ---
+{
+  assert.equal(parseDisableModelInvocation({}), false, "missing key defaults to false");
+  assert.equal(
+    parseDisableModelInvocation({ "disable-model-invocation": "true" }),
+    true,
+    "string 'true' is truthy"
+  );
+  assert.equal(
+    parseDisableModelInvocation({ "disable-model-invocation": "TRUE" }),
+    true,
+    "case-insensitive"
+  );
+  assert.equal(
+    parseDisableModelInvocation({ "disable-model-invocation": "false" }),
+    false,
+    "string 'false' is falsy"
+  );
 }
 
 console.log("exportOpsMap: all assertions passed");

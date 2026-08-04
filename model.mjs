@@ -1704,3 +1704,118 @@ export function computeSpendSparkline(stats, nowDate) {
 
   return { hasData: true, values, points, max };
 }
+
+// ---------------------------------------------------------------------------
+// System tab: Skills section (build 2026-08-04). Pure view-model joining
+// ops-map.json's skill nodes (name, description, disable-model-invocation
+// flag, usedBy edges) with usage-stats.json's optional skills array (cost,
+// runs, avg/run) by key. No Obsidian deps; unit tested in
+// systemSkillsModel.test.mjs. This is a NEW region -- keep additions here
+// separate from the Usage tab's own skills sub-table above
+// (computeSkillsView / computeSkillsViewForRange), which a sibling branch is
+// actively touching.
+// ---------------------------------------------------------------------------
+
+// Generic multi-skill suites collapse into an expandable group with a count
+// so 150+ rows stay scannable; anything not matching one of these prefixes
+// is treated as standalone/business-critical and always lists openly.
+export const SYSTEM_SKILLS_SUITE_PREFIXES = [
+  "blog-",
+  "firecrawl-",
+  "gsd-",
+  "seo-",
+  "printing-press-",
+];
+
+// Returns the suite's display label ("blog", "gsd", ...) for a skill id that
+// matches one of the known generic-suite prefixes, or null for a standalone
+// skill.
+export function systemSkillsSuiteFor(id, prefixes = SYSTEM_SKILLS_SUITE_PREFIXES) {
+  const hit = prefixes.find((p) => id.startsWith(p));
+  return hit ? hit.slice(0, -1) : null;
+}
+
+// Resolves one skill node's `usedBy` id list (agents/SOPs/workflows/skills
+// that reference it, from export-ops-map.mjs's edge denormalization) into
+// display rows: a label plus an optional vault-relative path for internal
+// nodes (openLinkText candidates) -- external/skill targets carry no path,
+// so the caller renders them as plain text.
+export function systemSkillUsedByRows(node, nodesById) {
+  const ids = node.usedBy || [];
+  return ids.map((id) => {
+    const target = nodesById.get(id);
+    return {
+      id,
+      label: target ? target.label || id : id,
+      path: target && !target.external ? target.path : undefined,
+    };
+  });
+}
+
+// Joins one ops-map skill node with its usage-stats row (if any). Returns
+// null (not a dash) for cost/runs/avgCostUsd when no usage row exists, so
+// the renderer decides the dash presentation, not the model.
+export function systemSkillRowFromNode(node, nodesById, usageByKey) {
+  const usage = usageByKey.get(node.id);
+  return {
+    id: node.id,
+    description: node.description || "(no description)",
+    disableModelInvocation: Boolean(node.disableModelInvocation),
+    path: node.path,
+    external: Boolean(node.external),
+    usedBy: systemSkillUsedByRows(node, nodesById),
+    costUsd: usage ? usage.costUsd : null,
+    runs: usage ? usage.runs : null,
+    avgCostUsd: usage ? usage.avgCostUsd : null,
+  };
+}
+
+function systemSkillRowMatchesFilter(row, needle) {
+  if (!needle) return true;
+  if (row.id.toLowerCase().includes(needle)) return true;
+  if (row.description.toLowerCase().includes(needle)) return true;
+  return row.usedBy.some((u) => u.label.toLowerCase().includes(needle));
+}
+
+/**
+ * Full System tab Skills-section view: filters ops-map's skill nodes by
+ * `filterText` (id, description, or used-by label, case-insensitive), joins
+ * usage, then splits into `standalone` rows (render openly) and `groups`
+ * (generic suites, render collapsed behind a count until expanded), sorted
+ * largest-group-first. Both `standalone` and each group's `rows` are sorted
+ * alphabetically by id so the table order is stable across re-renders.
+ */
+export function computeSystemSkillsView(opsMap, usageStats, filterText) {
+  const nodes = (opsMap && opsMap.nodes) || [];
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+  const usageByKey = new Map(((usageStats && usageStats.skills) || []).map((s) => [s.key, s]));
+  const skillNodes = nodes.filter((n) => n.type === "skill");
+
+  const needle = (filterText || "").trim().toLowerCase();
+  const rows = skillNodes
+    .map((n) => systemSkillRowFromNode(n, nodesById, usageByKey))
+    .filter((row) => systemSkillRowMatchesFilter(row, needle))
+    .sort((a, b) => a.id.localeCompare(b.id));
+
+  const groupsByLabel = new Map();
+  const standalone = [];
+  for (const row of rows) {
+    const suite = systemSkillsSuiteFor(row.id);
+    if (suite) {
+      if (!groupsByLabel.has(suite)) groupsByLabel.set(suite, []);
+      groupsByLabel.get(suite).push(row);
+    } else {
+      standalone.push(row);
+    }
+  }
+  const groups = [...groupsByLabel.entries()]
+    .map(([suite, groupRows]) => ({ suite, rows: groupRows, count: groupRows.length }))
+    .sort((a, b) => b.count - a.count || a.suite.localeCompare(b.suite));
+
+  return {
+    totalCount: skillNodes.length,
+    filteredCount: rows.length,
+    standalone,
+    groups,
+  };
+}

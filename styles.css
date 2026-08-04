@@ -2053,3 +2053,125 @@
   background: var(--aios-surface);
   color: var(--aios-text);
 }
+
+/* ---------------------------------------------------------------------
+   System tab (build 2026-08-04): Skills section this phase; Agents and
+   Workflows/SOPs land as sibling .aios-system-section blocks in later
+   phases. New region -- does not touch the Usage-tab rules above it
+   (.aios-usage-table-wrap / .aios-usage-table / .aios-usage-breakdown-table
+   etc. are reused read-only via the shared class names, never edited).
+--------------------------------------------------------------------- */
+.aios-dashboard-root .aios-system-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.aios-dashboard-root .aios-system-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.aios-dashboard-root .aios-system-section-placeholder .aios-empty {
+  padding: 10px 0;
+}
+
+.aios-dashboard-root .aios-system-skills-filter {
+  display: flex;
+}
+.aios-dashboard-root .aios-system-skills-filter-input {
+  width: 100%;
+  max-width: 420px;
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  transition: border-color 140ms ease;
+}
+.aios-dashboard-root .aios-system-skills-filter-input:focus {
+  outline: none;
+  border-color: var(--aios-accent);
+}
+.aios-dashboard-root .aios-system-skills-count {
+  color: var(--aios-faint);
+  font-size: 11px;
+}
+.aios-dashboard-root .aios-system-skills-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Text-heavy columns (Description, Used by) need left-align and normal
+   wrapping, unlike the numeric-column default the shared
+   .aios-usage-breakdown-table rules assume (right-aligned, narrow). Scoped
+   to the combined class pair for specificity so these win regardless of
+   source order, without editing the shared rule itself. Column 1 (name)
+   and columns 2-3 (Cost, Runs) keep the shared widths/alignment so those
+   stay lined up with every other breakdown table on the page. */
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(2),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(3),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(3) {
+  width: 9%;
+}
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(4) {
+  width: 30%;
+  text-align: left;
+  white-space: normal;
+}
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(5),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(5) {
+  width: 14%;
+  text-align: left;
+  white-space: normal;
+}
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(6),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(6) {
+  width: 6%;
+}
+.aios-dashboard-root .aios-system-skills-desc {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-system-skill-usedby-link {
+  color: var(--aios-accent-hi);
+  text-decoration: none;
+}
+.aios-dashboard-root .aios-system-skill-usedby-link:hover {
+  text-decoration: underline;
+}
+
+.aios-dashboard-root .aios-system-skills-group {
+  border: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-system-skills-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--aios-surface);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+  color: var(--aios-text);
+  font-size: 12px;
+}
+.aios-dashboard-root .aios-system-skills-group-head:hover {
+  background: var(--aios-surface-2);
+}
+.aios-dashboard-root .aios-system-skills-group-open {
+  border-bottom: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-system-skills-group-label {
+  font-weight: 500;
+}
+.aios-dashboard-root .aios-system-skills-group-toggle {
+  color: var(--aios-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}

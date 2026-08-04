@@ -127,6 +127,34 @@ function vaultRelative(vaultRoot, filePath) {
   return path.relative(vaultRoot, filePath).split(path.sep).join("/");
 }
 
+// System-browser Skills section (2026-08-04): a skill's raw frontmatter
+// `description:` is often a long run-on paragraph written for the model, not
+// a human scanning a table. Take the first sentence (up to and including the
+// first ., !, or ? followed by whitespace/end) and hard-truncate it if it is
+// still too long for a table row. Falls back to "(no description)" so the
+// plugin never has to special-case a missing/empty description.
+export function firstSentenceDescription(raw, maxLen = 140) {
+  const text = (raw || "").replace(/\s+/g, " ").trim();
+  if (!text) return "(no description)";
+  const m = text.match(/^(.*?[.!?])(\s|$)/);
+  let sentence = m ? m[1].trim() : text;
+  if (sentence.length > maxLen) {
+    const cut = sentence.slice(0, maxLen - 1);
+    const lastSpace = cut.lastIndexOf(" ");
+    sentence = (lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trim() + "…";
+  }
+  return sentence;
+}
+
+// Claude Code's SKILL.md frontmatter uses `disable-model-invocation: true` to
+// mean "slash-command only, the model will never auto-invoke this skill".
+// Tolerant of the key being absent (most skills) or spelled with any casing.
+export function parseDisableModelInvocation(fm) {
+  const raw = fm["disable-model-invocation"];
+  if (raw === undefined) return false;
+  return /^(true|yes)$/i.test(String(raw).trim());
+}
+
 // ---------------------------------------------------------------------------
 // Node builders
 // ---------------------------------------------------------------------------
@@ -166,7 +194,9 @@ async function buildSkillNode(skill) {
     id: skill.id,
     type: "skill",
     label: skill.id,
-    description: (fm.description || "").replace(/\s+/g, " ").trim().slice(0, 140),
+    description: firstSentenceDescription(fm.description),
+    hasDescription: Boolean((fm.description || "").trim()),
+    disableModelInvocation: parseDisableModelInvocation(fm),
     path: skill.dir,
     external: true,
     body: text,
@@ -307,6 +337,20 @@ async function main() {
   }
 
   const edges = buildEdges(nodes);
+
+  // System-browser Skills section (2026-08-04): denormalize "who references
+  // this skill" onto the skill node itself so the plugin doesn't have to
+  // scan the full edges array per row. Every edge targeting a skill node is
+  // always viaType "skill" (see buildEdges), so no viaType filter is needed
+  // here.
+  const usedByMap = new Map();
+  for (const e of edges) {
+    if (!usedByMap.has(e.to)) usedByMap.set(e.to, []);
+    usedByMap.get(e.to).push(e.from);
+  }
+  for (const n of nodes) {
+    if (n.type === "skill") n.usedBy = usedByMap.get(n.id) || [];
+  }
 
   // Strip the body field before writing output (internal-only, used for edge
   // extraction).
