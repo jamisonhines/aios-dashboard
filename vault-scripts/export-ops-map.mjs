@@ -347,7 +347,10 @@ export function extractSkillRefs(body, skillIds) {
   const found = new Set();
   for (const id of skillIds) {
     const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?<![\\w/])[\`/]${escaped}\\b`);
+    // Trailing guard is (?![\w-]) not \b: with \b, a mention of `blog-write`
+    // also matches the bare skill id "blog" (the g->- transition is a word
+    // boundary), producing false hub-skill edges.
+    const re = new RegExp(`(?<![\\w/])[\`/]${escaped}(?![\\w-])`);
     if (re.test(body)) found.add(id);
   }
   return found;
