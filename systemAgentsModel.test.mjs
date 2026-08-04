@@ -7,7 +7,32 @@ import {
   systemAgentRowFromNode,
   computeSystemAgentsView,
   computeAvailableHiresView,
+  systemGenericSubagentRowFromUsage,
 } from "./model.mjs";
+
+// --- systemGenericSubagentRowFromUsage: plain pass-through, no contract
+// fields at all (Dispatch escalation, 2026-08-05) ---
+{
+  const row = systemGenericSubagentRowFromUsage({
+    key: "general-purpose",
+    label: "general-purpose",
+    costUsd: 1072.53,
+    runs: 556,
+    avgCostUsd: 1.93,
+  });
+  assert.deepEqual(row, {
+    id: "general-purpose",
+    label: "general-purpose",
+    costUsd: 1072.53,
+    runs: 556,
+    avgCostUsd: 1.93,
+  });
+}
+{
+  // Missing label falls back to the key, same convention as skills.
+  const row = systemGenericSubagentRowFromUsage({ key: "unknown", costUsd: 1, runs: 1, avgCostUsd: 1 });
+  assert.equal(row.label, "unknown");
+}
 
 // --- systemAgentWiredToRows: splits edges by target type, ignores
 // agent-to-agent and guideline edges (the task asks for workflows/SOPs/
@@ -99,7 +124,11 @@ import {
   const usageStats = {
     agents: [
       { key: "coder", costUsd: 177.14, runs: 41, avgCostUsd: 4.32 },
-      { key: "general-purpose", costUsd: 1072.53, runs: 556, avgCostUsd: 1.93 }, // non-roster: must not appear as a row
+      // Non-roster: must not appear in `rows` (the roster table), but MUST
+      // appear in `genericSubagents` (Dispatch escalation, 2026-08-05) --
+      // real spend, no specialist contract behind it.
+      { key: "general-purpose", label: "general-purpose", costUsd: 1072.53, runs: 556, avgCostUsd: 1.93 },
+      { key: "unknown", label: "unknown", costUsd: 3.5, runs: 2, avgCostUsd: 1.75 },
     ],
   };
   const view = computeSystemAgentsView(opsMap, usageStats);
@@ -110,11 +139,36 @@ import {
   assert.equal(coderRow.wiredTo.skills.map((s) => s.id).join(","), "gsd-executor");
   const captureRow = view.rows.find((r) => r.id === "capture");
   assert.equal(captureRow.costUsd, null, "no usage-stats row for capture in this fixture -> null, i.e. a dash");
+
+  assert.equal(view.genericSubagents.length, 2, "both non-roster usage entries land in genericSubagents");
+  assert.deepEqual(
+    view.genericSubagents.map((r) => r.id),
+    ["general-purpose", "unknown"],
+    "sorted by cost descending"
+  );
+  assert.equal(view.genericSubagents[0].costUsd, 1072.53);
+  assert.ok(
+    Math.abs(view.genericSubagentsCostUsd - (1072.53 + 3.5)) < 1e-9,
+    "genericSubagentsCostUsd sums exactly the non-roster rows"
+  );
 }
 {
   const view = computeSystemAgentsView({ nodes: [], edges: [] }, null);
   assert.equal(view.totalCount, 0);
   assert.deepEqual(view.rows, [], "empty ops map and missing usage stats do not throw");
+  assert.deepEqual(view.genericSubagents, [], "no usage stats at all -> empty genericSubagents, not a throw");
+  assert.equal(view.genericSubagentsCostUsd, 0);
+}
+{
+  // Every usage entry matches a roster agent: genericSubagents is empty, not
+  // fabricated.
+  const opsMap = {
+    nodes: [{ id: "coder", type: "agent", label: "Coder" }],
+    edges: [],
+  };
+  const usageStats = { agents: [{ key: "coder", label: "coder", costUsd: 10, runs: 1, avgCostUsd: 10 }] };
+  const view = computeSystemAgentsView(opsMap, usageStats);
+  assert.deepEqual(view.genericSubagents, [], "all usage matched to roster -> nothing left over");
 }
 
 // --- computeAvailableHiresView: pass-through with a graceful fallback shape

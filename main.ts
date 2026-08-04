@@ -2268,7 +2268,11 @@ function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
     const tr = tbody.createEl("tr");
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
     nameCell.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + row.family });
-    nameCell.createSpan({ text: " " + row.label });
+    nameCell.createSpan({
+      cls: "aios-usage-table-name-text",
+      text: row.label,
+      attr: { title: row.label },
+    });
     tr.createEl("td", { text: String(row.messages) });
     tr.createEl("td", { text: formatCompactNumber(row.inputTokens) });
     tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
@@ -2361,7 +2365,11 @@ function renderUsageBreakdownTable(
     const tr = tbody.createEl("tr");
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
     if (row.nameDotClass) nameCell.createSpan({ cls: "aios-usage-dot " + row.nameDotClass });
-    nameCell.createSpan({ text: row.nameText });
+    nameCell.createSpan({
+      cls: "aios-usage-table-name-text",
+      text: row.nameText,
+      attr: { title: row.nameText.trim() },
+    });
     if (row.nameSuffix) {
       nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: row.nameSuffix });
     }
@@ -3071,6 +3079,9 @@ interface SystemSkillGroup {
   suite: string;
   rows: SystemSkillRow[];
   count: number;
+  // Cheap nit (Reviewer, 2026-08-05): ":" for a colon-namespaced plugin
+  // suite (superpowers:*), "-" for a generic hyphen-prefixed suite (gsd-*).
+  separator: string;
 }
 
 interface SystemSkillsView {
@@ -3183,7 +3194,7 @@ function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemS
     const tr = tbody.createEl("tr");
 
     const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
-    nameCell.createSpan({ text: row.id });
+    nameCell.createSpan({ cls: "aios-usage-table-name-text", text: row.id, attr: { title: row.id } });
     nameCell.createSpan({
       cls: "aios-system-skill-origin-badge aios-system-skill-origin-" + row.origin,
       text: SYSTEM_SKILL_ORIGIN_LABELS[row.origin],
@@ -3229,7 +3240,7 @@ function renderSystemSkillsGroup(
   });
   head.createSpan({
     cls: "aios-system-skills-group-label",
-    text: `${group.suite}-* (${group.count} skill${group.count === 1 ? "" : "s"})`,
+    text: `${group.suite}${group.separator}* (${group.count} skill${group.count === 1 ? "" : "s"})`,
   });
   head.createSpan({ cls: "aios-system-skills-group-toggle", text: isOpen ? "Hide" : "Show" });
   head.addEventListener("click", () => {
@@ -3361,9 +3372,23 @@ interface SystemAgentRow {
   avgCostUsd: number | null;
 }
 
+// Dispatch escalation (2026-08-05): a usage-stats.agents entry with no
+// matching roster agent node -- general-purpose, Explore, workflow-subagent,
+// Plan, seo-*, claude-code-guide, the exporter's UNKNOWN_AGENT_TYPE fallback,
+// and any future non-roster subagent_type. Real spend, no contract behind it.
+interface SystemGenericSubagentRow {
+  id: string;
+  label: string;
+  costUsd: number;
+  runs: number;
+  avgCostUsd: number;
+}
+
 interface SystemAgentsView {
   totalCount: number;
   rows: SystemAgentRow[];
+  genericSubagents: SystemGenericSubagentRow[];
+  genericSubagentsCostUsd: number;
 }
 
 // Flattens the three wired-to buckets into one ordered list (workflows,
@@ -3394,15 +3419,20 @@ function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemA
     if (row.path) {
       const link = nameCell.createEl("a", {
         text: row.label,
-        cls: "aios-system-skill-usedby-link aios-system-agent-name-link",
+        cls: "aios-system-skill-usedby-link aios-system-agent-name-link aios-usage-table-name-text",
         href: "#",
+        attr: { title: row.label },
       });
       link.addEventListener("click", (ev) => {
         ev.preventDefault();
         app.workspace.openLinkText(row.path as string, "", false);
       });
     } else {
-      nameCell.createSpan({ cls: "aios-system-agent-name", text: row.label });
+      nameCell.createSpan({
+        cls: "aios-system-agent-name aios-usage-table-name-text",
+        text: row.label,
+        attr: { title: row.label },
+      });
     }
     nameCell.createSpan({
       cls: "aios-system-skill-origin-badge aios-system-agent-model-badge",
@@ -3418,6 +3448,23 @@ function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemA
 
     tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
   }
+}
+
+// "Generic subagents" (Dispatch escalation, 2026-08-05): visually distinct
+// from the roster table -- no name links, no model badge, no wired-to
+// column (there's no contract to link) -- so it reads as "real spend, not a
+// specialist" rather than an incomplete roster row. Reuses the same
+// breakdown-table column grid (Cost/Runs/Avg-per-run line up with every
+// other table on the page) via the shared padded-columns helper.
+function renderSystemGenericSubagentsTable(container: HTMLElement, rows: SystemGenericSubagentRow[]) {
+  renderUsageBreakdownTable(
+    container,
+    ["Subagent type", "Cost", "Runs", "", "", "Avg/run"],
+    rows.map((row) => ({
+      nameText: row.label,
+      cells: [formatUsd(row.costUsd), formatCompactNumber(row.runs), "", "", formatUsd(row.avgCostUsd)],
+    }))
+  );
 }
 
 // "Available hires": SOP-001 reference patterns not currently on the
@@ -3484,6 +3531,29 @@ function renderSystemAgentsSection(
       text: `${view.totalCount} hired agent${view.totalCount === 1 ? "" : "s"}`,
     });
     renderSystemAgentsTable(app, section, view.rows);
+  }
+
+  // "Generic subagents" (Dispatch escalation, 2026-08-05): non-roster
+  // subagent spend (general-purpose, Explore, workflow-subagent, Plan,
+  // seo-*, claude-code-guide, ...) is often the MAJORITY of delegated
+  // dollars -- rendering it below the roster, visually distinct (no
+  // contract link, no model badge), keeps the section's totals honest
+  // instead of implying the 8 roster agents are the whole story.
+  if (view.genericSubagents.length > 0) {
+    const genericSection = container.createDiv({
+      cls: "aios-system-section aios-system-generic-subagents",
+    });
+    const genericHead = genericSection.createDiv({ cls: "aios-system-section-head" });
+    genericHead.createDiv({ cls: "aios-section-eyebrow", text: "Generic subagents" });
+    genericHead.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `${formatUsd(view.genericSubagentsCostUsd)} total, no specialist contract behind these`,
+    });
+    genericSection.createDiv({
+      cls: "aios-system-generic-subagents-note",
+      text: "Not part of the hired roster -- real spend from generic Task-tool dispatches (subagent_type not matched to a specialist).",
+    });
+    renderSystemGenericSubagentsTable(genericSection, view.genericSubagents);
   }
 
   renderSystemAvailableHires(app, container, manifest);

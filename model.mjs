@@ -1824,9 +1824,24 @@ export function computeSystemSkillsView(opsMap, usageStats, filterText) {
       standalone.push(row);
     }
   }
-  const groups = [...groupsByLabel.entries()]
-    .map(([suite, groupRows]) => ({ suite, rows: groupRows, count: groupRows.length }))
-    .sort((a, b) => b.count - a.count || a.suite.localeCompare(b.suite));
+  // Cheap nit (Reviewer, 2026-08-05): a suite with exactly ONE matching skill
+  // gets no benefit from the collapse-behind-a-count UI (there's nothing to
+  // hide), so it renders as a plain standalone row instead of a 1-member
+  // group header. `separator` (":" for a colon-namespaced plugin suite like
+  // superpowers:*, "-" for a generic hyphen-prefixed suite like gsd-*) is
+  // derived once here from the group's own first row id, so the renderer
+  // never has to re-guess it from suite text alone.
+  const groups = [];
+  for (const [suite, groupRows] of groupsByLabel) {
+    if (groupRows.length === 1) {
+      standalone.push(...groupRows);
+      continue;
+    }
+    const separator = groupRows[0].id.startsWith(suite + ":") ? ":" : "-";
+    groups.push({ suite, rows: groupRows, count: groupRows.length, separator });
+  }
+  standalone.sort((a, b) => a.id.localeCompare(b.id));
+  groups.sort((a, b) => b.count - a.count || a.suite.localeCompare(b.suite));
 
   return {
     totalCount: skillNodes.length,
@@ -1914,20 +1929,51 @@ export function systemAgentRowFromNode(node, edges, nodesById, usageByKey) {
 }
 
 /**
+ * One row in the "Generic subagents" group: a usage-stats.agents entry whose
+ * key does NOT match any roster agent node id (general-purpose, Explore,
+ * workflow-subagent, Plan, seo-*, claude-code-guide, the UNKNOWN_AGENT_TYPE
+ * fallback, and any future non-roster subagent_type). No contract, no
+ * model badge, no wired-to -- these are real dollars with no specialist
+ * behind them, plain cost/runs/avg rows only.
+ */
+export function systemGenericSubagentRowFromUsage(usage) {
+  return {
+    id: usage.key,
+    label: usage.label || usage.key,
+    costUsd: usage.costUsd,
+    runs: usage.runs,
+    avgCostUsd: usage.avgCostUsd,
+  };
+}
+
+/**
  * Full System tab Agents-section view: one row per roster agent node
  * (ops-map's type:"agent" nodes), in the order export-ops-map.mjs discovered
- * them (alphabetical by id, since agentFiles comes from a sorted readdir).
+ * them (alphabetical by id, since agentFiles comes from a sorted readdir),
+ * plus a `genericSubagents` group (Dispatch escalation, 2026-08-05): every
+ * usage-stats.agents entry that does NOT match a roster agent id, sorted by
+ * cost descending, so the section's totals stop hiding the (often majority)
+ * share of delegated spend that has no specialist contract behind it.
  */
 export function computeSystemAgentsView(opsMap, usageStats) {
   const nodes = (opsMap && opsMap.nodes) || [];
   const edges = (opsMap && opsMap.edges) || [];
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
-  const usageByKey = new Map(((usageStats && usageStats.agents) || []).map((a) => [a.key, a]));
+  const usageEntries = (usageStats && usageStats.agents) || [];
+  const usageByKey = new Map(usageEntries.map((a) => [a.key, a]));
   const agentNodes = nodes.filter((n) => n.type === "agent");
+  const rosterIds = new Set(agentNodes.map((n) => n.id));
+
+  const genericSubagents = usageEntries
+    .filter((a) => !rosterIds.has(a.key))
+    .map(systemGenericSubagentRowFromUsage)
+    .sort((a, b) => b.costUsd - a.costUsd);
 
   return {
     totalCount: agentNodes.length,
     rows: agentNodes.map((n) => systemAgentRowFromNode(n, edges, nodesById, usageByKey)),
+    genericSubagents,
+    genericSubagentsCostUsd: genericSubagents.reduce((sum, r) => sum + r.costUsd, 0),
   };
 }
 

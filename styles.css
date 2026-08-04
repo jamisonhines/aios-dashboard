@@ -1468,25 +1468,29 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  box-sizing: border-box;
+  min-width: 0;
 }
-/* Reviewer cosmetic minor, phase-2 report, 2026-08-04: a short id like
-   "close-session" was wrapping onto two lines at narrow widths even though
-   it easily fits on one -- the flex row (nowrap by default) never wraps
-   ITSELF, but the id's own text (no white-space rule of its own) would wrap
-   at its internal hyphen once the row's combined content (id + badge)
-   exceeded the fixed-width name column. Pinning the id to one line with an
-   ellipsis fallback, and pinning every OTHER child (badge, suffix) to its
-   natural width via flex-shrink:0, means only the id ever truncates -- the
-   badge never gets pushed to a second line again. */
-.aios-dashboard-root .aios-usage-table-name > span:first-child,
-.aios-dashboard-root .aios-usage-table-name > a:first-child {
+/* Reviewer M1/M2 (2026-08-05): a positional (:first-child /
+   :not(:first-child)) split broke as soon as a table's first flex child
+   was something OTHER than the name (renderUsageTable's dot-prefixed rows
+   put the colored dot first, the name second) -- the ellipsis rule landed
+   on the dot, and flex-shrink:0 landed on the NAME, which then overflowed
+   past the cell edge instead of ever truncating (measured: 2/5 workflow
+   names bled past their column at 900px). Every render site now tags the
+   actual name element with this class explicitly, so the rule targets the
+   right element regardless of what else shares the row (a dot, a badge, a
+   suffix) or in what order. `title` is set in main.ts on every such
+   element unconditionally (not just when actually truncated), so the full
+   name is always hover-recoverable, truncated or not. */
+.aios-dashboard-root .aios-usage-table-name-text {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  min-width: 0;
 }
-.aios-dashboard-root .aios-usage-table-name > span:not(:first-child),
-.aios-dashboard-root .aios-usage-table-name > a:not(:first-child) {
+.aios-dashboard-root .aios-usage-table-name > .aios-usage-dot {
   flex-shrink: 0;
 }
 
@@ -1509,6 +1513,27 @@
   width: 32%;
   text-align: left;
 }
+/* Reviewer M1 (2026-08-05, measured): a table-related box (the parent
+   <tr>) requires a table-cell child; a real <td> styled display:flex is no
+   longer an "internal table" display, so the browser inserts an ANONYMOUS
+   table-cell wrapper around it to satisfy that structural rule. The
+   anonymous wrapper is correctly sized to 32% of the table by the rule
+   above (that's a real DOM/CSS-generated box, invisible to devtools'
+   element picker, which is why this was easy to miss) -- but the selector
+   above ALSO still matches the actual <td> inside it (selectors match DOM
+   structure, not computed display), so `width: 32%` applies a SECOND time,
+   now resolving against the anonymous wrapper's width as ITS containing
+   block: 32% of 32% ~= 10%, exactly the ~126px-in-a-318px-column shrinkage
+   measured. This rule cancels the compounding by pinning the flex td to
+   fill whatever containing block it actually lands in. Needs to OUTRANK
+   the rule above on specificity (not just source order), since both target
+   the same element and the browser doesn't care which one "looks more
+   like the real fix" -- the extra `tbody` type selector does that (4
+   selector components vs. 3 above), so this never depends on staying
+   later in the file. */
+.aios-dashboard-root .aios-usage-breakdown-table tbody td.aios-usage-table-name {
+  width: 100%;
+}
 .aios-dashboard-root .aios-usage-breakdown-table th:nth-child(2),
 .aios-dashboard-root .aios-usage-breakdown-table td:nth-child(2),
 .aios-dashboard-root .aios-usage-breakdown-table th:nth-child(3),
@@ -1530,6 +1555,7 @@
   font-size: 10.5px;
   margin-left: 6px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------------------
@@ -2250,6 +2276,7 @@
   border: 1px solid var(--aios-border);
   color: var(--aios-faint);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .aios-dashboard-root .aios-system-skill-origin-plugin {
   color: var(--aios-p3);
@@ -2349,4 +2376,21 @@
 .aios-dashboard-root .aios-system-available-hires-ask {
   color: var(--aios-faint);
   font-style: italic;
+}
+
+/* "Generic subagents" (Dispatch escalation, 2026-08-05): visually distinct
+   from the roster table -- a dashed top border and a muted eyebrow set it
+   apart as "real spend, no specialist" rather than a 9th roster row. */
+.aios-dashboard-root .aios-system-generic-subagents {
+  border-top: 1px dashed var(--aios-border);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+.aios-dashboard-root .aios-system-generic-subagents .aios-section-eyebrow {
+  color: var(--aios-faint);
+}
+.aios-dashboard-root .aios-system-generic-subagents-note {
+  color: var(--aios-faint);
+  font-size: 11px;
+  margin-bottom: 8px;
 }

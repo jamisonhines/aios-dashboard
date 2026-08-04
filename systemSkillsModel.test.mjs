@@ -111,15 +111,42 @@ function makeOpsMap(skillIds) {
   };
 }
 {
+  // gsd-executor is the ONLY gsd- id here, so it collapses into standalone
+  // rather than forming a 1-member group (cheap nit, 2026-08-05: a singleton
+  // suite gets no benefit from the collapse-behind-a-count UI).
   const opsMap = makeOpsMap(["blog-analyze", "blog-write", "gsd-executor", "vgb-email-router", "onlysky-cli"]);
   const view = computeSystemSkillsView(opsMap, { skills: [] }, "");
   assert.equal(view.totalCount, 5);
   assert.equal(view.filteredCount, 5);
-  assert.equal(view.standalone.length, 2, "vgb-email-router + onlysky-cli are standalone");
-  assert.equal(view.groups.length, 2, "blog + gsd groups formed");
+  assert.equal(
+    view.standalone.length,
+    3,
+    "vgb-email-router + onlysky-cli + the singleton gsd-executor are all standalone"
+  );
+  assert.deepEqual(
+    view.standalone.map((r) => r.id),
+    ["gsd-executor", "onlysky-cli", "vgb-email-router"],
+    "standalone rows (including collapsed singletons) stay alphabetically sorted"
+  );
+  assert.equal(view.groups.length, 1, "only the 2-member blog group remains a group");
   const blogGroup = view.groups.find((g) => g.suite === "blog");
   assert.equal(blogGroup.count, 2);
   assert.deepEqual(blogGroup.rows.map((r) => r.id), ["blog-analyze", "blog-write"], "group rows sorted alphabetically");
+  assert.equal(blogGroup.separator, "-", "hyphen-prefixed suite reports a hyphen separator");
+}
+{
+  // Colon-namespaced plugin suites (2+ members) report a colon separator so
+  // the header renders "superpowers:*", not "superpowers-*".
+  const opsMap = makeOpsMap(["superpowers:brainstorming", "superpowers:writing-plans", "skill-creator:main"]);
+  const view = computeSystemSkillsView(opsMap, { skills: [] }, "");
+  assert.equal(view.groups.length, 1, "the 2-member superpowers suite forms a group");
+  const spGroup = view.groups.find((g) => g.suite === "superpowers");
+  assert.equal(spGroup.separator, ":", "colon-namespaced suite reports a colon separator");
+  assert.equal(
+    view.standalone.some((r) => r.id === "skill-creator:main"),
+    true,
+    "the 1-member skill-creator suite collapses into standalone even though it's colon-namespaced"
+  );
 }
 {
   const opsMap = makeOpsMap(["blog-analyze", "blog-write", "vgb-email-router"]);

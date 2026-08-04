@@ -401,12 +401,20 @@ export async function parseTranscript(filePath, cutoffMs) {
   return { entries, firstUserContent, firstCommand, skillRuns: segmenter.finish(), attributionAgent };
 }
 
-// Falls back to this bucket when a subagent transcript carries no
-// attributionAgent field (observed on this machine: API-error-only
-// transcripts with zero usage, and a non-transcript `workflows/*/journal.jsonl`
-// orchestration log that is never a real subagent transcript in the first
-// place). Kept as a named export so the agents-array UI can render it
-// honestly instead of silently dropping the spend.
+// Falls back to this bucket when a subagent transcript carries in-window
+// usage entries but no attributionAgent field. Reviewer Minor 2 (2026-08-05):
+// this comment previously undersold it as a zero-cost edge case (the only
+// instance found in a first pass was an API-error transcript with 0 usage,
+// which never even reaches this fold -- applyAgentTranscript's own
+// zero-entries guard returns before creating a bucket at all). In practice
+// this bucket can carry REAL, nonzero cost: any future subagent dispatch
+// path that doesn't set attributionAgent (a host/CLI version change, a
+// dispatch mechanism other than the Task tool) lands here rather than being
+// silently dropped. It is treated exactly like any other non-roster type
+// (general-purpose, Explore, workflow-subagent, Plan, seo-*,
+// claude-code-guide): computeSystemAgentsView (model.mjs) surfaces it in the
+// System tab's "Generic subagents" group, not hidden and not merged into a
+// roster row it doesn't belong to.
 export const UNKNOWN_AGENT_TYPE = "unknown";
 
 /**
