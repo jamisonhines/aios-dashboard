@@ -38,7 +38,15 @@ async function listMdFiles(dir, { skipIndex = true } = {}) {
     .sort();
 }
 
-async function listSkillDirs(dir) {
+// Tolerant of symlinked skill dirs (~/.claude/skills commonly holds
+// symlinks into ~/.agents/skills/, e.g. all firecrawl-* skills): a
+// readdir() Dirent's isDirectory()/isSymbolicLink() reflect the entry's OWN
+// type, never the symlink target, so a plain isDirectory() check silently
+// drops every symlinked skill. For any entry that is a symlink, fs.stat()
+// (which follows symlinks, unlike fs.lstat()) resolves whether the TARGET
+// is a directory; a broken symlink's stat() throws and the entry is
+// skipped, same as any other non-skill entry.
+export async function listSkillDirs(dir) {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -47,13 +55,62 @@ async function listSkillDirs(dir) {
   }
   const out = [];
   for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const skillFile = path.join(dir, e.name, "SKILL.md");
+    const entryPath = path.join(dir, e.name);
+    let isDir = e.isDirectory();
+    if (!isDir && e.isSymbolicLink()) {
+      try {
+        const stat = await fs.stat(entryPath);
+        isDir = stat.isDirectory();
+      } catch {
+        continue; // broken symlink target
+      }
+    }
+    if (!isDir) continue;
+    const skillFile = path.join(entryPath, "SKILL.md");
     try {
       await fs.access(skillFile);
-      out.push({ id: e.name, dir: path.join(dir, e.name), skillFile });
+      out.push({ id: e.name, dir: entryPath, skillFile });
     } catch {
       // Not a skill dir (no SKILL.md); skip.
+    }
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// Reviewer M3 (2026-08-04): the spec says "every installed skill" -- that
+// includes skills shipped BY installed Claude Code plugins (superpowers,
+// context-mode, etc.), which live under
+// ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/*/SKILL.md,
+// not under ~/.claude/skills at all. installed_plugins.json is the
+// authoritative "what's actually installed" list (its installPath per
+// plugin already resolves the version); ids are namespaced pluginName:
+// skillId to match how the host itself invokes them
+// (/superpowers:brainstorming) and how usage-stats.json keys their runs,
+// so the usage join in buildSkillNode's caller works without extra mapping.
+// Tolerant of a missing/malformed installed_plugins.json (a host with no
+// plugins installed) and of an install whose skills/ folder doesn't exist.
+export async function listPluginSkillDirs(
+  pluginsRoot = path.join(os.homedir(), ".claude", "plugins")
+) {
+  let installed;
+  try {
+    installed = JSON.parse(await fs.readFile(path.join(pluginsRoot, "installed_plugins.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+  for (const [key, installs] of Object.entries(installed.plugins || {})) {
+    const pluginName = key.split("@")[0];
+    for (const inst of installs || []) {
+      if (!inst || !inst.installPath) continue;
+      const dirs = await listSkillDirs(path.join(inst.installPath, "skills"));
+      for (const d of dirs) {
+        const id = `${pluginName}:${d.id}`;
+        if (seen.has(id)) continue; // same plugin installed at >1 scope
+        seen.add(id);
+        out.push({ id, dir: d.dir, skillFile: d.skillFile, pluginName });
+      }
     }
   }
   return out.sort((a, b) => a.id.localeCompare(b.id));
@@ -127,21 +184,75 @@ function vaultRelative(vaultRoot, filePath) {
   return path.relative(vaultRoot, filePath).split(path.sep).join("/");
 }
 
+// System-browser Skills section (2026-08-04): a skill's raw frontmatter
+// `description:` is often a long run-on paragraph written for the model, not
+// a human scanning a table. Take the first sentence (up to and including the
+// first ., !, or ? followed by whitespace/end) and hard-truncate it if it is
+// still too long for a table row. Falls back to "(no description)" so the
+// plugin never has to special-case a missing/empty description.
+export function firstSentenceDescription(raw, maxLen = 140) {
+  const text = (raw || "").replace(/\s+/g, " ").trim();
+  if (!text) return "(no description)";
+  const m = text.match(/^(.*?[.!?])(\s|$)/);
+  let sentence = m ? m[1].trim() : text;
+  if (sentence.length > maxLen) {
+    const cut = sentence.slice(0, maxLen - 1);
+    const lastSpace = cut.lastIndexOf(" ");
+    sentence = (lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trim() + "…";
+  }
+  return sentence;
+}
+
+// Claude Code's SKILL.md frontmatter uses `disable-model-invocation: true` to
+// mean "slash-command only, the model will never auto-invoke this skill".
+// Tolerant of the key being absent (most skills) or spelled with any casing.
+export function parseDisableModelInvocation(fm) {
+  const raw = fm["disable-model-invocation"];
+  if (raw === undefined) return false;
+  return /^(true|yes)$/i.test(String(raw).trim());
+}
+
 // ---------------------------------------------------------------------------
 // Node builders
 // ---------------------------------------------------------------------------
 
-async function buildAgentNode(vaultRoot, filePath) {
+// Reviewer M2 (2026-08-04, measured): the .claude/agents/*.md shim is a thin
+// Claude-Code-specific pointer (frontmatter + "go read your real contract"
+// instructions) with almost no skill names in it, so building agent nodes
+// from the shim ALONE meant agents contributed ~zero skill edges. The real
+// wiring -- which skills/SOPs/workflows/agents an agent actually names --
+// lives in the real contract at Agents/<Name>/AGENTS.md (and any sibling
+// top-level *.md in that folder, e.g. a future NOTES.md). This now reads
+// BOTH: the shim (still the id/label/description source, since that's the
+// Claude-Code-specific metadata) and the contract folder (folded into the
+// same node's body, so buildEdges finds refs from either source), and
+// points the node's `path` at the real contract file -- Obsidian cannot
+// open a dot-directory, so the shim was never a clickable link target
+// anyway. Falls back to the shim's own path only if no contract file
+// exists yet (a newly hired agent mid-onboarding, before Recruit has
+// written its Agents/<Name>/AGENTS.md).
+export async function buildAgentNode(vaultRoot, filePath) {
   const id = path.basename(filePath, ".md");
-  const text = await readCapped(filePath);
-  const fm = parseFrontmatter(text);
+  const shimText = await readCapped(filePath);
+  const fm = parseFrontmatter(shimText);
+  const label = fm.name ? prettifyStem(fm.name) : prettifyStem(id);
+
+  const contractDir = path.join(vaultRoot, "Agents", label);
+  const contractFiles = await listMdFiles(contractDir);
+  const primaryContract =
+    contractFiles.find((f) => path.basename(f) === "AGENTS.md") || contractFiles[0];
+  let contractText = "";
+  for (const f of contractFiles) contractText += "\n" + (await readCapped(f));
+
   return {
     id,
     type: "agent",
-    label: fm.name ? prettifyStem(fm.name) : prettifyStem(id),
+    label,
     description: (fm.description || "").slice(0, 140),
-    path: vaultRelative(vaultRoot, filePath),
-    body: text,
+    path: primaryContract
+      ? vaultRelative(vaultRoot, primaryContract)
+      : vaultRelative(vaultRoot, filePath),
+    body: shimText + "\n" + contractText,
   };
 }
 
@@ -159,16 +270,25 @@ async function buildOpsNode(vaultRoot, filePath, type) {
   };
 }
 
-async function buildSkillNode(skill) {
+// `origin` (Reviewer M3, 2026-08-04) distinguishes where a skill node came
+// from -- "skills-dir" (~/.claude/skills, the default and original source),
+// "plugin" (an installed Claude Code plugin's own skills/ folder, namespaced
+// pluginName:skillId), or "command" (the vault's .claude/commands/*.md
+// slash commands, e.g. close-session). The plugin renders a badge per
+// origin so 220+ skills from three different sources stay legible.
+async function buildSkillNode(skill, origin = "skills-dir") {
   const text = await readCapped(skill.skillFile);
   const fm = parseFrontmatter(text);
   return {
     id: skill.id,
     type: "skill",
-    label: skill.id,
-    description: (fm.description || "").replace(/\s+/g, " ").trim().slice(0, 140),
+    label: skill.label || skill.id,
+    description: firstSentenceDescription(fm.description),
+    hasDescription: Boolean((fm.description || "").trim()),
+    disableModelInvocation: parseDisableModelInvocation(fm),
     path: skill.dir,
     external: true,
+    origin,
     body: text,
   };
 }
@@ -211,10 +331,26 @@ export function extractAgentRefs(body, agentIds) {
 // Skill refs require a backtick or forward slash immediately before the name
 // (real refs are always written as `skill-name` or /skill-name); this kills
 // prose false positives like "brief", "scope", "blog" as ordinary words.
+//
+// Reviewer M1 (2026-08-04, measured): the delimiter alone was not enough --
+// a bare "/name" also matches inside a PATH FRAGMENT ("skills/blog-google/
+// scripts") and inside a URL ("https://example.com/blog"), because in both
+// cases the character directly before the "/" is a word character (or
+// another "/" for a URL's "//"). A negative lookbehind closes both holes at
+// once: the delimiter itself must NOT be preceded by a word character or
+// another "/". That leaves every genuine invocation form intact --
+// start-of-line/start-of-string "/skill-name", whitespace-preceded
+// "Invoke /skill-name", and any backtick form ("`skill-name`",
+// "`/skill-name`") -- since none of those put a word char or "/" directly
+// before the matched delimiter.
 export function extractSkillRefs(body, skillIds) {
   const found = new Set();
   for (const id of skillIds) {
-    const re = new RegExp(`[\`/]${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Trailing guard is (?![\w-]) not \b: with \b, a mention of `blog-write`
+    // also matches the bare skill id "blog" (the g->- transition is a word
+    // boundary), producing false hub-skill edges.
+    const re = new RegExp(`(?<![\\w/])[\`/]${escaped}(?![\\w-])`);
     if (re.test(body)) found.add(id);
   }
   return found;
@@ -286,13 +422,27 @@ async function main() {
   const workflowFiles = await listMdFiles(path.join(vaultRoot, "Operations", "Workflows"));
   const guidelineFiles = await listMdFiles(path.join(vaultRoot, "Operations", "Guidelines"));
   const skillDirs = await listSkillDirs(skillsRoot);
+  const pluginSkillDirs = await listPluginSkillDirs();
+  // Slash commands (Reviewer M3, 2026-08-04): the vault's .claude/commands/
+  // *.md are also skills from the host's point of view -- close-session is
+  // the clearest example (real usage-stats spend, no ~/.claude/skills entry
+  // at all). Keyed by bare basename to match usage-stats.json's run key
+  // (SKILL_COMMAND_RE strips the leading "/").
+  const commandFiles = await listMdFiles(path.join(vaultRoot, ".claude", "commands"));
+  const commandSkills = commandFiles.map((f) => ({
+    id: path.basename(f, ".md"),
+    dir: vaultRelative(vaultRoot, f),
+    skillFile: f,
+  }));
 
   const nodes = [];
   for (const f of agentFiles) nodes.push(await buildAgentNode(vaultRoot, f));
   for (const f of sopFiles) nodes.push(await buildOpsNode(vaultRoot, f, "sop"));
   for (const f of workflowFiles) nodes.push(await buildOpsNode(vaultRoot, f, "workflow"));
   for (const f of guidelineFiles) nodes.push(await buildOpsNode(vaultRoot, f, "guideline"));
-  for (const s of skillDirs) nodes.push(await buildSkillNode(s));
+  for (const s of skillDirs) nodes.push(await buildSkillNode(s, "skills-dir"));
+  for (const s of pluginSkillDirs) nodes.push(await buildSkillNode(s, "plugin"));
+  for (const s of commandSkills) nodes.push(await buildSkillNode(s, "command"));
 
   // Canonical skill registry: skills it mentions (same context-scoped matcher)
   // are flagged registered:true on their node. The registry itself is not a
@@ -307,6 +457,20 @@ async function main() {
   }
 
   const edges = buildEdges(nodes);
+
+  // System-browser Skills section (2026-08-04): denormalize "who references
+  // this skill" onto the skill node itself so the plugin doesn't have to
+  // scan the full edges array per row. Every edge targeting a skill node is
+  // always viaType "skill" (see buildEdges), so no viaType filter is needed
+  // here.
+  const usedByMap = new Map();
+  for (const e of edges) {
+    if (!usedByMap.has(e.to)) usedByMap.set(e.to, []);
+    usedByMap.get(e.to).push(e.from);
+  }
+  for (const n of nodes) {
+    if (n.type === "skill") n.usedBy = usedByMap.get(n.id) || [];
+  }
 
   // Strip the body field before writing output (internal-only, used for edge
   // extraction).

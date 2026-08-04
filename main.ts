@@ -49,6 +49,8 @@ import {
   computeWorkflowsViewForRange,
   computeSkillsViewForRange,
   usageScopedRangeLabel,
+  computeSystemSkillsView,
+  systemSkillsGroupIsOpen,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -180,7 +182,7 @@ interface Progress {
 // Per-view UI state that must survive the debounced live re-render (v1 was stateless).
 // Not persisted to disk: resets to defaults when Obsidian restarts.
 interface ViewState {
-  activeTab: "today" | "projects" | "tasks" | "usage" | "opsmap";
+  activeTab: "today" | "projects" | "tasks" | "usage" | "opsmap" | "system";
   activeStatus: string | null; // null = first non-empty status group
   activeCategory: string; // "all" | bucket slug | "inbox"
   expanded: Set<string>; // keys of expanded project cards and phase cards
@@ -189,6 +191,11 @@ interface ViewState {
   usageRange: "1d" | "7d" | "30d" | "all"; // Usage chart window length (build 2.8; "all" added Phase 1 System-browser)
   usageOffset: number; // windows back from the one ending today (0 = current)
   systemsOpen: boolean; // right-side systems drawer visibility (build 2.8)
+  // System tab: Skills section (build 2026-08-04). Filter text and which
+  // generic-suite groups are expanded persist across re-renders, same
+  // pattern as `expanded` above for project/phase cards.
+  systemSkillsFilter: string;
+  systemSkillsExpandedGroups: Set<string>;
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -205,6 +212,8 @@ function makeViewState(): ViewState {
     usageRange: "7d",
     usageOffset: 0,
     systemsOpen: false,
+    systemSkillsFilter: "",
+    systemSkillsExpandedGroups: new Set(),
   };
 }
 
@@ -673,6 +682,11 @@ interface OpsMapNode {
   path: string;
   external?: boolean;
   registered?: boolean; // skill listed in Operations/skill-registry.md
+  // Skill-only fields (System tab Skills section, build 2026-08-04):
+  hasDescription?: boolean; // false when the SKILL.md had no frontmatter description (rendered description is then the "(no description)" fallback)
+  disableModelInvocation?: boolean; // SKILL.md frontmatter `disable-model-invocation: true`
+  usedBy?: string[]; // node ids with an edge -> this skill (denormalized by export-ops-map.mjs)
+  origin?: "skills-dir" | "plugin" | "command"; // where the skill was discovered (Reviewer M3, 2026-08-04)
 }
 
 interface OpsMapEdge {
@@ -2988,6 +3002,341 @@ function renderOpsMapTab(app: App, container: HTMLElement, settings: AiosDashboa
   });
 }
 
+// ---------------------------------------------------------------------------
+// System tab (build 2026-08-04): a generated, human-readable view of what is
+// installed -- Skills first (this phase), Agents and Workflows/SOPs land as
+// sibling sections in later phases (see the task spec's build order). Reads
+// the SAME ops-map.json + usage-stats.json the Ops-map and Usage tabs already
+// load (loadOpsMap/loadUsageStats, unmodified) -- no new exporter wiring
+// needed in the plugin layer, only a new view over existing data.
+//
+// This whole region is intentionally new/separate code: a sibling branch is
+// concurrently touching the Usage tab's own render functions above
+// (renderUsageTab and everything under its "Usage tab" banner comment), so
+// nothing here calls into or edits that region except via the already-stable
+// renderUsageBreakdownTable/USAGE_BREAKDOWN_TOTAL_COLUMNS/formatUsd/
+// formatCompactNumber helpers, which this code only reads from, never edits.
+// ---------------------------------------------------------------------------
+
+interface SystemSkillUsedByRow {
+  id: string;
+  label: string;
+  path?: string;
+}
+
+interface SystemSkillRow {
+  id: string;
+  description: string;
+  disableModelInvocation: boolean;
+  path?: string;
+  external: boolean;
+  origin: "skills-dir" | "plugin" | "command";
+  usedBy: SystemSkillUsedByRow[];
+  costUsd: number | null;
+  runs: number | null;
+  avgCostUsd: number | null;
+}
+
+interface SystemSkillGroup {
+  suite: string;
+  rows: SystemSkillRow[];
+  count: number;
+}
+
+interface SystemSkillsView {
+  totalCount: number;
+  filteredCount: number;
+  filterActive: boolean;
+  standalone: SystemSkillRow[];
+  groups: SystemSkillGroup[];
+}
+
+// Origin badge text (Reviewer M3, 2026-08-04): short enough to sit inline
+// next to a skill name without dominating the row.
+const SYSTEM_SKILL_ORIGIN_LABELS: Record<SystemSkillRow["origin"], string> = {
+  "skills-dir": "skill",
+  plugin: "plugin",
+  command: "command",
+};
+
+// Cap the "Used by" list per row (Reviewer minor, 2026-08-04, measured): a
+// handful of heavily-referenced skills had 20+ used-by entries, producing
+// 525px-tall rows. Shows the first N inline; the rest sit behind a
+// same-row "+N more" toggle that expands in place (no redraw, no viewState
+// -- purely local DOM state) so the row grows once, deliberately, on click.
+const SYSTEM_SKILLS_USED_BY_VISIBLE = 6;
+
+// Renders the "Used by" cell's content: the first
+// SYSTEM_SKILLS_USED_BY_VISIBLE entries inline, then (Reviewer minor,
+// 2026-08-04) a "+N more" toggle that reveals the rest in place -- pure
+// local DOM state, no redraw, so a 20+-reference row only grows once, on
+// deliberate click, instead of always rendering at full height.
+function renderSystemSkillUsedByCell(app: App, cell: HTMLElement, usedBy: SystemSkillUsedByRow[]) {
+  if (usedBy.length === 0) {
+    cell.createSpan({ cls: "aios-usage-table-name-suffix", text: "–" });
+    return;
+  }
+
+  const renderEntry = (host: HTMLElement, u: SystemSkillUsedByRow) => {
+    if (u.path) {
+      const link = host.createEl("a", { text: u.label, cls: "aios-system-skill-usedby-link", href: "#" });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        app.workspace.openLinkText(u.path as string, "", false);
+      });
+    } else {
+      host.createSpan({ text: u.label });
+    }
+  };
+
+  const visible = usedBy.slice(0, SYSTEM_SKILLS_USED_BY_VISIBLE);
+  const rest = usedBy.slice(SYSTEM_SKILLS_USED_BY_VISIBLE);
+
+  visible.forEach((u, i) => {
+    if (i > 0) cell.createSpan({ text: ", " });
+    renderEntry(cell, u);
+  });
+
+  if (rest.length === 0) return;
+
+  cell.createSpan({ text: ", " });
+  const restHost = cell.createSpan({ cls: "aios-system-skill-usedby-rest" });
+  restHost.hide();
+  rest.forEach((u, i) => {
+    if (i > 0) restHost.createSpan({ text: ", " });
+    renderEntry(restHost, u);
+  });
+
+  const moreBtn = cell.createEl("button", {
+    cls: "aios-system-skill-usedby-more",
+    text: `+${rest.length} more`,
+  });
+  moreBtn.addEventListener("click", () => {
+    if (restHost.isShown()) {
+      restHost.hide();
+      moreBtn.setText(`+${rest.length} more`);
+    } else {
+      restHost.show();
+      moreBtn.setText("less");
+    }
+  });
+}
+
+// Renders one skills table (either the standalone rows or one expanded
+// group's rows). Deliberately does NOT call the shared
+// renderUsageBreakdownTable helper -- the "Used by" column needs real
+// clickable elements per row (Obsidian openLinkText for internal nodes,
+// plain text for external skill/skill refs), which that helper's
+// text-only cells can't produce -- but it reuses the same table CSS classes
+// so Cost/Runs still line up in the same column position as every other
+// breakdown table on the page (Reviewer M4, 2026-08-04, measured: columns
+// 1/2/3/6 carry no per-table override at all, so they are byte-identical to
+// the shared rule and cannot drift; see styles.css's comment on this
+// table's nth-child(4)/(5) overrides for the measured before/after). Six
+// real headers (Skill/Cost/Runs/Description/Used by/Avg per run) fill
+// USAGE_BREAKDOWN_TOTAL_COLUMNS exactly -- same shape as the Usage tab's own
+// Skills sub-table (renderUsageSkillsTable), which is the closer sibling to
+// compare against, not the 5-header Workflow table.
+function renderSystemSkillsTable(app: App, container: HTMLElement, rows: SystemSkillRow[]) {
+  const headers = ["Skill", "Cost", "Runs", "Description", "Used by", "Avg/run"];
+
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", {
+    cls: "aios-usage-table aios-usage-breakdown-table aios-system-skills-table",
+  });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of headers) headRow.createEl("th", { text: h });
+
+  const tbody = el.createEl("tbody");
+  for (const row of rows) {
+    const tr = tbody.createEl("tr");
+
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    nameCell.createSpan({ text: row.id });
+    nameCell.createSpan({
+      cls: "aios-system-skill-origin-badge aios-system-skill-origin-" + row.origin,
+      text: SYSTEM_SKILL_ORIGIN_LABELS[row.origin],
+    });
+    if (row.disableModelInvocation) {
+      nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: "(slash-only)" });
+    }
+
+    tr.createEl("td", { text: row.costUsd == null ? "–" : formatUsd(row.costUsd) });
+    tr.createEl("td", { text: row.runs == null ? "–" : formatCompactNumber(row.runs) });
+    tr.createEl("td", { cls: "aios-system-skills-desc", text: row.description });
+
+    const usedByCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
+    renderSystemSkillUsedByCell(app, usedByCell, row.usedBy);
+
+    tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
+  }
+}
+
+// One generic-suite group (e.g. "gsd-*, 65 skills"): collapsed by default,
+// expands in place on click. Expand state lives in
+// viewState.systemSkillsExpandedGroups (the user's own manual choices) so
+// it survives the filter-triggered redraws below, but the actual open/
+// closed decision routes through the pure systemSkillsGroupIsOpen (Reviewer
+// M6, 2026-08-04): while a filter is active every surviving group (it only
+// survives if it contains a match) renders open regardless of the manual
+// set, and the manual set itself is never written to by the filter -- only
+// by an explicit click on this button -- so clearing the filter always
+// falls straight back to whatever the user had manually expanded before.
+function renderSystemSkillsGroup(
+  app: App,
+  container: HTMLElement,
+  viewState: ViewState,
+  group: SystemSkillGroup,
+  filterActive: boolean,
+  redraw: () => void
+) {
+  const wrap = container.createDiv({ cls: "aios-system-skills-group" });
+  const isOpen = systemSkillsGroupIsOpen(group.suite, viewState.systemSkillsExpandedGroups, filterActive);
+
+  const head = wrap.createEl("button", {
+    cls: "aios-system-skills-group-head" + (isOpen ? " aios-system-skills-group-open" : ""),
+  });
+  head.createSpan({
+    cls: "aios-system-skills-group-label",
+    text: `${group.suite}-* (${group.count} skill${group.count === 1 ? "" : "s"})`,
+  });
+  head.createSpan({ cls: "aios-system-skills-group-toggle", text: isOpen ? "Hide" : "Show" });
+  head.addEventListener("click", () => {
+    // Toggles the MANUAL set regardless of why the group is currently open
+    // (own choice or filter-forced); systemSkillsGroupIsOpen recomputes the
+    // actual render decision from this set plus the current filter state on
+    // the next redraw.
+    if (viewState.systemSkillsExpandedGroups.has(group.suite)) {
+      viewState.systemSkillsExpandedGroups.delete(group.suite);
+    } else {
+      viewState.systemSkillsExpandedGroups.add(group.suite);
+    }
+    redraw();
+  });
+
+  if (isOpen) renderSystemSkillsTable(app, wrap, group.rows);
+}
+
+function renderSystemSkillsView(
+  app: App,
+  container: HTMLElement,
+  viewState: ViewState,
+  view: SystemSkillsView,
+  redraw: () => void
+) {
+  if (view.totalCount === 0) {
+    renderEmptyState(
+      container,
+      "No skills yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+    );
+    return;
+  }
+  if (view.filteredCount === 0) {
+    renderEmptyState(container, `No skills match "${viewState.systemSkillsFilter}".`);
+    return;
+  }
+
+  container.createDiv({
+    cls: "aios-system-skills-count",
+    text: `${view.filteredCount} of ${view.totalCount} skill${view.totalCount === 1 ? "" : "s"}`,
+  });
+
+  if (view.standalone.length > 0) renderSystemSkillsTable(app, container, view.standalone);
+  for (const group of view.groups) {
+    renderSystemSkillsGroup(app, container, viewState, group, view.filterActive, redraw);
+  }
+}
+
+// Skills section: owns its own container and redraws itself in place on
+// filter input or group toggle (same self-contained-redraw pattern as
+// renderUsageSkillsSection above, but for a different container/state).
+function renderSystemSkillsSection(
+  app: App,
+  container: HTMLElement,
+  viewState: ViewState,
+  manifest: OpsMapManifest,
+  stats: UsageStats | null
+) {
+  const section = container.createDiv({ cls: "aios-system-section" });
+  const headRow = section.createDiv({ cls: "aios-system-section-head" });
+  headRow.createDiv({ cls: "aios-section-eyebrow", text: "Skills" });
+  // Reviewer M5 (2026-08-04): Cost/Runs were bare numbers under headers that
+  // gave no indication of the window they cover, easy to mistake for the
+  // Usage tab's own range-scoped numbers. usage-stats.json's own windowDays
+  // is the honest caption -- these are NOT range-scoped like the Usage tab,
+  // they are simply "everything the exporter's fixed window covers".
+  if (stats && typeof stats.windowDays === "number") {
+    headRow.createDiv({
+      cls: "aios-system-skills-usage-caption",
+      text: `usage: last ${stats.windowDays} day${stats.windowDays === 1 ? "" : "s"}`,
+    });
+  }
+
+  const filterWrap = section.createDiv({ cls: "aios-system-skills-filter" });
+  const input = filterWrap.createEl("input", {
+    cls: "aios-system-skills-filter-input",
+    attr: { type: "text", placeholder: "Filter by name, description, or used by…" },
+  });
+  input.value = viewState.systemSkillsFilter;
+
+  const tableHost = section.createDiv({ cls: "aios-system-skills-body" });
+
+  const redraw = () => {
+    tableHost.empty();
+    const view: SystemSkillsView = computeSystemSkillsView(manifest, stats, viewState.systemSkillsFilter);
+    renderSystemSkillsView(app, tableHost, viewState, view, redraw);
+  };
+
+  input.addEventListener("input", () => {
+    viewState.systemSkillsFilter = input.value;
+    redraw();
+  });
+
+  redraw();
+}
+
+// System tab: async load (ops-map + usage-stats, both already-loaded shapes
+// via the existing loaders) + render. Renders a hint when ops-map.json has
+// not been generated yet, same convention as the Ops map tab.
+function renderSystemTab(
+  app: App,
+  container: HTMLElement,
+  settings: AiosDashboardSettings,
+  viewState: ViewState
+) {
+  const wrap = container.createDiv({ cls: "aios-system-tab" });
+  wrap.createDiv({ cls: "aios-empty", text: "Loading system map..." });
+  Promise.all([loadOpsMap(app, settings.opsMapPath), loadUsageStats(app, settings.usageStatsPath)]).then(
+    ([manifest, stats]) => {
+      wrap.empty();
+      if (!manifest) {
+        renderEmptyState(
+          wrap,
+          "No system data yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+        );
+        return;
+      }
+
+      renderSystemSkillsSection(app, wrap, viewState, manifest, stats);
+
+      // Sibling sections (build order per the task spec): Agents next
+      // (runs/cost + wired-to skills/workflows), then Workflows/SOPs with
+      // firing counts. Placeholders keep the tab's final section order
+      // visible now so later phases only fill these in, never restructure.
+      const agentsSection = wrap.createDiv({ cls: "aios-system-section aios-system-section-placeholder" });
+      agentsSection.createDiv({ cls: "aios-section-eyebrow", text: "Agents" });
+      renderEmptyState(agentsSection, "Coming in a later phase.");
+
+      const workflowsSection = wrap.createDiv({
+        cls: "aios-system-section aios-system-section-placeholder",
+      });
+      workflowsSection.createDiv({ cls: "aios-section-eyebrow", text: "Workflows & SOPs" });
+      renderEmptyState(workflowsSection, "Coming in a later phase.");
+    }
+  );
+}
+
 function renderDashboard(
   app: App,
   root: HTMLElement,
@@ -3123,8 +3472,9 @@ function renderDashboard(
     tasks: { primary: "list-checks" },
     usage: { primary: "chart-column", fallback: "bar-chart-3" },
     opsmap: { primary: "waypoints", fallback: "git-fork" },
+    system: { primary: "layers", fallback: "layout-list" },
   };
-  const mkTab = (id: "today" | "projects" | "tasks" | "usage" | "opsmap", label: string) => {
+  const mkTab = (id: "today" | "projects" | "tasks" | "usage" | "opsmap" | "system", label: string) => {
     const t = tabs.createEl("button", {
       cls: "aios-tab" + (viewState.activeTab === id ? " aios-tab-active" : ""),
     });
@@ -3142,6 +3492,7 @@ function renderDashboard(
   mkTab("tasks", "Tasks");
   mkTab("usage", "Usage");
   mkTab("opsmap", "Ops map");
+  mkTab("system", "System");
 
   // ----- Tab body -----
   const body = root.createDiv({ cls: "aios-tab-body" });
@@ -3151,6 +3502,8 @@ function renderDashboard(
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else if (viewState.activeTab === "usage") {
     renderUsageTab(app, body, settings, viewState);
+  } else if (viewState.activeTab === "system") {
+    renderSystemTab(app, body, settings, viewState);
   } else if (viewState.activeTab === "opsmap") {
     renderOpsMapTab(app, body, settings);
   } else {

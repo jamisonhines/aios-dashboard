@@ -2098,3 +2098,177 @@
   background: var(--aios-surface);
   color: var(--aios-text);
 }
+
+/* ---------------------------------------------------------------------
+   System tab (build 2026-08-04): Skills section this phase; Agents and
+   Workflows/SOPs land as sibling .aios-system-section blocks in later
+   phases. New region -- does not touch the Usage-tab rules above it
+   (.aios-usage-table-wrap / .aios-usage-table / .aios-usage-breakdown-table
+   etc. are reused read-only via the shared class names, never edited).
+--------------------------------------------------------------------- */
+.aios-dashboard-root .aios-system-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.aios-dashboard-root .aios-system-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.aios-dashboard-root .aios-system-section-placeholder .aios-empty {
+  padding: 10px 0;
+}
+.aios-dashboard-root .aios-system-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+/* Reviewer M5 (2026-08-04): honest window caption next to the section
+   title so Cost/Runs are never mistaken for the Usage tab's range-scoped
+   numbers -- those follow the 1d/7d/30d/All toggle, these are a fixed
+   export window. */
+.aios-dashboard-root .aios-system-skills-usage-caption {
+  color: var(--aios-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.aios-dashboard-root .aios-system-skills-filter {
+  display: flex;
+}
+.aios-dashboard-root .aios-system-skills-filter-input {
+  width: 100%;
+  max-width: 420px;
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  transition: border-color 140ms ease;
+}
+.aios-dashboard-root .aios-system-skills-filter-input:focus {
+  outline: none;
+  border-color: var(--aios-accent);
+}
+.aios-dashboard-root .aios-system-skills-count {
+  color: var(--aios-faint);
+  font-size: 11px;
+}
+.aios-dashboard-root .aios-system-skills-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Text-heavy columns (Description, Used by) need left-align and normal
+   wrapping, unlike the numeric-column default the shared
+   .aios-usage-breakdown-table rules assume (right-aligned, narrow).
+   Reviewer M4 (2026-08-04, measured): the first version of this block ALSO
+   overrode columns 2-3 (Cost, Runs) down to 9% while claiming in its own
+   comment that they "keep the shared widths" -- they did not, and a
+   1200px-wide harness measurement caught it: Usage-tab Cost spanned
+   365-546px, System-tab Cost spanned 365-482px (same left edge, wrong right
+   edge, and every column after it cascaded out of alignment: Runs
+   546-728px vs 482-600px). Columns 1/2/3/6 (name, Cost, Runs, the padded
+   blank trailing column) now carry NO override at all -- they inherit the
+   shared .aios-usage-breakdown-table th/td:nth-child(n) rule verbatim, so
+   there is no way for them to diverge from every other breakdown table.
+   Only columns 4/5 (Description, Used by) are genuinely
+   System-tab-specific, and their widths are chosen so 32+15+15+20+10+8
+   sums to exactly 100%, same total as the shared rule's own 32+15*4+8. */
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(4),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(4) {
+  width: 20%;
+  text-align: left;
+  white-space: normal;
+}
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table th:nth-child(5),
+.aios-dashboard-root .aios-usage-breakdown-table.aios-system-skills-table td:nth-child(5) {
+  width: 10%;
+  text-align: left;
+  white-space: normal;
+}
+.aios-dashboard-root .aios-system-skills-desc {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-system-skill-usedby-link {
+  color: var(--aios-accent-hi);
+  text-decoration: none;
+}
+.aios-dashboard-root .aios-system-skill-usedby-link:hover {
+  text-decoration: underline;
+}
+.aios-dashboard-root .aios-system-skill-usedby-more {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  color: var(--aios-faint);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-system-skill-usedby-more:hover {
+  color: var(--aios-text);
+  text-decoration: underline;
+}
+
+/* Origin badge (Reviewer M3, 2026-08-04): 220+ skills now come from three
+   different sources (~/.claude/skills, an installed plugin's own skills/,
+   the vault's .claude/commands/*.md); a small text badge next to the name
+   keeps that legible without a dedicated column. */
+.aios-dashboard-root .aios-system-skill-origin-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--aios-border);
+  color: var(--aios-faint);
+  white-space: nowrap;
+}
+.aios-dashboard-root .aios-system-skill-origin-plugin {
+  color: var(--aios-p3);
+  border-color: color-mix(in srgb, var(--aios-p3) 40%, var(--aios-border));
+}
+.aios-dashboard-root .aios-system-skill-origin-command {
+  color: var(--aios-accent-hi);
+  border-color: color-mix(in srgb, var(--aios-accent-hi) 40%, var(--aios-border));
+}
+
+.aios-dashboard-root .aios-system-skills-group {
+  border: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-system-skills-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--aios-surface);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+  color: var(--aios-text);
+  font-size: 12px;
+}
+.aios-dashboard-root .aios-system-skills-group-head:hover {
+  background: var(--aios-surface-2);
+}
+.aios-dashboard-root .aios-system-skills-group-open {
+  border-bottom: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-system-skills-group-label {
+  font-weight: 500;
+}
+.aios-dashboard-root .aios-system-skills-group-toggle {
+  color: var(--aios-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
