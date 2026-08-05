@@ -928,8 +928,10 @@
   background: var(--aios-p4);
 }
 
-/* Undo affordance inside the toast. */
-.aios-undo {
+/* Undo affordance inside a mutation toast -- always present and always
+   works (click calls the same undo path Cmd+Z uses), regardless of whether
+   the toast text also mentions the Cmd+Z shortcut. */
+.aios-undo-link {
   color: var(--aios-accent-hi, #a78bfa);
   cursor: pointer;
   font-weight: 600;
