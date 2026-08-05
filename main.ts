@@ -7,6 +7,7 @@ import {
   Platform,
   Plugin,
   PluginSettingTab,
+  Scope,
   Setting,
   TFile,
   TFolder,
@@ -54,6 +55,14 @@ import {
   computeSystemAgentsView,
   computeAvailableHiresView,
   computeSystemWorkflowsSopsView,
+  pushUndoEntry,
+  popUndoEntry,
+  undoEntryStillSafe,
+  mutationNoticeText,
+  undoNoticeText,
+  undoConflictNoticeText,
+  undoEmptyNoticeText,
+  taskStatusActionLabel,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -824,19 +833,114 @@ function folderForStatus(tasksRoot: string, status: string): string {
   return `${tasksRoot}/open`;
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard undo: in-memory history of the PLUGIN'S OWN vault mutations
+// (task status writes + moves, quick-add task creation, quick capture).
+// Stack push/pop/cap/safety logic is pure (model.mjs, undoModel.test.mjs);
+// everything below is the impure wiring: where the stack lives, how a
+// mutation gets recorded, and how it gets reversed.
+//
+// The stack is keyed by the dashboard's root DOM element (a WeakMap), not
+// threaded as a parameter through the render tree -- any element inside the
+// dashboard can find its own root via `.closest(".aios-dashboard-root")`,
+// so `recordMutation` only needs the DOM node the user just interacted
+// with. Because the key is a DOM element and the map is weak, a dashboard's
+// undo history simply disappears when that element is discarded (view
+// closed, leaf detached, plugin unloaded) -- no explicit cleanup path, and
+// per the spec that expiry is intentional: undo is a same-session
+// convenience, not a durable log.
+// ---------------------------------------------------------------------------
+
+type UndoEntry = {
+  id: string;
+  label: string;
+  kind: "edit-move" | "create";
+  pathAfter: string;
+  contentAfter: string;
+  pathBefore?: string;
+  contentBefore?: string;
+};
+
+const dashboardUndoStacks: WeakMap<HTMLElement, UndoEntry[]> = new WeakMap();
+
+function findDashboardRoot(el: HTMLElement): HTMLElement | null {
+  return el.closest(".aios-dashboard-root") as HTMLElement | null;
+}
+
+function undoEntryId(): string {
+  return "u" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// Record a mutation the plugin just performed and toast it. `anchor` is any
+// element inside the dashboard root that triggered the mutation (a button,
+// a row, ...); the root is resolved via .closest so call sites never thread
+// a dedicated undo parameter through renderTasksTab/renderProjectCard/etc.
+// If no dashboard root is found (should not happen for in-tree callers) the
+// mutation still gets its toast, it just is not undoable.
+function recordMutation(anchor: HTMLElement, entry: UndoEntry): void {
+  const root = findDashboardRoot(anchor);
+  if (root) {
+    dashboardUndoStacks.set(root, pushUndoEntry(dashboardUndoStacks.get(root) || [], entry));
+  }
+  new Notice(mutationNoticeText(entry));
+}
+
+// Undo the most recent mutation recorded against `root`'s stack. Always
+// pops (a stale/conflicting entry is discarded, not retried) and always
+// refreshes, so the UI reflects reality whether the undo applied or was
+// refused.
+async function undoLastMutation(app: App, root: HTMLElement, refresh: () => void): Promise<void> {
+  const stack = dashboardUndoStacks.get(root) || [];
+  const { entry, stack: rest } = popUndoEntry(stack);
+  dashboardUndoStacks.set(root, rest);
+  if (!entry) {
+    new Notice(undoEmptyNoticeText());
+    return;
+  }
+  const file = app.vault.getAbstractFileByPath(entry.pathAfter);
+  if (!(file instanceof TFile)) {
+    new Notice(undoConflictNoticeText());
+    return;
+  }
+  const current = await app.vault.read(file);
+  if (!undoEntryStillSafe(entry, current)) {
+    new Notice(undoConflictNoticeText());
+    return;
+  }
+  try {
+    if (entry.kind === "create") {
+      await app.vault.delete(file);
+    } else {
+      // edit-move: invert in reverse order (move back, then restore content).
+      if (entry.pathBefore && entry.pathBefore !== entry.pathAfter) {
+        await app.fileManager.renameFile(file, entry.pathBefore);
+      }
+      await app.vault.modify(file, entry.contentBefore ?? current);
+    }
+    new Notice(undoNoticeText(entry));
+  } catch (e) {
+    new Notice("AIOS: could not undo. " + (e?.message || e));
+  }
+  refresh();
+}
+
 // Set a task's status, stamp `updated`, and move the file to the folder that
 // mirrors the new status (per the AIOS task lifecycle, SOP-close-task).
+// Returns the before/after path + content pair so the caller can record an
+// undo entry, or null when the file could not be found (nothing happened).
 async function setTaskStatus(
   app: App,
   tasksRoot: string,
   path: string,
   newStatus: string
-): Promise<void> {
+): Promise<{ pathBefore: string; pathAfter: string; contentBefore: string; contentAfter: string } | null> {
   const file = app.vault.getAbstractFileByPath(path);
   if (!(file instanceof TFile)) {
     new Notice("AIOS: task file not found: " + path);
-    return;
+    return null;
   }
+  const pathBefore = file.path;
+  const contentBefore = await app.vault.read(file);
   await app.fileManager.processFrontMatter(file, (fm: any) => {
     fm.status = newStatus;
     fm.updated = nowIso();
@@ -855,6 +959,8 @@ async function setTaskStatus(
       new Notice("AIOS: could not move task file. " + (e?.message || e));
     }
   }
+  const contentAfter = await app.vault.read(file);
+  return { pathBefore, pathAfter: file.path, contentBefore, contentAfter };
 }
 
 async function nextTaskId(app: App, day: string): Promise<string> {
@@ -882,13 +988,16 @@ function yamlQuote(value: string): string {
   return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
 }
 
+// Returns the created file's path + exact content on success (so the caller
+// can record an undo entry), or null when there was nothing to create or
+// the write failed.
 async function createQuickTask(
   app: App,
   tasksRoot: string,
   opts: { title: string; project: string | null; phase: string | null; keyElement: string | null }
-): Promise<void> {
+): Promise<{ path: string; content: string } | null> {
   const title = opts.title.trim();
-  if (!title) return;
+  if (!title) return null;
   const day = isoDate();
   const id = await nextTaskId(app, day);
   const slug = slugify(title) || "task";
@@ -922,9 +1031,10 @@ async function createQuickTask(
     `- ${day} (dashboard) - created\n`;
   try {
     await app.vault.create(path, content);
-    new Notice("AIOS: added task " + id);
+    return { path, content };
   } catch (e) {
     new Notice("AIOS: could not create task. " + (e?.message || e));
+    return null;
   }
 }
 
@@ -1161,9 +1271,11 @@ function statusCtlMeta(status: string): { label: string; cls: string } {
 }
 
 // The per-task status control: a pill button that opens a menu of valid transitions.
-// Replaces the v1 checkbox + Start button. Every transition calls setTaskStatus, shows a
-// toast, and (for Done) offers Undo back to the prior status. Deliberate menu selection
-// means no single mis-tap can complete or lose a task.
+// Replaces the v1 checkbox + Start button. Every transition calls setTaskStatus, records
+// a dashboard undo entry, and shows a toast ("... Cmd+Z to undo"). Deliberate menu
+// selection means no single mis-tap can complete or lose a task, and the generic
+// Cmd+Z/undo-stack (see recordMutation/undoLastMutation) covers every transition
+// uniformly instead of a per-notice "back to prior status" link.
 function renderStatusDropdown(
   app: App,
   tasksRoot: string,
@@ -1178,17 +1290,17 @@ function renderStatusDropdown(
   btn.createSpan({ cls: "aios-ctl-caret", text: "▾" });
   btn.setAttr("aria-label", "Change task status");
 
-  const apply = async (newStatus: string, verb: string, undoTo: string | null) => {
-    await setTaskStatus(app, tasksRoot, task.path, newStatus);
-    const n = new Notice("", 6000);
-    n.noticeEl.createSpan({ text: `${verb}: ${task.title}` });
-    if (undoTo) {
-      const undo = n.noticeEl.createEl("a", { cls: "aios-undo", text: "  Undo" });
-      undo.addEventListener("click", async (ev) => {
-        ev.preventDefault();
-        await setTaskStatus(app, tasksRoot, task.path, undoTo);
-        n.hide();
-        refresh();
+  const apply = async (newStatus: string, verb: string) => {
+    const result = await setTaskStatus(app, tasksRoot, task.path, newStatus);
+    if (result) {
+      recordMutation(row, {
+        id: undoEntryId(),
+        label: taskStatusActionLabel(verb, task.title),
+        kind: "edit-move",
+        pathBefore: result.pathBefore,
+        pathAfter: result.pathAfter,
+        contentBefore: result.contentBefore,
+        contentAfter: result.contentAfter,
       });
     }
     refresh();
@@ -1199,28 +1311,24 @@ function renderStatusDropdown(
     const menu = new Menu();
     if (task.status === "open") {
       menu.addItem((i) =>
-        i.setTitle("Start (in progress)").setIcon("play").onClick(() => apply("in-progress", "Started", null))
+        i.setTitle("Start (in progress)").setIcon("play").onClick(() => apply("in-progress", "Started"))
       );
+      menu.addItem((i) => i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed")));
       menu.addItem((i) =>
-        i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed", "open"))
-      );
-      menu.addItem((i) =>
-        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled", "open"))
+        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled"))
       );
     } else if (task.status === "in-progress") {
+      menu.addItem((i) => i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed")));
       menu.addItem((i) =>
-        i.setTitle("Done").setIcon("check").onClick(() => apply("done", "Completed", "in-progress"))
+        i.setTitle("Back to open").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened"))
       );
       menu.addItem((i) =>
-        i.setTitle("Back to open").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened", null))
-      );
-      menu.addItem((i) =>
-        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled", "in-progress"))
+        i.setTitle("Cancel task").setIcon("x").onClick(() => apply("cancelled", "Cancelled"))
       );
     } else {
       // done or any other terminal state: allow reopening.
       menu.addItem((i) =>
-        i.setTitle("Reopen").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened", null))
+        i.setTitle("Reopen").setIcon("rotate-ccw").onClick(() => apply("open", "Reopened"))
       );
     }
     menu.showAtMouseEvent(ev as MouseEvent);
@@ -1292,7 +1400,16 @@ function addButton(
   btn.addEventListener("click", () => {
     // Project/phase adds do not offer a category picker (buckets = []).
     new AddTaskModal(app, contextLabel, [], async (title, _category) => {
-      await createQuickTask(app, tasksRoot, { title, project, phase, keyElement });
+      const created = await createQuickTask(app, tasksRoot, { title, project, phase, keyElement });
+      if (created) {
+        recordMutation(container, {
+          id: undoEntryId(),
+          label: `Added task "${title}"`,
+          kind: "create",
+          pathAfter: created.path,
+          contentAfter: created.content,
+        });
+      }
       refresh();
     }).open();
   });
@@ -1536,7 +1653,21 @@ function renderTasksTab(
   const addBtn = addWrap.createEl("button", { cls: "aios-add", text: "+ Add task" });
   addBtn.addEventListener("click", () => {
     new AddTaskModal(app, "New standalone task", buckets, async (title, categorySlug) => {
-      await createQuickTask(app, tasksRoot, { title, project: null, phase: null, keyElement: categorySlug });
+      const created = await createQuickTask(app, tasksRoot, {
+        title,
+        project: null,
+        phase: null,
+        keyElement: categorySlug,
+      });
+      if (created) {
+        recordMutation(container, {
+          id: undoEntryId(),
+          label: `Added task "${title}"`,
+          kind: "create",
+          pathAfter: created.path,
+          contentAfter: created.content,
+        });
+      }
       refresh();
     }).open();
   });
@@ -2694,16 +2825,17 @@ function renderUsageTab(
 
 // Quick-capture write: collision-safe filename via resolveCaptureFileName
 // (model.mjs, pure), existing names gathered synchronously from the
-// already-loaded vault index (no extra I/O). Notice on both success and
-// failure, matching createQuickTask's pattern. Returns true on success so
-// the caller knows whether to clear the input.
+// already-loaded vault index (no extra I/O). Notice on failure only; success
+// is reported by the caller via recordMutation (undoable, "Cmd+Z" hint).
+// Returns the created file's path + content on success so the caller can
+// record an undo entry, or null (input empty or write failed).
 async function submitQuickCapture(
   app: App,
   settings: AiosDashboardSettings,
   rawText: string
-): Promise<boolean> {
+): Promise<{ path: string; content: string } | null> {
   const text = rawText.trim();
-  if (!text) return false;
+  if (!text) return null;
   try {
     await ensureFolder(app, settings.intakeFolder);
     const folderPath = normalizePath(settings.intakeFolder);
@@ -2715,11 +2847,10 @@ async function submitQuickCapture(
     const path = `${settings.intakeFolder}/${stem}.md`;
     const content = buildQuickCaptureContent(text, nowIso());
     await app.vault.create(path, content);
-    new Notice("Captured to Intake");
-    return true;
+    return { path, content };
   } catch (e) {
     new Notice("AIOS: could not capture. " + (e?.message || e));
-    return false;
+    return null;
   }
 }
 
@@ -2739,8 +2870,17 @@ function renderQuickCapture(app: App, settings: AiosDashboardSettings, container
   const submit = async () => {
     const value = input.value;
     if (!value.trim()) return;
-    const ok = await submitQuickCapture(app, settings, value);
-    if (ok) input.value = "";
+    const created = await submitQuickCapture(app, settings, value);
+    if (created) {
+      recordMutation(container, {
+        id: undoEntryId(),
+        label: "Captured to Intake",
+        kind: "create",
+        pathAfter: created.path,
+        contentAfter: created.content,
+      });
+      input.value = "";
+    }
   };
   btn.addEventListener("click", submit);
   input.addEventListener("keydown", (ev) => {
@@ -3921,6 +4061,17 @@ class DashboardView extends ItemView {
   constructor(leaf: WorkspaceLeaf, plugin: AiosDashboardPlugin) {
     super(leaf);
     this.plugin = plugin;
+    // Cmd+Z (Ctrl+Z on Windows/Linux, "Mod" is Obsidian's cross-platform
+    // modifier) undoes the dashboard's last mutation, but ONLY while this
+    // view is the active leaf -- View.scope is pushed as the active keymap
+    // scope by the workspace automatically on focus and popped on blur, so
+    // this never steals Cmd+Z from an editor or another pane.
+    this.scope = new Scope(this.app.scope);
+    this.scope.register(["Mod"], "z", (evt) => {
+      evt.preventDefault();
+      void this.handleUndo();
+      return false;
+    });
   }
 
   getViewType(): string {
@@ -3942,6 +4093,11 @@ class DashboardView extends ItemView {
   render() {
     const container = this.containerEl.children[1] as HTMLElement;
     renderDashboard(this.app, container, () => this.render(), this.viewState, this.plugin.settings);
+  }
+
+  async handleUndo() {
+    const container = this.containerEl.children[1] as HTMLElement;
+    await undoLastMutation(this.app, container, () => this.render());
   }
 
   async onClose() {
@@ -4367,6 +4523,20 @@ export default class AiosDashboardPlugin extends Plugin {
       id: "open-aios-dashboard",
       name: "Open AIOS Dashboard",
       callback: () => this.activateView(),
+    });
+
+    // Palette/hotkey-remappable counterpart to the Cmd+Z binding on
+    // DashboardView.scope; checkCallback so it only appears/fires when the
+    // dashboard leaf is the active view.
+    this.addCommand({
+      id: "undo-last-dashboard-action",
+      name: "AIOS Dashboard: Undo last dashboard action",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(DashboardView);
+        if (!view) return false;
+        if (!checking) void view.handleUndo();
+        return true;
+      },
     });
 
     // Inline rendering inside Projects/Dashboard.md

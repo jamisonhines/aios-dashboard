@@ -2069,3 +2069,95 @@ export function computeSystemWorkflowsSopsView(opsMap) {
     sops: sopNodes.map((n) => systemWorkflowSopRowFromNode(n, edges, nodesById)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard undo (build 2026-08-05): an in-memory stack of the PLUGIN'S OWN
+// vault mutations (task status changes + file moves, quick-add task
+// creation, quick capture). Every function here is pure -- no vault access,
+// no Notice, no DOM. main.ts owns the impure read/write/rename/delete calls
+// and the WeakMap<rootEl, stack> that gives each open dashboard its own
+// history; these functions just decide what the stack looks like next and
+// what to say about it.
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} UndoEntry
+ * @property {string} id
+ * @property {string} label - human-readable description, e.g. `Marked "X" done`
+ * @property {"edit-move"|"create"} kind
+ * @property {string} pathAfter - where the file lives right now (post-mutation)
+ * @property {string} contentAfter - exact content the plugin wrote/left behind
+ * @property {string} [pathBefore] - edit-move only: path before the mutation
+ * @property {string} [contentBefore] - edit-move only: content before the mutation
+ */
+
+export const UNDO_STACK_CAP = 20;
+
+/**
+ * Push a new entry onto the undo stack, evicting the oldest entry once the
+ * cap is exceeded. Returns a NEW array; never mutates `stack`. This is the
+ * stack's only "expiry" rule -- capacity-based, not time-based.
+ * @param {UndoEntry[]} stack
+ * @param {UndoEntry} entry
+ * @returns {UndoEntry[]}
+ */
+export function pushUndoEntry(stack, entry) {
+  const next = stack.concat([entry]);
+  return next.length > UNDO_STACK_CAP ? next.slice(next.length - UNDO_STACK_CAP) : next;
+}
+
+/**
+ * Pop the most recent entry off the stack (LIFO). Returns `{ entry: null,
+ * stack }` (the same, empty-or-not, array reference) when there is nothing
+ * to undo. Never mutates `stack`.
+ * @param {UndoEntry[]} stack
+ * @returns {{ entry: UndoEntry|null, stack: UndoEntry[] }}
+ */
+export function popUndoEntry(stack) {
+  if (stack.length === 0) return { entry: null, stack };
+  return { entry: stack[stack.length - 1], stack: stack.slice(0, -1) };
+}
+
+/**
+ * True when the file's current on-disk content is EXACTLY what the plugin
+ * last wrote for this entry -- i.e. nothing has touched the file since the
+ * mutation. Undo must refuse to clobber a concurrent edit, so this gate runs
+ * before any restore/delete is attempted.
+ * @param {UndoEntry} entry
+ * @param {string} currentContent
+ * @returns {boolean}
+ */
+export function undoEntryStillSafe(entry, currentContent) {
+  return typeof currentContent === "string" && currentContent === entry.contentAfter;
+}
+
+/** Toast text shown right after a plugin mutation is recorded. */
+export function mutationNoticeText(entry) {
+  return `${entry.label}. Cmd+Z to undo.`;
+}
+
+/** Toast text shown after a successful undo. */
+export function undoNoticeText(entry) {
+  return `Undone: ${entry.label}.`;
+}
+
+/** Toast text for the safety-refusal path (changed on disk since). */
+export function undoConflictNoticeText() {
+  return "AIOS: changed on disk since, not undoing.";
+}
+
+/** Toast text for the empty-stack path (Cmd+Z / command with nothing to undo). */
+export function undoEmptyNoticeText() {
+  return "AIOS: nothing to undo.";
+}
+
+/** Human label for a task status transition, used both in the mutation
+ * toast and (prefixed "Undone: ") in the undo toast.
+ * @param {string} verb - "Started" | "Completed" | "Cancelled" | "Reopened"
+ * @param {string} title
+ * @returns {string}
+ */
+export function taskStatusActionLabel(verb, title) {
+  if (verb === "Completed") return `Marked "${title}" done`;
+  return `${verb} "${title}"`;
+}
