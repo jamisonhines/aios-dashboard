@@ -1,6 +1,7 @@
 // Tests for the dashboard undo-stack pure helpers: pushUndoEntry, popUndoEntry,
 // undoEntryStillSafe, mutationNoticeText, undoNoticeText, undoConflictNoticeText,
-// undoEmptyNoticeText, taskStatusActionLabel. Run: node undoModel.test.mjs
+// undoEmptyNoticeText, undoCollisionNoticeText, isEditableEventTarget,
+// taskStatusActionLabel. Run: node undoModel.test.mjs
 import assert from "node:assert";
 import {
   UNDO_STACK_CAP,
@@ -11,6 +12,8 @@ import {
   undoNoticeText,
   undoConflictNoticeText,
   undoEmptyNoticeText,
+  undoCollisionNoticeText,
+  isEditableEventTarget,
   taskStatusActionLabel,
 } from "./model.mjs";
 
@@ -72,9 +75,14 @@ assert.equal(undoEntryStillSafe(e, 123), false, "non-string current content refu
 
 // --- notice text builders ---
 assert.equal(
-  mutationNoticeText(entry("x", { label: 'Marked "Ship it" done' })),
+  mutationNoticeText(entry("x", { label: 'Marked "Ship it" done' }), true),
   'Marked "Ship it" done. Cmd+Z to undo.',
-  "mutation notice names the action and hints Cmd+Z"
+  "leaf view: mutation notice names the action and hints Cmd+Z"
+);
+assert.equal(
+  mutationNoticeText(entry("x", { label: 'Marked "Ship it" done' }), false),
+  'Marked "Ship it" done.',
+  "embed (no Cmd+Z available): mutation notice must NOT promise the shortcut"
 );
 assert.equal(
   undoNoticeText(entry("x", { label: 'Marked "Ship it" done' })),
@@ -83,6 +91,35 @@ assert.equal(
 );
 assert.equal(undoConflictNoticeText(), "AIOS: changed on disk since, not undoing.", "conflict notice text");
 assert.equal(undoEmptyNoticeText(), "AIOS: nothing to undo.", "empty-stack notice text");
+assert.equal(
+  undoCollisionNoticeText("Operations/tasks/open/tsk-1.md"),
+  'AIOS: could not undo -- "Operations/tasks/open/tsk-1.md" already exists.',
+  "collision notice names the blocking path"
+);
+
+// --- retry-on-throw (Reviewer Min3): a popped entry that undoLastMutation
+// could not apply (thrown failure, or the Min2 move-back collision) goes
+// BACK onto the stack via the same push primitive, so the next Undo click
+// retries it once the obstruction clears. Model-level: pop-then-repush must
+// restore the exact same stack (order + identity), not a lossy variant.
+// Only a tamper refusal skips this -- that path never repushes, it just
+// drops the entry, which is exercised by popUndoEntry alone above. This is
+// also the "one stack, plugin-owned" contract: push/pop operate on a bare
+// array, which is exactly what plugin.undoStack now is (Reviewer M2 moved
+// it off the old per-root WeakMap).
+const retryStack = [entry("r1"), entry("r2")];
+const { entry: poppedForRetry, stack: afterPop } = popUndoEntry(retryStack);
+const requeued = pushUndoEntry(afterPop, poppedForRetry);
+assert.deepEqual(requeued, retryStack, "pop-then-repush (retry-on-throw) restores the exact same stack");
+
+// --- isEditableEventTarget (Reviewer M1: don't swallow native text undo) ---
+assert.equal(isEditableEventTarget("INPUT", false), true, "input elements are editable targets");
+assert.equal(isEditableEventTarget("input", false), true, "tag-name match is case-insensitive");
+assert.equal(isEditableEventTarget("TEXTAREA", false), true, "textarea elements are editable targets");
+assert.equal(isEditableEventTarget("DIV", true), true, "contenteditable wins regardless of tag name");
+assert.equal(isEditableEventTarget("BUTTON", false), false, "a plain button is not an editable target");
+assert.equal(isEditableEventTarget(null, false), false, "no tag name, not contenteditable -> not editable");
+assert.equal(isEditableEventTarget(undefined, false), false, "undefined tag name is handled safely");
 
 // --- taskStatusActionLabel ---
 assert.equal(taskStatusActionLabel("Completed", "Ship it"), 'Marked "Ship it" done', "Completed gets the 'done' phrasing");

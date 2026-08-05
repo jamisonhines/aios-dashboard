@@ -62,6 +62,8 @@ import {
   undoNoticeText,
   undoConflictNoticeText,
   undoEmptyNoticeText,
+  undoCollisionNoticeText,
+  isEditableEventTarget,
   taskStatusActionLabel,
 } from "./model.mjs";
 
@@ -837,18 +839,26 @@ function folderForStatus(tasksRoot: string, status: string): string {
 // Dashboard undo: in-memory history of the PLUGIN'S OWN vault mutations
 // (task status writes + moves, quick-add task creation, quick capture).
 // Stack push/pop/cap/safety logic is pure (model.mjs, undoModel.test.mjs);
-// everything below is the impure wiring: where the stack lives, how a
-// mutation gets recorded, and how it gets reversed.
+// everything below is the impure wiring: how a mutation gets recorded, and
+// how it gets reversed.
 //
-// The stack is keyed by the dashboard's root DOM element (a WeakMap), not
-// threaded as a parameter through the render tree -- any element inside the
-// dashboard can find its own root via `.closest(".aios-dashboard-root")`,
-// so `recordMutation` only needs the DOM node the user just interacted
-// with. Because the key is a DOM element and the map is weak, a dashboard's
-// undo history simply disappears when that element is discarded (view
-// closed, leaf detached, plugin unloaded) -- no explicit cleanup path, and
-// per the spec that expiry is intentional: undo is a same-session
-// convenience, not a durable log.
+// The stack lives on the PLUGIN instance (`plugin.undoStack`), not a
+// per-view WeakMap: one history, vault-wide, valid across every open
+// dashboard surface (the ItemView leaf AND any inline `aios-dashboard`
+// code-block embeds in notes -- Reviewer flagged that a per-root stack left
+// the embed's mutation toast promising an undo it could never deliver,
+// since embeds have no Scope/keymap of their own). It's still purely
+// in-memory: nothing is persisted, and it resets on plugin reload/unload
+// (`onunload` also clears it explicitly, see below) -- undo is a
+// same-session convenience, not a durable log.
+//
+// Cmd+Z is wired ONLY through DashboardView.scope, so it only ever fires
+// while the dashboard leaf is focused. Every mutation toast additionally
+// gets a clickable "Undo" link (Notice supports a DocumentFragment body)
+// that calls the exact same undoLastMutation path -- that link works from
+// every surface, including embeds, with no keymap involved. The toast TEXT
+// only claims "Cmd+Z to undo" when the mutation happened inside the leaf
+// view; embeds get the link only, never a promise they can't keep.
 // ---------------------------------------------------------------------------
 
 type UndoEntry = {
@@ -861,67 +871,108 @@ type UndoEntry = {
   contentBefore?: string;
 };
 
-const dashboardUndoStacks: WeakMap<HTMLElement, UndoEntry[]> = new WeakMap();
-
-function findDashboardRoot(el: HTMLElement): HTMLElement | null {
-  return el.closest(".aios-dashboard-root") as HTMLElement | null;
-}
+// Threaded through the render tree (alongside app/settings/refresh) to every
+// function that can trigger a plugin mutation, so recordMutation always
+// knows which plugin-wide stack to push onto and whether this particular
+// render is the Cmd+Z-capable leaf view or a keymap-less inline embed.
+type UndoCtx = {
+  plugin: AiosDashboardPlugin;
+  isLeafView: boolean;
+};
 
 function undoEntryId(): string {
   return "u" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// Record a mutation the plugin just performed and toast it. `anchor` is any
-// element inside the dashboard root that triggered the mutation (a button,
-// a row, ...); the root is resolved via .closest so call sites never thread
-// a dedicated undo parameter through renderTasksTab/renderProjectCard/etc.
-// If no dashboard root is found (should not happen for in-tree callers) the
-// mutation still gets its toast, it just is not undoable.
-function recordMutation(anchor: HTMLElement, entry: UndoEntry): void {
-  const root = findDashboardRoot(anchor);
-  if (root) {
-    dashboardUndoStacks.set(root, pushUndoEntry(dashboardUndoStacks.get(root) || [], entry));
-  }
-  new Notice(mutationNoticeText(entry));
+// Record a mutation the plugin just performed: push it onto the plugin's
+// shared stack and toast it with a clickable Undo action. `isLeafView`
+// controls only whether the toast TEXT mentions the Cmd+Z shortcut (true
+// for the ItemView leaf, false for inline embeds) -- the Undo link itself
+// always works regardless.
+function recordMutation(plugin: AiosDashboardPlugin, isLeafView: boolean, entry: UndoEntry): void {
+  plugin.undoStack = pushUndoEntry(plugin.undoStack, entry);
+  const frag = document.createDocumentFragment();
+  frag.createSpan({ text: mutationNoticeText(entry, isLeafView) + " " });
+  const undoLink = frag.createEl("a", { cls: "aios-undo-link", text: "Undo", attr: { href: "#" } });
+  undoLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    void undoLastMutation(plugin);
+  });
+  new Notice(frag, 8000);
 }
 
-// Undo the most recent mutation recorded against `root`'s stack. Always
-// pops (a stale/conflicting entry is discarded, not retried) and always
-// refreshes, so the UI reflects reality whether the undo applied or was
-// refused.
-async function undoLastMutation(app: App, root: HTMLElement, refresh: () => void): Promise<void> {
-  const stack = dashboardUndoStacks.get(root) || [];
-  const { entry, stack: rest } = popUndoEntry(stack);
-  dashboardUndoStacks.set(root, rest);
+// Undo the most recent mutation on the plugin's shared stack. Always
+// refreshes every open dashboard surface (Min1: refresh on every path,
+// including refusals) so the UI reflects reality regardless of outcome.
+//
+// - Tamper refusal (file changed on disk since the mutation): the entry is
+//   dropped, per spec -- retrying would still clobber the concurrent edit.
+// - A thrown failure or a detected path collision on the move-back is
+//   treated as a transient obstruction, not tamper: the entry goes BACK on
+//   the stack so the same Undo click/Cmd+Z can retry once it clears.
+async function undoLastMutation(plugin: AiosDashboardPlugin): Promise<void> {
+  const app = plugin.app;
+  const { entry, stack: rest } = popUndoEntry(plugin.undoStack);
+  plugin.undoStack = rest;
+
   if (!entry) {
     new Notice(undoEmptyNoticeText());
+    plugin.refreshNow();
     return;
   }
+
   const file = app.vault.getAbstractFileByPath(entry.pathAfter);
   if (!(file instanceof TFile)) {
     new Notice(undoConflictNoticeText());
+    plugin.refreshNow();
     return;
   }
+
   const current = await app.vault.read(file);
   if (!undoEntryStillSafe(entry, current)) {
     new Notice(undoConflictNoticeText());
+    plugin.refreshNow();
     return;
   }
+
   try {
     if (entry.kind === "create") {
-      await app.vault.delete(file);
+      // Respect the user's trash setting (system trash / .trash / permanent)
+      // instead of a hard delete.
+      await app.fileManager.trashFile(file);
     } else {
-      // edit-move: invert in reverse order (move back, then restore content).
-      if (entry.pathBefore && entry.pathBefore !== entry.pathAfter) {
-        await app.fileManager.renameFile(file, entry.pathBefore);
+      const pathBefore = entry.pathBefore;
+      const movingBack = !!pathBefore && pathBefore !== entry.pathAfter;
+      if (movingBack && app.vault.getAbstractFileByPath(pathBefore!)) {
+        new Notice(undoCollisionNoticeText(pathBefore!));
+        plugin.undoStack = pushUndoEntry(plugin.undoStack, entry); // retryable once it clears
+        plugin.refreshNow();
+        return;
       }
+      // Restore content FIRST, then move back. If the rename then fails,
+      // roll the content restore back too, so a partial failure can never
+      // leave e.g. a done-status file's content sitting under open/ (path
+      // and content always change together, or not at all).
       await app.vault.modify(file, entry.contentBefore ?? current);
+      if (movingBack) {
+        try {
+          await app.fileManager.renameFile(file, pathBefore!);
+        } catch (renameErr) {
+          try {
+            await app.vault.modify(file, entry.contentAfter);
+          } catch {
+            /* best-effort rollback; the outer catch still reports the original failure */
+          }
+          throw renameErr;
+        }
+      }
     }
     new Notice(undoNoticeText(entry));
   } catch (e) {
     new Notice("AIOS: could not undo. " + (e?.message || e));
+    plugin.undoStack = pushUndoEntry(plugin.undoStack, entry); // retryable
   }
-  refresh();
+  plugin.refreshNow();
 }
 
 // Set a task's status, stamp `updated`, and move the file to the folder that
@@ -1281,7 +1332,8 @@ function renderStatusDropdown(
   tasksRoot: string,
   row: HTMLElement,
   task: TaskItem,
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   const meta = statusCtlMeta(task.status);
   const btn = row.createEl("button", { cls: "aios-status-ctl " + meta.cls });
@@ -1293,7 +1345,7 @@ function renderStatusDropdown(
   const apply = async (newStatus: string, verb: string) => {
     const result = await setTaskStatus(app, tasksRoot, task.path, newStatus);
     if (result) {
-      recordMutation(row, {
+      recordMutation(undoCtx.plugin, undoCtx.isLeafView, {
         id: undoEntryId(),
         label: taskStatusActionLabel(verb, task.title),
         kind: "edit-move",
@@ -1341,6 +1393,7 @@ function renderTaskRow(
   container: HTMLElement,
   task: TaskItem,
   refresh: () => void,
+  undoCtx: UndoCtx,
   tag?: { slug: string; label: string } | null
 ) {
   const row = container.createDiv({ cls: "aios-task" });
@@ -1365,7 +1418,7 @@ function renderTaskRow(
     });
   }
 
-  renderStatusDropdown(app, tasksRoot, row, task, refresh);
+  renderStatusDropdown(app, tasksRoot, row, task, refresh, undoCtx);
 }
 
 // Doing-now strip: in-progress tasks pinned in an accented block, sorted by
@@ -1377,13 +1430,14 @@ function renderDoingNowStrip(
   tasksRoot: string,
   container: HTMLElement,
   doingTasks: TaskItem[],
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   if (doingTasks.length === 0) return;
   const strip = container.createDiv({ cls: "aios-doing" });
   strip.createDiv({ cls: "aios-doing-label", text: "DOING NOW" });
   const list = strip.createDiv({ cls: "aios-list" });
-  for (const t of doingTasks.slice().sort(sortTasks)) renderTaskRow(app, tasksRoot, list, t, refresh);
+  for (const t of doingTasks.slice().sort(sortTasks)) renderTaskRow(app, tasksRoot, list, t, refresh, undoCtx);
 }
 
 function addButton(
@@ -1394,7 +1448,8 @@ function addButton(
   project: string | null,
   phase: string | null,
   keyElement: string | null,
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   const btn = container.createEl("button", { cls: "aios-add", text: "+ Add task" });
   btn.addEventListener("click", () => {
@@ -1402,7 +1457,7 @@ function addButton(
     new AddTaskModal(app, contextLabel, [], async (title, _category) => {
       const created = await createQuickTask(app, tasksRoot, { title, project, phase, keyElement });
       if (created) {
-        recordMutation(container, {
+        recordMutation(undoCtx.plugin, undoCtx.isLeafView, {
           id: undoEntryId(),
           label: `Added task "${title}"`,
           kind: "create",
@@ -1453,7 +1508,8 @@ function renderProjectCard(
   proj: ProjectItem,
   allTasks: TaskItem[],
   viewState: ViewState,
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   // All non-cancelled tasks for this project (drives progress + display).
   const projTasks = allTasks.filter(
@@ -1498,7 +1554,7 @@ function renderProjectCard(
   const split = splitProjectTasks(projTasks);
 
   // Doing now strip: in-progress tasks pinned at the top with an accent.
-  renderDoingNowStrip(app, tasksRoot, body, split.doing, refresh);
+  renderDoingNowStrip(app, tasksRoot, body, split.doing, refresh, undoCtx);
 
   // Per-project view toggles: Open shows open tasks, Complete shows done tasks. In-progress
   // lives in the DOING NOW strip above; cancelled is never shown.
@@ -1535,9 +1591,9 @@ function renderProjectCard(
     if (visible.length === 0) {
       renderEmptyState(list, "No tasks match the current view.");
     } else {
-      for (const t of visible) renderTaskRow(app, tasksRoot, list, t, refresh);
+      for (const t of visible) renderTaskRow(app, tasksRoot, list, t, refresh, undoCtx);
     }
-    addButton(pbody, app, tasksRoot, addCtxLabel, proj.slug, phaseName, null, refresh);
+    addButton(pbody, app, tasksRoot, addCtxLabel, proj.slug, phaseName, null, refresh, undoCtx);
   };
 
   const phaseOrder = resolvePhaseOrder(proj, projTasks);
@@ -1585,7 +1641,8 @@ function renderProjectsTab(
   tasks: TaskItem[],
   viewState: ViewState,
   refresh: () => void,
-  hostFm: Record<string, unknown> | undefined
+  hostFm: Record<string, unknown> | undefined,
+  undoCtx: UndoCtx
 ) {
   const statusSections = resolveStatusSections(hostFm);
   const groups = groupProjectsByStatus(projects, statusSections);
@@ -1610,7 +1667,7 @@ function renderProjectsTab(
   const group = groups.find((g) => g.slug === active);
   if (!group) return;
   for (const proj of group.projects) {
-    renderProjectCard(app, tasksRoot, container, proj, tasks, viewState, refresh);
+    renderProjectCard(app, tasksRoot, container, proj, tasks, viewState, refresh, undoCtx);
   }
 }
 
@@ -1624,7 +1681,8 @@ function renderTasksTab(
   tasks: TaskItem[],
   buckets: { slug: string; label: string }[],
   viewState: ViewState,
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   const standaloneOpen = tasks.filter(
     (t) => t.project == null && OPEN_STATUSES.includes(t.status)
@@ -1660,7 +1718,7 @@ function renderTasksTab(
         keyElement: categorySlug,
       });
       if (created) {
-        recordMutation(container, {
+        recordMutation(undoCtx.plugin, undoCtx.isLeafView, {
           id: undoEntryId(),
           label: `Added task "${title}"`,
           kind: "create",
@@ -1678,7 +1736,7 @@ function renderTasksTab(
   if (filtered.length === 0) {
     renderEmptyState(list, "Nothing here.");
   } else {
-    for (const t of filtered) renderTaskRow(app, tasksRoot, list, t, refresh, tagForTask(t, buckets));
+    for (const t of filtered) renderTaskRow(app, tasksRoot, list, t, refresh, undoCtx, tagForTask(t, buckets));
   }
 
   // Completed (standalone, last 7 days).
@@ -1704,7 +1762,7 @@ function renderTasksTab(
       else viewState.expanded.delete(dKey);
     });
     const dlist = det.createDiv({ cls: "aios-list" });
-    for (const t of done) renderTaskRow(app, tasksRoot, dlist, t, refresh, tagForTask(t, buckets));
+    for (const t of done) renderTaskRow(app, tasksRoot, dlist, t, refresh, undoCtx, tagForTask(t, buckets));
   }
 }
 
@@ -2854,7 +2912,12 @@ async function submitQuickCapture(
   }
 }
 
-function renderQuickCapture(app: App, settings: AiosDashboardSettings, container: HTMLElement) {
+function renderQuickCapture(
+  app: App,
+  settings: AiosDashboardSettings,
+  container: HTMLElement,
+  undoCtx: UndoCtx
+) {
   const section = container.createDiv({ cls: "aios-today-section aios-quick-capture" });
   section.createDiv({ cls: "aios-today-section-label", text: "QUICK CAPTURE" });
   const row = section.createDiv({ cls: "aios-quick-capture-row" });
@@ -2872,7 +2935,7 @@ function renderQuickCapture(app: App, settings: AiosDashboardSettings, container
     if (!value.trim()) return;
     const created = await submitQuickCapture(app, settings, value);
     if (created) {
-      recordMutation(container, {
+      recordMutation(undoCtx.plugin, undoCtx.isLeafView, {
         id: undoEntryId(),
         label: "Captured to Intake",
         kind: "create",
@@ -2896,7 +2959,8 @@ function renderTopTasksSection(
   tasksRoot: string,
   container: HTMLElement,
   tasks: TaskItem[],
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   const section = container.createDiv({ cls: "aios-today-section" });
   section.createDiv({ cls: "aios-today-section-label", text: "TOP TASKS" });
@@ -2906,7 +2970,7 @@ function renderTopTasksSection(
     return;
   }
   const list = section.createDiv({ cls: "aios-list" });
-  for (const t of top) renderTaskRow(app, tasksRoot, list, t, refresh);
+  for (const t of top) renderTaskRow(app, tasksRoot, list, t, refresh, undoCtx);
 }
 
 // Sparkline SVG (build 2.9 slice 4): inline, no library. `points` are 0..1
@@ -3002,15 +3066,16 @@ function renderTodayTab(
   tasksRoot: string,
   tasks: TaskItem[],
   healthTiles: HealthTile[],
-  refresh: () => void
+  refresh: () => void,
+  undoCtx: UndoCtx
 ) {
   const wrap = container.createDiv({ cls: "aios-today-tab" });
 
   const doing = tasks.filter((t) => t.status === "in-progress");
-  renderDoingNowStrip(app, tasksRoot, wrap, doing, refresh);
+  renderDoingNowStrip(app, tasksRoot, wrap, doing, refresh, undoCtx);
 
-  renderTopTasksSection(app, tasksRoot, wrap, tasks, refresh);
-  renderQuickCapture(app, settings, wrap);
+  renderTopTasksSection(app, tasksRoot, wrap, tasks, refresh, undoCtx);
+  renderQuickCapture(app, settings, wrap, undoCtx);
   renderTodayStatRow(app, settings, wrap, healthTiles);
 }
 
@@ -3855,10 +3920,13 @@ function renderDashboard(
   refresh: () => void,
   viewState: ViewState,
   settings: AiosDashboardSettings,
+  plugin: AiosDashboardPlugin,
+  isLeafView: boolean,
   sourcePath?: string
 ) {
   root.empty();
   root.addClass("aios-dashboard-root");
+  const undoCtx: UndoCtx = { plugin, isLeafView };
 
   // Resolve config from the host note's frontmatter (config-driven per fork). No sourcePath
   // (standalone view or refresh re-render) falls back to the configured dashboard note.
@@ -4032,9 +4100,9 @@ function renderDashboard(
   // ----- Tab body -----
   const body = scroll.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "today") {
-    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh);
+    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh, undoCtx);
   } else if (viewState.activeTab === "tasks") {
-    renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
+    renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh, undoCtx);
   } else if (viewState.activeTab === "usage") {
     renderUsageTab(app, body, usagePeriodbarHost as HTMLElement, settings, viewState);
   } else if (viewState.activeTab === "system") {
@@ -4042,7 +4110,7 @@ function renderDashboard(
   } else if (viewState.activeTab === "opsmap") {
     renderOpsMapTab(app, body, settings);
   } else {
-    renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm);
+    renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm, undoCtx);
   }
 
   scroll.createDiv({ cls: "aios-foot" }).setText(
@@ -4065,9 +4133,18 @@ class DashboardView extends ItemView {
     // modifier) undoes the dashboard's last mutation, but ONLY while this
     // view is the active leaf -- View.scope is pushed as the active keymap
     // scope by the workspace automatically on focus and popped on blur, so
-    // this never steals Cmd+Z from an editor or another pane.
+    // this never steals Cmd+Z from an editor or another pane. It also bails
+    // out (returns true / does not preventDefault) when the keypress landed
+    // on the dashboard's own text inputs or a contenteditable region (quick
+    // capture, the System > Skills filter, ...): those have native undo of
+    // their own, and swallowing it there both breaks typing AND can revert
+    // an unrelated vault mutation (Reviewer M1).
     this.scope = new Scope(this.app.scope);
     this.scope.register(["Mod"], "z", (evt) => {
+      const target = evt.target as HTMLElement | null;
+      if (isEditableEventTarget(target?.tagName ?? null, !!target?.isContentEditable)) {
+        return true;
+      }
       evt.preventDefault();
       void this.handleUndo();
       return false;
@@ -4092,12 +4169,11 @@ class DashboardView extends ItemView {
 
   render() {
     const container = this.containerEl.children[1] as HTMLElement;
-    renderDashboard(this.app, container, () => this.render(), this.viewState, this.plugin.settings);
+    renderDashboard(this.app, container, () => this.render(), this.viewState, this.plugin.settings, this.plugin, true);
   }
 
   async handleUndo() {
-    const container = this.containerEl.children[1] as HTMLElement;
-    await undoLastMutation(this.app, container, () => this.render());
+    await undoLastMutation(this.plugin);
   }
 
   async onClose() {
@@ -4485,6 +4561,10 @@ export default class AiosDashboardPlugin extends Plugin {
   private inlineHosts: Set<HTMLElement> = new Set();
   private inlineState: WeakMap<HTMLElement, ViewState> = new WeakMap();
   private refreshTimer: number | null = null;
+  // Plugin-wide undo history (Reviewer M2): one stack, valid from every open
+  // dashboard surface (leaf view + inline embeds), not one per view/root.
+  // In-memory only; cleared in onunload.
+  undoStack: UndoEntry[] = [];
 
   private stateFor(host: HTMLElement): ViewState {
     let s = this.inlineState.get(host);
@@ -4525,16 +4605,18 @@ export default class AiosDashboardPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
-    // Palette/hotkey-remappable counterpart to the Cmd+Z binding on
-    // DashboardView.scope; checkCallback so it only appears/fires when the
-    // dashboard leaf is the active view.
+    // Palette/hotkey-remappable counterpart to the toast's "Undo" link and
+    // (in the leaf view) the Cmd+Z binding on DashboardView.scope. The
+    // stack is plugin-wide, not view-scoped, so this must be reachable
+    // regardless of which view is active (a MarkdownView showing the
+    // embedded dashboard included, per Reviewer M2) -- gate on the stack
+    // having something to undo, not on DashboardView being focused.
     this.addCommand({
       id: "undo-last-dashboard-action",
       name: "AIOS Dashboard: Undo last dashboard action",
       checkCallback: (checking) => {
-        const view = this.app.workspace.getActiveViewOfType(DashboardView);
-        if (!view) return false;
-        if (!checking) void view.handleUndo();
+        if (this.undoStack.length === 0) return false;
+        if (!checking) void undoLastMutation(this);
         return true;
       },
     });
@@ -4549,6 +4631,8 @@ export default class AiosDashboardPlugin extends Plugin {
         () => this.scheduleRefresh(),
         this.stateFor(host),
         this.settings,
+        this,
+        false,
         ctx.sourcePath
       );
       this.register(() => this.inlineHosts.delete(host));
@@ -4567,6 +4651,7 @@ export default class AiosDashboardPlugin extends Plugin {
   onunload() {
     if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
     this.inlineHosts.clear();
+    this.undoStack = [];
   }
 
   private scheduleRefresh() {
@@ -4584,7 +4669,7 @@ export default class AiosDashboardPlugin extends Plugin {
         this.inlineHosts.delete(host);
         continue;
       }
-      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host), this.settings);
+      renderDashboard(this.app, host, () => this.scheduleRefresh(), this.stateFor(host), this.settings, this, false);
     }
   }
 

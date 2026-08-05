@@ -2131,9 +2131,19 @@ export function undoEntryStillSafe(entry, currentContent) {
   return typeof currentContent === "string" && currentContent === entry.contentAfter;
 }
 
-/** Toast text shown right after a plugin mutation is recorded. */
-export function mutationNoticeText(entry) {
-  return `${entry.label}. Cmd+Z to undo.`;
+/**
+ * Toast text shown right after a plugin mutation is recorded. The clickable
+ * "Undo" link (built by the caller, not this string) always works
+ * regardless of surface; the TEXT only claims the Cmd+Z shortcut when
+ * `canUseCmdZ` is true (the dashboard leaf view, where Cmd+Z is actually
+ * bound). An embedded dashboard has no keymap for it, so its toast must not
+ * make that promise -- "no surface may show a promise it cannot keep".
+ * @param {UndoEntry} entry
+ * @param {boolean} canUseCmdZ
+ * @returns {string}
+ */
+export function mutationNoticeText(entry, canUseCmdZ) {
+  return canUseCmdZ ? `${entry.label}. Cmd+Z to undo.` : `${entry.label}.`;
 }
 
 /** Toast text shown after a successful undo. */
@@ -2149,6 +2159,27 @@ export function undoConflictNoticeText() {
 /** Toast text for the empty-stack path (Cmd+Z / command with nothing to undo). */
 export function undoEmptyNoticeText() {
   return "AIOS: nothing to undo.";
+}
+
+/** Toast text when the move-back destination is already occupied (Min2). */
+export function undoCollisionNoticeText(path) {
+  return `AIOS: could not undo -- "${path}" already exists.`;
+}
+
+/**
+ * True when a Cmd+Z/Ctrl+Z keypress landed on something with its own native
+ * undo (a text input, a textarea, or a contenteditable region) and should
+ * be left alone rather than intercepted for the dashboard's undo stack
+ * (Reviewer M1: swallowing native text undo in the quick-capture/filter
+ * inputs is a regression, not a feature).
+ * @param {string|null|undefined} tagName
+ * @param {boolean} isContentEditable
+ * @returns {boolean}
+ */
+export function isEditableEventTarget(tagName, isContentEditable) {
+  if (isContentEditable) return true;
+  const t = (tagName || "").toUpperCase();
+  return t === "INPUT" || t === "TEXTAREA";
 }
 
 /** Human label for a task status transition, used both in the mutation
