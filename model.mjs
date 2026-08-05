@@ -444,6 +444,12 @@ export function usageFamilyBreakdown(windowDays) {
     costUsd: famTotals.get(f).costUsd,
   }));
 
+  const totalCostUsd = USAGE_FAMILY_ORDER.reduce(
+    (sum, f) => sum + (famTotals.has(f) ? famTotals.get(f).costUsd : 0),
+    0
+  );
+  const safeTotalCostUsd = totalCostUsd > 0 ? totalCostUsd : 1;
+
   const table = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
     const b = famTotals.get(f);
     return {
@@ -454,6 +460,11 @@ export function usageFamilyBreakdown(windowDays) {
       outputTokens: b.outputTokens,
       cacheReadTokens: b.cacheReadTokens,
       costUsd: b.costUsd,
+      // Models breakdown section (header/tabs restructure, 2026-08): each
+      // row's share of this window's total cost, so the "Models" table can
+      // show a % column like the Workflows/Skills tables do without the
+      // renderer re-deriving it from a running sum.
+      sharePercent: (b.costUsd / safeTotalCostUsd) * 100,
     };
   });
 
@@ -1990,5 +2001,71 @@ export function computeAvailableHiresView(opsMap) {
     items: Array.isArray(raw.items) ? raw.items : [],
     sopId: raw.sopId || "SOP-001-how-to-add-a-new-specialist",
     sopPath: raw.sopPath,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// System tab: Workflows & SOPs sub-tab (header/tabs restructure, 2026-08).
+// Pure view-model over ops-map.json's own workflow/sop nodes plus their
+// incoming edges -- "what references them" is every OTHER node with an edge
+// pointing AT this workflow/SOP, deduped by referencing node id (an agent
+// contract can link the same SOP more than once; the reader only needs to
+// know it's referenced, not how many times). No Obsidian deps; unit tested
+// in opsMapModel.test.mjs. Firing counts (how many sessions actually
+// invoked a workflow/SOP) are explicitly OUT of scope here -- phase 4 -- so
+// this view carries no such field to fake.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every node with an edge -> `nodeId`, deduped by the referencing node's id
+ * and sorted by label. Mirrors systemSkillUsedByRows/systemAgentWiredToRows'
+ * row shape ({id, label, path?}) so the renderer's existing used-by-style
+ * cell (clickable for internal nodes, plain text for external/unresolvable
+ * ones) works unchanged for this table too.
+ */
+export function systemReferencedByRows(nodeId, edges, nodesById) {
+  const seen = new Set();
+  const rows = [];
+  for (const e of edges) {
+    if (e.to !== nodeId) continue;
+    if (seen.has(e.from)) continue;
+    seen.add(e.from);
+    const target = nodesById.get(e.from);
+    rows.push({
+      id: e.from,
+      label: target ? target.label || e.from : e.from,
+      path: target && !target.external ? target.path : undefined,
+    });
+  }
+  return rows.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** Joins one ops-map workflow/SOP node with its referencedBy rows. */
+export function systemWorkflowSopRowFromNode(node, edges, nodesById) {
+  return {
+    id: node.id,
+    label: node.label || node.id,
+    path: node.external ? undefined : node.path,
+    referencedBy: systemReferencedByRows(node.id, edges, nodesById),
+  };
+}
+
+/**
+ * Full System tab Workflows & SOPs view: two lists (workflows, sops), each
+ * sorted by id for a stable render order, each row carrying who references
+ * it. Empty `nodes`/`edges` (no manifest yet) degrade to two empty lists,
+ * not a throw -- same convention as computeSystemAgentsView.
+ */
+export function computeSystemWorkflowsSopsView(opsMap) {
+  const nodes = (opsMap && opsMap.nodes) || [];
+  const edges = (opsMap && opsMap.edges) || [];
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+
+  const workflowNodes = nodes.filter((n) => n.type === "workflow").sort((a, b) => a.id.localeCompare(b.id));
+  const sopNodes = nodes.filter((n) => n.type === "sop").sort((a, b) => a.id.localeCompare(b.id));
+
+  return {
+    workflows: workflowNodes.map((n) => systemWorkflowSopRowFromNode(n, edges, nodesById)),
+    sops: sopNodes.map((n) => systemWorkflowSopRowFromNode(n, edges, nodesById)),
   };
 }

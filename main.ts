@@ -53,6 +53,7 @@ import {
   systemSkillsGroupIsOpen,
   computeSystemAgentsView,
   computeAvailableHiresView,
+  computeSystemWorkflowsSopsView,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -198,6 +199,9 @@ interface ViewState {
   // pattern as `expanded` above for project/phase cards.
   systemSkillsFilter: string;
   systemSkillsExpandedGroups: Set<string>;
+  // System tab sub-tabs (2026-08): which second-level section is showing.
+  // Persists across re-renders like activeTab does for the primary nav.
+  systemActiveSubTab: "agents" | "skills" | "workflows";
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -216,6 +220,7 @@ function makeViewState(): ViewState {
     systemsOpen: false,
     systemSkillsFilter: "",
     systemSkillsExpandedGroups: new Set(),
+    systemActiveSubTab: "agents",
   };
 }
 
@@ -596,6 +601,7 @@ interface UsageTableRow {
   outputTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  sharePercent: number;
 }
 
 interface UsageProjectRow {
@@ -2141,25 +2147,20 @@ function renderUsageDayChart(
 // plus ALL, everything the exporter scanned. Order matches USAGE_RANGE_DAYS.
 const USAGE_RANGE_OPTIONS = ["1d", "7d", "30d", "all"] as const;
 
-// Sticky period header: range toggle + prev/next paging + the human period
-// label ("Last 7 days") + the concrete date-range label ("Jul 8 - Jul 14").
-// Pinned via CSS position:sticky (styles.css) so the active period stays
-// legible while scrolling past the chart/tables/sections below it -- every
-// breakdown on the page is unambiguous about which period it's showing.
-function renderUsageStickyHeader(
+// Period bar: range toggle + prev/next paging + the human period label
+// ("Last 7 days") + the concrete date-range label ("Jul 8 - Jul 14"). Lives
+// in .aios-chrome (header/tabs restructure, 2026-08) as a normal, non-
+// scrolling flex child -- no CSS positioning trick needed, it stays visible
+// for the same structural reason the tab bar above it does. `container` is
+// the .aios-usage-periodbar element itself, a direct child of the chrome's
+// usage-periodbar host (see renderUsageTab).
+function renderUsagePeriodBar(
   container: HTMLElement,
   win: ReturnType<typeof computeUsageWindow>,
   viewState: ViewState,
   redraw: () => void
 ) {
-  // `container` IS the .aios-usage-sticky element (Reviewer M1, 2026-08-04):
-  // an earlier version wrapped this in an unclassed div and put the sticky
-  // class on a child, which makes position:sticky a no-op -- the sticky
-  // element's containing block was that wrapper, whose height equals the
-  // header's own height, so there was zero room to travel. The class must
-  // be on the element that is itself a normal-flow child of the scrolling
-  // body (.aios-usage-tab), not on a grandchild.
-  const head = container.createDiv({ cls: "aios-usage-sticky-head" });
+  const head = container.createDiv({ cls: "aios-usage-periodbar-head" });
   // M4 (Reviewer, 2026-08-04): at offset 0 the human label ("Last 7 days")
   // is accurate; paged back, it isn't -- usageScopedRangeLabel falls back to
   // the concrete date range instead of claiming to be "Last 7 days" while
@@ -2251,34 +2252,34 @@ function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
   }
 }
 
-function renderUsageTable(container: HTMLElement, table: UsageTableRow[]) {
+// Models breakdown table (header/tabs restructure, 2026-08, replaces the
+// old bespoke Model breakdown table): shares the same breakdown-table
+// helper/column-alignment as Workflows and Skills below it -- family, cost,
+// share of this window's spend, output tokens, messages -- so all three
+// tables' Cost/Output-tokens/Msgs columns line up at the same pixel
+// position (USAGE_BREAKDOWN_TOTAL_COLUMNS padding, see that const's
+// comment). Follows the selected range like every other section on this
+// tab: `table` is already range-scoped by the caller (usageFamilyBreakdown
+// over the selected window's days).
+function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[]) {
   if (table.length === 0) {
-    renderEmptyState(container, "No model usage in the last 30 days.");
+    renderEmptyState(container, "No model usage in this period.");
     return;
   }
-  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
-  const el = wrap.createEl("table", { cls: "aios-usage-table" });
-  const thead = el.createEl("thead");
-  const headRow = thead.createEl("tr");
-  for (const h of ["Model", "Messages", "Input", "Output", "Cache read", "Est. cost"]) {
-    headRow.createEl("th", { text: h });
-  }
-  const tbody = el.createEl("tbody");
-  for (const row of table) {
-    const tr = tbody.createEl("tr");
-    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
-    nameCell.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + row.family });
-    nameCell.createSpan({
-      cls: "aios-usage-table-name-text",
-      text: row.label,
-      attr: { title: row.label },
-    });
-    tr.createEl("td", { text: String(row.messages) });
-    tr.createEl("td", { text: formatCompactNumber(row.inputTokens) });
-    tr.createEl("td", { text: formatCompactNumber(row.outputTokens) });
-    tr.createEl("td", { text: formatCompactNumber(row.cacheReadTokens) });
-    tr.createEl("td", { text: formatUsd(row.costUsd) });
-  }
+  renderUsageBreakdownTable(
+    container,
+    ["Model", "Cost", "Share", "Output tokens", "Msgs"],
+    table.map((row) => ({
+      nameText: " " + row.label,
+      nameDotClass: "aios-usage-dot-" + row.family,
+      cells: [
+        formatUsd(row.costUsd),
+        Math.round(row.sharePercent) + "%",
+        formatCompactNumber(row.outputTokens),
+        String(row.messages),
+      ],
+    }))
+  );
 }
 
 function renderUsageProjectsTable(container: HTMLElement, projects: UsageProjectRow[]) {
@@ -2553,14 +2554,18 @@ function renderBudgetWarning(
 // selected window instead of the old split where only the chart reacted to
 // the range toggle and everything else stayed pinned to a fixed 30 days.
 
-// Finds the real scrolling ancestor of `el` by walking up the DOM and
-// checking for both an overflow-y that establishes a scroll box AND actual
-// overflow (scrollHeight > clientHeight) -- not assumed to be any specific
-// element, since in real Obsidian it's `.view-content` (the pane this
-// plugin mounts into via DashboardView; see the .aios-dashboard-root CSS
-// comment on why the plugin's own root is deliberately NOT given
-// overflow-y itself). Falls back to the document's own scrolling element.
+// Finds the scroll container that owns `el`'s scroll position: `.aios-scroll`,
+// the internal div this plugin creates and controls (header/tabs
+// restructure, 2026-08). Deterministic -- no more walking up through
+// computed styles guessing which ancestor is Obsidian's real scrolling
+// pane, because that ancestor is now always this plugin's own element,
+// found the same way every time. Falls back to the old walk-up-and-measure
+// search for a host that hasn't been re-rendered under the chrome/scroll
+// split yet (e.g. a stale DOM reference), and finally to the document's own
+// scrolling element.
 function findScrollAncestor(el: HTMLElement): HTMLElement {
+  const owned = el.closest(".aios-scroll") as HTMLElement | null;
+  if (owned) return owned;
   let node: HTMLElement | null = el.parentElement;
   while (node && node !== document.body) {
     const style = getComputedStyle(node);
@@ -2573,9 +2578,15 @@ function findScrollAncestor(el: HTMLElement): HTMLElement {
   return (document.scrollingElement as HTMLElement) || document.documentElement;
 }
 
+// `periodbarHost` is the Usage tab's slot in the fixed chrome (see
+// renderDashboard) -- a normal-flow, non-scrolling flex child that sits
+// below the tab bar. The period bar renders there; everything else (tiles,
+// chart, breakdown tables) renders into `container`, which lives inside
+// .aios-scroll and is the only thing that scrolls.
 function renderUsageTab(
   app: App,
   container: HTMLElement,
+  periodbarHost: HTMLElement,
   settings: AiosDashboardSettings,
   viewState: ViewState
 ) {
@@ -2583,6 +2594,7 @@ function renderUsageTab(
   wrap.createDiv({ cls: "aios-empty", text: "Loading usage data..." });
   loadUsageStats(app, settings.usageStatsPath).then((stats) => {
     wrap.empty();
+    periodbarHost.empty();
     if (!stats) {
       renderEmptyState(
         wrap,
@@ -2601,37 +2613,33 @@ function renderUsageTab(
     const projects = computeUsageView(stats, new Date()).projects;
     const spikeAlerts = computeWorkflowSpikes(stats, new Date());
 
-    // M1 (Reviewer, 2026-08-04): `sticky` must be a DIRECT child of `wrap`
-    // (.aios-usage-tab) carrying the sticky class itself -- no unclassed
-    // wrapper div in between. See renderUsageStickyHeader's comment for why
-    // that wrapper made position:sticky a no-op.
-    const sticky = wrap.createDiv({ cls: "aios-usage-sticky" });
+    const periodbar = periodbarHost.createDiv({ cls: "aios-usage-periodbar" });
     const body = wrap.createDiv({ cls: "aios-usage-body" });
 
     const draw = () => {
-      // Scroll-position fix (defect 3, 2026-08): sticky.empty()/body.empty()
-      // below synchronously drops this tab's content to near-zero height
-      // before the rebuild re-adds it. If the real scrolling ancestor's
-      // scrollTop was deeper than that momentary (near-zero) scrollHeight,
-      // the browser clamps scrollTop down immediately -- and does NOT
-      // restore it once the rebuilt content re-grows the scrollHeight back.
-      // So every range/paging toggle silently snapped the user back to the
-      // top. Fix: capture scrollTop on the actual scrolling ancestor (found
-      // by walking up from wrap, not assumed to be any particular element --
-      // in real Obsidian it's .view-content, not this plugin's own root)
-      // before emptying, then restore it (clamped to the new scrollHeight)
-      // after the rebuild. Re-queried fresh on every call so rapid repeated
-      // clicks each capture/restore from wherever the user currently is.
+      // Scroll-position fix (defect 3, 2026-08, still applies under the new
+      // chrome/scroll split): periodbar.empty()/body.empty() below
+      // synchronously drops this tab's content to near-zero height before
+      // the rebuild re-adds it. If the scroll container's scrollTop was
+      // deeper than that momentary (near-zero) scrollHeight, the browser
+      // clamps scrollTop down immediately -- and does NOT restore it once
+      // the rebuilt content re-grows the scrollHeight back. So every
+      // range/paging toggle would silently snap the user back to the top.
+      // Fix: capture scrollTop on .aios-scroll (found deterministically now,
+      // see findScrollAncestor) before emptying, then restore it (clamped to
+      // the new scrollHeight) after the rebuild. Re-queried fresh on every
+      // call so rapid repeated clicks each capture/restore from wherever the
+      // user currently is.
       const scrollEl = findScrollAncestor(wrap);
       const prevScrollTop = scrollEl ? scrollEl.scrollTop : 0;
 
-      sticky.empty();
+      periodbar.empty();
       body.empty();
 
       const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date());
-      renderUsageStickyHeader(sticky, win, viewState, draw);
+      renderUsagePeriodBar(periodbar, win, viewState, draw);
       // M4 (Reviewer, 2026-08-04): every subhead/tile below uses the SAME
-      // offset-aware label the sticky header just showed, so a paged-back
+      // offset-aware label the period bar just showed, so a paged-back
       // window never claims to be "Last 7 days" while the numbers are from
       // three windows ago.
       const scopedLabel = usageScopedRangeLabel(win);
@@ -2642,8 +2650,8 @@ function renderUsageTab(
 
       const breakdown = usageFamilyBreakdown(win.days);
       renderUsageLegend(body, breakdown.legend);
-      body.createDiv({ cls: "aios-usage-subhead", text: "Model breakdown (" + scopedLabel + ")" });
-      renderUsageTable(body, breakdown.table);
+      body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
+      renderUsageModelsTable(body, breakdown.table);
 
       const workflowsView = computeWorkflowsViewForRange(stats, win.days, viewState.usageRange);
       renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, scopedLabel);
@@ -3559,6 +3567,91 @@ function renderSystemAgentsSection(
   renderSystemAvailableHires(app, container, manifest);
 }
 
+// ---------------------------------------------------------------------------
+// System tab: Workflows & SOPs sub-tab (header/tabs restructure, 2026-08).
+// Two tables (Workflows, SOPs) built from ops-map's own workflow/sop nodes
+// plus their incoming edges -- "what references them". Firing counts (how
+// many sessions actually used each) are phase 4 and deliberately NOT
+// rendered here; no column is faked in its place.
+// ---------------------------------------------------------------------------
+
+interface SystemWorkflowSopRow {
+  id: string;
+  label: string;
+  path?: string;
+  referencedBy: SystemSkillUsedByRow[];
+}
+
+interface SystemWorkflowsSopsView {
+  workflows: SystemWorkflowSopRow[];
+  sops: SystemWorkflowSopRow[];
+}
+
+function renderSystemWorkflowSopTable(
+  app: App,
+  container: HTMLElement,
+  nameHeader: string,
+  rows: SystemWorkflowSopRow[]
+) {
+  if (rows.length === 0) {
+    renderEmptyState(container, "None found.");
+    return;
+  }
+  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
+  const el = wrap.createEl("table", {
+    cls: "aios-usage-table aios-usage-breakdown-table aios-system-skills-table",
+  });
+  const thead = el.createEl("thead");
+  const headRow = thead.createEl("tr");
+  for (const h of [nameHeader, "Referenced by"]) headRow.createEl("th", { text: h });
+
+  const tbody = el.createEl("tbody");
+  for (const row of rows) {
+    const tr = tbody.createEl("tr");
+    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
+    if (row.path) {
+      const link = nameCell.createEl("a", {
+        text: row.label,
+        cls: "aios-system-skill-usedby-link aios-usage-table-name-text",
+        href: "#",
+        attr: { title: row.label },
+      });
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        app.workspace.openLinkText(row.path as string, "", false);
+      });
+    } else {
+      nameCell.createSpan({ cls: "aios-usage-table-name-text", text: row.label, attr: { title: row.label } });
+    }
+    const refCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
+    renderSystemSkillUsedByCell(app, refCell, row.referencedBy);
+  }
+}
+
+function renderSystemWorkflowsSopsSection(app: App, container: HTMLElement, manifest: OpsMapManifest) {
+  const view: SystemWorkflowsSopsView = computeSystemWorkflowsSopsView(manifest);
+
+  const wfSection = container.createDiv({ cls: "aios-system-section" });
+  wfSection.createDiv({ cls: "aios-section-eyebrow", text: "Workflows" });
+  renderSystemWorkflowSopTable(app, wfSection, "Workflow", view.workflows);
+
+  const sopSection = container.createDiv({ cls: "aios-system-section" });
+  sopSection.createDiv({ cls: "aios-section-eyebrow", text: "SOPs" });
+  renderSystemWorkflowSopTable(app, sopSection, "SOP", view.sops);
+}
+
+// System tab sub-tabs (header/tabs restructure, 2026-08): a scrollable
+// single-page list of Skills + Agents + Workflows & SOPs (150+ skills, a
+// full roster table, and now two more tables) was too much to scroll
+// through to reach any one section, so the tab now has its own
+// second-level nav. Order matches the task spec: Agents, Skills,
+// Workflows & SOPs.
+const SYSTEM_SUBTABS: { id: ViewState["systemActiveSubTab"]; label: string }[] = [
+  { id: "agents", label: "Agents" },
+  { id: "skills", label: "Skills" },
+  { id: "workflows", label: "Workflows & SOPs" },
+];
+
 // System tab: async load (ops-map + usage-stats, both already-loaded shapes
 // via the existing loaders) + render. Renders a hint when ops-map.json has
 // not been generated yet, same convention as the Ops map tab.
@@ -3581,20 +3674,37 @@ function renderSystemTab(
         return;
       }
 
-      renderSystemSkillsSection(app, wrap, viewState, manifest, stats);
+      const subtabs = wrap.createDiv({ cls: "aios-system-subtabs" });
+      const subtabButtons: { id: ViewState["systemActiveSubTab"]; el: HTMLElement }[] = [];
+      for (const t of SYSTEM_SUBTABS) {
+        const btn = subtabs.createEl("button", { cls: "aios-system-subtab", text: t.label });
+        subtabButtons.push({ id: t.id, el: btn });
+        btn.addEventListener("click", () => {
+          if (viewState.systemActiveSubTab === t.id) return;
+          viewState.systemActiveSubTab = t.id;
+          redraw();
+        });
+      }
 
-      // Agents section (Phase 3, 2026-08-05): roster cards + usage +
-      // wired-to, plus the "Available hires" subsection.
-      renderSystemAgentsSection(app, wrap, manifest, stats);
+      const sectionsHost = wrap.createDiv({ cls: "aios-system-tab-sections" });
 
-      // Sibling section (build order per the task spec): Workflows/SOPs
-      // with firing counts lands in a later phase. Placeholder keeps the
-      // tab's final section order visible now.
-      const workflowsSection = wrap.createDiv({
-        cls: "aios-system-section aios-system-section-placeholder",
-      });
-      workflowsSection.createDiv({ cls: "aios-section-eyebrow", text: "Workflows & SOPs" });
-      renderEmptyState(workflowsSection, "Coming in a later phase.");
+      function redraw() {
+        for (const b of subtabButtons) {
+          b.el.toggleClass("aios-system-subtab-active", b.id === viewState.systemActiveSubTab);
+        }
+        sectionsHost.empty();
+        if (viewState.systemActiveSubTab === "skills") {
+          renderSystemSkillsSection(app, sectionsHost, viewState, manifest, stats);
+        } else if (viewState.systemActiveSubTab === "workflows") {
+          renderSystemWorkflowsSopsSection(app, sectionsHost, manifest);
+        } else {
+          // Agents section (Phase 3, 2026-08-05): roster cards + usage +
+          // wired-to, plus the "Available hires" subsection.
+          renderSystemAgentsSection(app, sectionsHost, manifest, stats);
+        }
+      }
+
+      redraw();
     }
   );
 }
@@ -3631,8 +3741,14 @@ function renderDashboard(
   const healthInput = gatherHealthInput(app, settings, tasks, projects);
   const healthTiles = computeHealth(healthInput);
 
+  // ----- Fixed chrome (header/tabs restructure, 2026-08): app bar + tab bar
+  // + (on the Usage tab) the period bar, all a normal-flow, non-scrolling
+  // flex column above .aios-scroll. See the .aios-dashboard-root CSS
+  // comment for why this replaces position:sticky. -----
+  const chrome = root.createDiv({ cls: "aios-chrome" });
+
   // ----- App bar (slim single row; build 2.8) -----
-  const header = root.createDiv({ cls: "aios-header" });
+  const header = chrome.createDiv({ cls: "aios-header" });
   header.createDiv({ cls: "aios-app-mark" });
   const titleBlock = header.createDiv({ cls: "aios-title-block" });
   titleBlock.createEl("h1", { text: settings.headerTitle });
@@ -3727,7 +3843,7 @@ function renderDashboard(
   }
 
   // ----- Tab bar (segmented nav) -----
-  const tabs = root.createDiv({ cls: "aios-tabs" });
+  const tabs = chrome.createDiv({ cls: "aios-tabs" });
   const TAB_ICONS: Record<string, { primary: string; fallback?: string }> = {
     today: { primary: "sun" },
     projects: { primary: "folder-kanban" },
@@ -3756,14 +3872,25 @@ function renderDashboard(
   mkTab("opsmap", "Ops map");
   mkTab("system", "System");
 
+  // The Usage tab's period bar lives in the fixed chrome, below the tab bar
+  // -- only created when Usage is the active tab, so no empty host lingers
+  // in the chrome for every other tab.
+  const usagePeriodbarHost =
+    viewState.activeTab === "usage" ? chrome.createDiv({ cls: "aios-usage-periodbar-host" }) : undefined;
+
+  // ----- Scroll region: the ONLY element with overflow-y:auto. Everything
+  // that can grow past the pane's height (a tab's whole body, plus the
+  // trailing foot note) lives in here. -----
+  const scroll = root.createDiv({ cls: "aios-scroll" });
+
   // ----- Tab body -----
-  const body = root.createDiv({ cls: "aios-tab-body" });
+  const body = scroll.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "today") {
     renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh);
   } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh);
   } else if (viewState.activeTab === "usage") {
-    renderUsageTab(app, body, settings, viewState);
+    renderUsageTab(app, body, usagePeriodbarHost as HTMLElement, settings, viewState);
   } else if (viewState.activeTab === "system") {
     renderSystemTab(app, body, settings, viewState);
   } else if (viewState.activeTab === "opsmap") {
@@ -3772,7 +3899,7 @@ function renderDashboard(
     renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm);
   }
 
-  root.createDiv({ cls: "aios-foot" }).setText(
+  scroll.createDiv({ cls: "aios-foot" }).setText(
     "Live view, computed from Operations/tasks and Projects. Progress bars are calculated from task completion - nothing is hand-entered."
   );
 }

@@ -2,7 +2,12 @@
 // Imports the SAME module main.ts bundles (model.mjs).
 // Run: node opsMapModel.test.mjs
 import assert from "node:assert";
-import { computeOpsMapLayout } from "./model.mjs";
+import {
+  computeOpsMapLayout,
+  systemReferencedByRows,
+  systemWorkflowSopRowFromNode,
+  computeSystemWorkflowsSopsView,
+} from "./model.mjs";
 
 // --- empty manifest ---
 {
@@ -181,6 +186,100 @@ import { computeOpsMapLayout } from "./model.mjs";
   assert.equal(layout.columns[0].count, 1, "agent column count");
   assert.equal(layout.columns[1].count, 0, "empty workflow column count is 0, not omitted");
   assert.equal(layout.columns[2].count, 1, "sop column count");
+}
+
+// ---------------------------------------------------------------------------
+// System tab: Workflows & SOPs sub-tab (header/tabs restructure, 2026-08).
+// ---------------------------------------------------------------------------
+
+// --- systemReferencedByRows: dedups by referencing node id, sorts by label,
+// carries a clickable path for internal nodes only ---
+{
+  const nodesById = new Map([
+    ["coder", { id: "coder", type: "agent", label: "Coder", path: "Agents/Coder/AGENTS.md" }],
+    ["reviewer", { id: "reviewer", type: "agent", label: "Reviewer", path: "Agents/Reviewer/AGENTS.md" }],
+    ["some-external-tool", { id: "some-external-tool", type: "skill", label: "External tool", external: true }],
+  ]);
+  const edges = [
+    { from: "coder", to: "SOP-close-task", viaType: "token" },
+    { from: "coder", to: "SOP-close-task", viaType: "token" }, // duplicate edge, same referencer -> deduped
+    { from: "reviewer", to: "SOP-close-task", viaType: "token" },
+    { from: "some-external-tool", to: "SOP-close-task", viaType: "token" },
+    { from: "coder", to: "SOP-some-other-sop", viaType: "token" }, // different target -- must not leak in
+  ];
+  const rows = systemReferencedByRows("SOP-close-task", edges, nodesById);
+  // Sorted by label ("Coder" < "External tool" < "Reviewer"), not by id.
+  assert.deepEqual(rows.map((r) => r.id), ["coder", "some-external-tool", "reviewer"], "deduped, sorted by label");
+  assert.equal(rows[0].path, "Agents/Coder/AGENTS.md", "internal referencer carries a clickable path");
+  assert.equal(rows[1].path, undefined, "external referencer carries no path");
+}
+{
+  // Referencing node not present in nodesById -> falls back to the raw id
+  // as its own label, same convention as systemSkillUsedByRows.
+  const rows = systemReferencedByRows("SOP-x", [{ from: "ghost-agent", to: "SOP-x", viaType: "token" }], new Map());
+  assert.deepEqual(rows, [{ id: "ghost-agent", label: "ghost-agent", path: undefined }]);
+}
+{
+  // No edges at all -> empty, not a throw.
+  assert.deepEqual(systemReferencedByRows("SOP-x", [], new Map()), []);
+}
+
+// --- systemWorkflowSopRowFromNode: joins node + its referencedBy rows ---
+{
+  const nodesById = new Map([
+    ["coder", { id: "coder", type: "agent", label: "Coder", path: "Agents/Coder/AGENTS.md" }],
+  ]);
+  const edges = [{ from: "coder", to: "SOP-close-task", viaType: "token" }];
+  const node = { id: "SOP-close-task", type: "sop", label: "Close task", path: "Operations/SOPs/SOP-close-task.md" };
+  const row = systemWorkflowSopRowFromNode(node, edges, nodesById);
+  assert.deepEqual(row, {
+    id: "SOP-close-task",
+    label: "Close task",
+    path: "Operations/SOPs/SOP-close-task.md",
+    referencedBy: [{ id: "coder", label: "Coder", path: "Agents/Coder/AGENTS.md" }],
+  });
+}
+{
+  // External node -> no path even though the raw node object carries one.
+  const node = { id: "ext-thing", type: "workflow", label: "Ext thing", path: "/somewhere", external: true };
+  const row = systemWorkflowSopRowFromNode(node, [], new Map());
+  assert.equal(row.path, undefined, "external node's own path is suppressed");
+}
+{
+  // No label on the node -> falls back to id.
+  const row = systemWorkflowSopRowFromNode({ id: "WS-999", type: "workflow", path: "x" }, [], new Map());
+  assert.equal(row.label, "WS-999");
+}
+
+// --- computeSystemWorkflowsSopsView: splits by type, sorted by id, joins
+// referencedBy for each; degrades gracefully with no manifest ---
+{
+  const manifest = {
+    nodes: [
+      { id: "coder", type: "agent", label: "Coder", path: "Agents/Coder/AGENTS.md" },
+      { id: "WS-002-b", type: "workflow", label: "WS-002", path: "Operations/Workflows/WS-002-b.md" },
+      { id: "WS-001-a", type: "workflow", label: "WS-001", path: "Operations/Workflows/WS-001-a.md" },
+      { id: "SOP-close-task", type: "sop", label: "Close task", path: "Operations/SOPs/SOP-close-task.md" },
+      { id: "GL-001-x", type: "guideline", label: "Naming", path: "Operations/Guidelines/GL-001-x.md" },
+    ],
+    edges: [
+      { from: "coder", to: "WS-001-a", viaType: "token" },
+      { from: "coder", to: "SOP-close-task", viaType: "token" },
+    ],
+  };
+  const view = computeSystemWorkflowsSopsView(manifest);
+  assert.deepEqual(view.workflows.map((r) => r.id), ["WS-001-a", "WS-002-b"], "sorted by id");
+  assert.deepEqual(view.workflows[0].referencedBy.map((r) => r.id), ["coder"]);
+  assert.deepEqual(view.workflows[1].referencedBy, [], "no incoming edges -> empty, not omitted");
+  assert.equal(view.sops.length, 1);
+  assert.equal(view.sops[0].id, "SOP-close-task");
+  // Guideline node must not leak into either list.
+  assert.ok(!view.workflows.some((r) => r.id === "GL-001-x"));
+  assert.ok(!view.sops.some((r) => r.id === "GL-001-x"));
+}
+{
+  const view = computeSystemWorkflowsSopsView(null);
+  assert.deepEqual(view, { workflows: [], sops: [] }, "no manifest -> two empty lists, not a throw");
 }
 
 console.log("opsMapModel: all assertions passed");

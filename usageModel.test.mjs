@@ -441,6 +441,31 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   assert.deepEqual(direct.table, view.table, "usageFamilyBreakdown table matches computeUsageView's");
 }
 
+// --- usageFamilyBreakdown: sharePercent (System-browser header/tabs
+// restructure, 2026-08 -- feeds the Usage tab's "Models" breakdown table's
+// Share column) ---
+{
+  const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
+  const day = {
+    date: "2026-08-01",
+    models: { opus: bucket(3), sonnet: bucket(1) },
+    totalCostUsd: 4,
+    totalOutputTokens: 2,
+  };
+  const { table } = usageFamilyBreakdown([day]);
+  const opusRow = table.find((r) => r.family === "opus");
+  const sonnetRow = table.find((r) => r.family === "sonnet");
+  assert.equal(opusRow.sharePercent, 75, "3 of 4 total cost");
+  assert.equal(sonnetRow.sharePercent, 25, "1 of 4 total cost");
+}
+{
+  // Zero-cost window: sharePercent is 0 for every row, not NaN/Infinity.
+  const zeroBucket = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 0, costUsd: 0 };
+  const day = { date: "2026-08-01", models: { opus: zeroBucket }, totalCostUsd: 0, totalOutputTokens: 0 };
+  const { table } = usageFamilyBreakdown([day]);
+  assert.equal(table[0].sharePercent, 0, "no spend -> 0%, not NaN");
+}
+
 // --- computeUsageRangeTiles: sums cost/tokens over an arbitrary window ---
 {
   const windowDays = [
