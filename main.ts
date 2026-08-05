@@ -3741,10 +3741,13 @@ function renderDashboard(
   const healthInput = gatherHealthInput(app, settings, tasks, projects);
   const healthTiles = computeHealth(healthInput);
 
-  // ----- Fixed chrome (header/tabs restructure, 2026-08): app bar + tab bar
-  // + (on the Usage tab) the period bar, all a normal-flow, non-scrolling
-  // flex column above .aios-scroll. See the .aios-dashboard-root CSS
-  // comment for why this replaces position:sticky. -----
+  // ----- Fixed chrome (header/tabs restructure, 2026-08): tab bar + (on the
+  // Usage tab) the period bar, a normal-flow, non-scrolling flex column above
+  // .aios-scroll. The app bar is built here for its wiring but is moved into
+  // .aios-scroll below (owner call 2026-08-05: only tabs + period bar stay
+  // pinned; the title row scrolls away, cutting fixed chrome by 61px). See
+  // the .aios-dashboard-root CSS comment for why this replaces
+  // position:sticky. -----
   const chrome = root.createDiv({ cls: "aios-chrome" });
 
   // ----- App bar (slim single row; build 2.8) -----
@@ -3882,6 +3885,9 @@ function renderDashboard(
   // that can grow past the pane's height (a tab's whole body, plus the
   // trailing foot note) lives in here. -----
   const scroll = root.createDiv({ cls: "aios-scroll" });
+
+  // App bar scrolls with content (see chrome comment above).
+  scroll.appendChild(header);
 
   // ----- Tab body -----
   const body = scroll.createDiv({ cls: "aios-tab-body" });
