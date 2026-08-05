@@ -44,25 +44,57 @@
   --aios-grad-3: #9d7bff;
   --aios-grad-4: #c4b5fd;
 
-  padding: 20px 22px 40px;
   background: var(--aios-bg);
   color: var(--aios-text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
-  min-height: 100%;
-  /* NOT overflow-y:auto (bug fixed 2026-08, sticky-header-polish): this
-     root has no bounded height of its own (min-height only), so it never
-     actually scrolls -- Obsidian's real .view-content (the pane this root
-     is mounted into, see DashboardView.render in main.ts) is the true
-     scrolling ancestor. But `overflow` != visible still makes an element a
-     *candidate* scrolling container for position:sticky's containing-block
-     resolution regardless of whether it currently overflows, so this
-     redundant declaration was silently stealing the sticky containing
-     block away from .view-content -- position:sticky then computed "stuck"
-     relative to a box that never scrolls, so it just scrolled off with
-     everything else. Confirmed by headless-Chrome measurement (rect.top
-     dropped to -745 at scrollTop 800 with this rule present; sticks
-     correctly once removed). Do not re-add. */
+
+  /* Header/tabs restructure (2026-08, replaces the position:sticky usage
+     header, twice-failed in real Obsidian -- see git history on this file
+     for the old comment/postmortem). position:sticky depended on Obsidian's
+     .view-content being the one true scrolling ancestor and computed its
+     "stuck" offset relative to that pane's own padding edge, which varies
+     by Obsidian version/theme -- the ::before opaque background extension
+     built to paper over that gap is what was covering the plugin's own tab
+     bar and reading as "2-3x too tall" in the real app. Fix: this root is
+     now the flex column that owns the whole pane. `.aios-chrome` (tab bar,
+     app header, usage period bar) is a normal non-scrolling flex child;
+     `.aios-scroll` is the ONLY element with overflow-y:auto, and it is a
+     div THIS PLUGIN CONTROLS -- no dependency on Obsidian's own scrolling
+     behavior or padding at all. `height: 100%` fills whatever height the
+     host pane (.view-content, a flex item with a real bounded height) gives
+     it; wrapped in an inline markdown embed (no bounded parent height),
+     `height: 100%` resolves to `auto` per CSS's percentage-height rule, so
+     the root just sizes to its content there instead -- same non-scrolling
+     behavior the plugin has always had inline, deliberately unaffected by
+     this restructure. */
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Fixed chrome (app header, systems drawer trigger, tab bar, and -- on the
+   Usage tab only -- the period/range bar): a normal-flow flex child, never
+   scrolls. Owns the root's old horizontal/top inset so header/tabs read
+   exactly as before; the bottom inset now lives on .aios-scroll instead. */
+.aios-dashboard-root .aios-chrome {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px 0;
+}
+
+/* The one and only scroll container. Every tab's body (tiles, charts,
+   tables, the foot note) renders inside this div. min-height: 0 is load
+   bearing -- without it a flex child refuses to shrink below its content's
+   natural height, which defeats overflow-y:auto entirely. */
+.aios-dashboard-root .aios-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 22px 40px;
 }
 
 /* Numbers everywhere read as a table: stats, counts, costs, table cells. */
@@ -969,6 +1001,37 @@
 }
 .aios-dashboard-root .aios-tab-body {
   margin-bottom: 8px;
+}
+
+/* System tab sub-tabs (Agents / Skills / Workflows & SOPs): a second-level
+   nav, same segmented-control language as the primary tab bar but smaller,
+   since it lives inside the scrolling body (not the fixed chrome) and
+   needs to read as subordinate to it. */
+.aios-dashboard-root .aios-system-subtabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--aios-surface);
+  padding: 3px;
+  margin-bottom: 16px;
+}
+.aios-dashboard-root .aios-system-subtab {
+  background: transparent;
+  color: var(--aios-dim);
+  border: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms ease, background 140ms ease;
+}
+.aios-dashboard-root .aios-system-subtab:hover {
+  color: var(--aios-text);
+}
+.aios-dashboard-root .aios-system-subtab-active,
+.aios-dashboard-root .aios-system-subtab-active:hover {
+  color: #fff;
+  background: var(--aios-grad);
 }
 
 /* ---------------------------------------------------------------------
@@ -1952,7 +2015,7 @@
   padding: 0;
 }
 
-/* Usage tab body: everything below the sticky header (tiles, chart, model
+/* Usage tab body: everything below the period bar (tiles, chart, models
    breakdown, workflows, skills, projects). */
 .aios-dashboard-root .aios-usage-body {
   display: flex;
@@ -1961,62 +2024,31 @@
   padding-top: 10px;
 }
 
-/* Sticky period header (Phase 1 System-browser range toggle, 2026-08-04;
-   polish pass 2026-08): pinned to the top of the REAL scrolling ancestor,
-   Obsidian's own .view-content pane (see the .aios-dashboard-root comment
-   on why it is not itself the scroll container), while the Usage tab's
-   body scrolls underneath it, so the active period ("Last 7 days", plus
-   the concrete date range) and the range/paging controls stay visible and
-   every breakdown below stays unambiguous about which period it's
-   showing. Sits above table rows/hover states (z-index).
-
-   Horizontal/vertical padding lives ON THIS BOX (not inherited from the
-   root's own 22px inset) so the label and controls read as an inset bar
-   with breathing room on every side, not flush text -- this is Jaymo's
-   defect 1 report from the real app.
-
-   Gap-above-sticky fix (defect 2): .view-content is outside this
-   plugin's control and can carry its own top padding depending on
-   Obsidian's version/theme (measured ~12px against a representative
-   harness), which position:sticky pins BELOW (a sticky element sticks at
-   the scrollport's padding edge, not its border edge -- confirmed by
-   headless-Chrome measurement, gap == the ancestor's own padding-top,
-   independent of anything this plugin sets). We cannot cancel an ancestor
-   padding we don't own with a negative margin, so instead the sticky's
-   own opaque background is extended upward past its box via ::before,
-   comfortably past any plausible ancestor inset, so body content
-   scrolling underneath is never visible through that strip even though a
-   few px of true "top of pane" inset remains (matches normal Obsidian
-   pane framing). Opaque in both Obsidian themes because --aios-bg is a
-   fixed dark literal, not a theme-reactive var -- this dashboard's whole
-   design intentionally stays dark regardless of the host theme (see the
-   file-header comment), so no light-theme leak is possible; verified by
-   measuring computed background-color under both html.theme-light and
-   html.theme-dark. */
-.aios-dashboard-root .aios-usage-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  background: var(--aios-bg);
-  padding: 14px 22px 12px;
-  border-bottom: 1px solid var(--aios-border);
+/* Usage period bar (Phase 1 System-browser range toggle, 2026-08-04;
+   header/tabs restructure, 2026-08): no longer position:sticky -- it is a
+   normal-flow child of .aios-chrome (see the .aios-dashboard-root comment
+   for why), which is itself a non-scrolling flex child sitting above
+   .aios-scroll, so it stays visible for exactly the same structural reason
+   the tab bar does, with no z-index/containing-block tricks needed. One
+   compact row (Jaymo's real-app report: the old two-row stacked layout was
+   too tall) -- label, date range, and range/paging controls all share a
+   single flex row, right-aligned via .aios-usage-controls' own spacer. */
+.aios-dashboard-root .aios-usage-periodbar {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 6px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--aios-border);
 }
-.aios-dashboard-root .aios-usage-sticky::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: -100px;
-  height: 100px;
-  background: var(--aios-bg);
-}
-.aios-dashboard-root .aios-usage-sticky-head {
+.aios-dashboard-root .aios-usage-periodbar-head {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto;
+}
+.aios-dashboard-root .aios-usage-periodbar .aios-usage-controls {
+  flex: 1 1 auto;
 }
 .aios-dashboard-root .aios-usage-period-label {
   font-size: 15px;
