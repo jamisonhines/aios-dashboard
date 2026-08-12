@@ -370,6 +370,71 @@ export function computeHealth(input) {
 }
 
 // ---------------------------------------------------------------------------
+// Incidents strip (pure). Reads the plain-data view of Operations/incidents/
+// notes (path + raw frontmatter, gathered by the impure half in main.ts) and
+// returns only the open ones, newest-detected first. Notes are written by an
+// unattended 3am script and possibly hand-edited afterwards, so every field
+// is read defensively: a missing/malformed frontmatter, an absent or garbled
+// `detected` date, a wrong-case `status`, or a `tags` value that isn't a list
+// must all degrade gracefully rather than throw and take the whole dashboard
+// down. A malformed note is not silently dropped merely for being malformed;
+// it is dropped only if its status does not resolve to "open".
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{ path: string, item: string, summary: string, property: string, ageDays: number, prompt: string }} IncidentRow
+ */
+
+/**
+ * @param {{ notes: { path?: unknown, frontmatter?: unknown }[], now?: Date }} input
+ * @returns {IncidentRow[]}
+ */
+export function computeIncidents(input) {
+  const notes = Array.isArray(input?.notes) ? input.notes : [];
+  const now = input?.now instanceof Date && !isNaN(input.now.getTime()) ? input.now : new Date();
+  const nowMs = now.getTime();
+
+  const rows = [];
+  for (const note of notes) {
+    if (!note || typeof note !== "object") continue;
+    const path = typeof note.path === "string" && note.path.length > 0 ? note.path : null;
+    if (!path) continue;
+
+    const fm = note.frontmatter && typeof note.frontmatter === "object" ? note.frontmatter : {};
+
+    const status = typeof fm.status === "string" ? fm.status.trim().toLowerCase() : "";
+    if (status !== "open") continue; // resolved, missing, or unrecognized status: not surfaced
+
+    const item = typeof fm.item === "string" && fm.item.trim() ? fm.item.trim() : path.split("/").pop();
+    const summary = typeof fm.summary === "string" ? fm.summary.trim() : "";
+    const property = typeof fm.property === "string" ? fm.property.trim() : "";
+
+    const detectedMs = typeof fm.detected === "string" ? Date.parse(fm.detected) : NaN;
+    const hasDetected = !isNaN(detectedMs);
+    const ageDays = hasDetected ? Math.max(0, Math.floor((nowMs - detectedMs) / 86400000)) : 0;
+
+    const rawPrompt = typeof fm.prompt === "string" ? fm.prompt.trim() : "";
+    const prompt =
+      rawPrompt.length > 0
+        ? rawPrompt
+        : `Read ${path} and pick up the incident from there. It has no canned starter prompt, so orient yourself from the note (what broke, what was done) before acting.`;
+
+    rows.push({
+      path,
+      item,
+      summary,
+      property,
+      ageDays,
+      prompt,
+      _sortMs: hasDetected ? detectedMs : -Infinity, // undated notes sink to the bottom, never lead
+    });
+  }
+
+  rows.sort((a, b) => b._sortMs - a._sortMs);
+  return rows.map(({ _sortMs, ...row }) => row);
+}
+
+// ---------------------------------------------------------------------------
 // Usage model (pure). renderUsageTab in main.ts is the impure half that
 // reads usage-stats.json off disk and turns it into this plain-data shape.
 // ---------------------------------------------------------------------------

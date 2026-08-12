@@ -27,6 +27,7 @@ import {
   sortTasks,
   visiblePhaseTasks,
   computeHealth,
+  computeIncidents,
   formatCompactNumber,
   computeUsageView,
   computeOpsMapLayout,
@@ -103,6 +104,7 @@ interface AiosDashboardSettings {
   headerTitle: string;
   intakeFolder: string;
   journalFolder: string;
+  incidentsFolder: string; // vault-relative folder of Operations/incidents/INC-*.md notes
   showHealthStrip: boolean;
   intakeWarnDays: number;
   inProgressStaleDays: number;
@@ -130,6 +132,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   headerTitle: "AIOS",
   intakeFolder: "Intake",
   journalFolder: "Wiki/Journal",
+  incidentsFolder: "Operations/incidents",
   showHealthStrip: true,
   intakeWarnDays: 7,
   inProgressStaleDays: 7,
@@ -1933,6 +1936,84 @@ function renderHealthStrip(
     pill.createSpan({ cls: "aios-health-tile-label", text: tile.label });
     pill.createSpan({ cls: "aios-health-tile-count", text: tile.summary });
     pill.addEventListener("click", () => new HealthDetailModal(app, tile, settings).open());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Incidents strip: unattended overnight rollbacks, written to
+// Operations/incidents/INC-*.md by Dispatch's incident-response mode. Pure
+// view model (computeIncidents) lives in model.mjs, keyed only on
+// `status: open`; this is the impure gather + render half. Renders nothing
+// when there are zero open incidents (absence is the normal case), and sits
+// ABOVE the rest of the dashboard, unlike the health strip which lives
+// inside the Systems drawer -- an open incident is the single highest-
+// priority thing on the page, not one more thing to click into.
+// ---------------------------------------------------------------------------
+
+interface IncidentRow {
+  path: string;
+  item: string;
+  summary: string;
+  property: string;
+  ageDays: number;
+  prompt: string;
+}
+
+// Reads direct-child .md files of the incidents folder and hands their raw
+// (possibly malformed, possibly hand-edited) frontmatter to computeIncidents,
+// which is defensive about every field. A missing incidents folder degrades
+// to "no notes" (directChildFiles already returns [] for that), same pattern
+// as intake/journal.
+function gatherIncidents(app: App, settings: AiosDashboardSettings): IncidentRow[] {
+  const files = directChildFiles(app, settings.incidentsFolder).filter(
+    (f) => f.extension === "md"
+  );
+  const notes = files.map((f) => ({
+    path: f.path,
+    frontmatter: app.metadataCache.getFileCache(f)?.frontmatter,
+  }));
+  return computeIncidents({ notes, now: new Date() });
+}
+
+// Top-of-dashboard strip. Renders NOTHING (no wrapper element at all) when
+// there are zero open incidents, so a healthy vault shows no trace of this
+// feature. Each row: item / summary / property / age, plus "Work on this
+// with Dispatch" (desktop + actionsEnabled only, same gate as every other
+// launch button) and "Open note" (works everywhere).
+function renderIncidentsStrip(
+  app: App,
+  root: HTMLElement,
+  incidents: IncidentRow[],
+  settings: AiosDashboardSettings
+) {
+  if (incidents.length === 0) return;
+  const section = root.createDiv({ cls: "aios-incidents-section" });
+  section.createDiv({ cls: "aios-incidents-eyebrow", text: "Urgent" });
+  for (const inc of incidents) {
+    const row = section.createDiv({ cls: "aios-incidents-row" });
+    const main = row.createDiv({ cls: "aios-incidents-main" });
+    const head = main.createDiv({ cls: "aios-incidents-head" });
+    head.createSpan({ cls: "aios-incidents-item", text: inc.item });
+    if (inc.property) head.createSpan({ cls: "aios-incidents-property", text: inc.property });
+    head.createSpan({ cls: "aios-incidents-age", text: `${inc.ageDays}d ago` });
+    if (inc.summary) main.createDiv({ cls: "aios-incidents-summary", text: inc.summary });
+
+    const rowActions = row.createDiv({ cls: "aios-incidents-actions" });
+    if (settings.actionsEnabled && Platform.isDesktop) {
+      const fixBtn = rowActions.createEl("button", {
+        cls: "aios-btn aios-btn-cta",
+        text: "Work on this with Dispatch",
+      });
+      fixBtn.addEventListener("click", () => {
+        const base = getVaultBasePath(app);
+        if (!base) return;
+        launchDispatch(settings, base, inc.prompt);
+      });
+    }
+    const openBtn = rowActions.createEl("button", { cls: "aios-btn", text: "Open note" });
+    openBtn.addEventListener("click", () => {
+      app.workspace.openLinkText(inc.path, "", false);
+    });
   }
 }
 
@@ -3928,6 +4009,11 @@ function renderDashboard(
   root.addClass("aios-dashboard-root");
   const undoCtx: UndoCtx = { plugin, isLeafView };
 
+  // Incidents strip: the single highest-priority thing on the page when it
+  // exists, so it renders first, above even the fixed chrome. Renders
+  // nothing when there are zero open incidents.
+  renderIncidentsStrip(app, root, gatherIncidents(app, settings), settings);
+
   // Resolve config from the host note's frontmatter (config-driven per fork). No sourcePath
   // (standalone view or refresh re-render) falls back to the configured dashboard note.
   const hostFile = app.vault.getAbstractFileByPath(sourcePath ?? settings.dashboardNote);
@@ -4277,6 +4363,21 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.journalFolder)
           .onChange(async (v) => {
             this.plugin.settings.journalFolder = v.trim() || DEFAULT_SETTINGS.journalFolder;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Incidents folder")
+      .setDesc(
+        "Folder scanned for open-incident notes (frontmatter status: open) surfaced in the Urgent strip at the top of the dashboard."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.incidentsFolder)
+          .setValue(this.plugin.settings.incidentsFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.incidentsFolder = v.trim() || DEFAULT_SETTINGS.incidentsFolder;
             await save();
           })
       );
