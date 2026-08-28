@@ -6,6 +6,23 @@
 // never silently drift between the plugin and its tests.
 // Build 2.6 m1: de-mirror the tests.
 
+// GL-011 session-coordination parsers: CANONICAL HOME is the vault's own
+// ~/AIOS/Operations/scripts/lib/coordination-parse.mjs (three vault Node
+// scripts also import it directly -- branch-inventory.mjs,
+// coordination-report.mjs, and aios-health.mjs's Coordination drift
+// section). This is the ONLY import site for that module inside the plugin;
+// computeCoordinationView (below) is built on it, and spliceAnswer is
+// re-exported as-is for main.ts's answer write-back path.
+import {
+  parseActiveSessions,
+  parseLandingOrder,
+  parseQuestionsOpen,
+  hoursSince,
+  spliceAnswer,
+} from "../../AIOS/Operations/scripts/lib/coordination-parse.mjs";
+
+export { spliceAnswer };
+
 // ---------------------------------------------------------------------------
 // Buckets / status sections (Projects + Tasks tabs)
 // ---------------------------------------------------------------------------
@@ -2256,4 +2273,57 @@ export function isEditableEventTarget(tagName, isContentEditable) {
 export function taskStatusActionLabel(verb, title) {
   if (verb === "Completed") return `Marked "${title}" done`;
   return `${verb} "${title}"`;
+}
+
+// ---------------------------------------------------------------------------
+// Coordination panel (GL-011, pure). Today tab, one card per participating
+// project (any Projects/<slug>/ with a work-ledger.md -- decided by the
+// impure gather half in main.ts, not here). Mirrors the EXACT definitions in
+// Operations/scripts/coordination-report.mjs so the panel and the
+// session-start report can never disagree: active = a row's status,
+// lowercased, equals "active"; stale = active AND hoursSince(lastUpdate) >
+// 24; merge queue size ("unlanded") = parseLandingOrder items where landed
+// is false.
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{ session: string, branch: string, lastUpdate: string, stale: boolean }} CoordinationActiveSession
+ * @typedef {{ id: string, date: string, title: string, answer: string }} CoordinationQuestion
+ * @typedef {{ slug: string, activeSessions: CoordinationActiveSession[], unlanded: number, questions: CoordinationQuestion[] }} CoordinationProjectView
+ */
+
+/**
+ * @param {{ slug: string, ledgerContent: string, questionsContent?: string|null }[]} inputs
+ * @param {Date} now
+ * @returns {CoordinationProjectView[]}
+ */
+export function computeCoordinationView(inputs, now) {
+  const list = Array.isArray(inputs) ? inputs : [];
+  return list.map((input) => {
+    const ledgerContent = typeof input?.ledgerContent === "string" ? input.ledgerContent : "";
+    const questionsContent = typeof input?.questionsContent === "string" ? input.questionsContent : "";
+
+    const activeSessions = parseActiveSessions(ledgerContent)
+      .filter((s) => (s.status || "").toLowerCase() === "active")
+      .map((s) => {
+        const h = hoursSince(s.lastUpdate, now);
+        return {
+          session: s.session,
+          branch: s.branch,
+          lastUpdate: s.lastUpdate,
+          stale: h !== null && h > 24,
+        };
+      });
+
+    const unlanded = parseLandingOrder(ledgerContent).filter((item) => !item.landed).length;
+
+    const questions = parseQuestionsOpen(questionsContent).map((q) => ({
+      id: q.id,
+      date: q.date,
+      title: q.title,
+      answer: q.answer,
+    }));
+
+    return { slug: input?.slug, activeSessions, unlanded, questions };
+  });
 }
