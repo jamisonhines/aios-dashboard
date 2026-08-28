@@ -4458,8 +4458,15 @@ function renderDashboard(
 
     // Focus for Escape-to-close, but never steal focus from an input the
     // user is typing in when a live vault change re-renders the dashboard.
+    // document.activeElement reads document.body here (root.empty() already
+    // ran above), so the guard alone can't see a coordination answer input
+    // that was focused a moment ago -- coordFocus (captured BEFORE the wipe,
+    // same function scope) is the only thing that still knows. Without this,
+    // every live re-render while the drawer is open would yank focus out of
+    // a half-typed answer via this setTimeout, which fires after the async
+    // coordination restore (Reviewer Major 1).
     const active = document.activeElement;
-    if (!active || active === document.body) {
+    if ((!active || active === document.body) && !coordFocus) {
       window.setTimeout(() => drawer.focus(), 0);
     }
   }
