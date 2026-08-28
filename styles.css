@@ -1929,6 +1929,147 @@
 }
 
 /* ---------------------------------------------------------------------
+   Coordination panel (Today tab, GL-011). One collapsible card per
+   participating project, reusing .aios-card/.aios-card-head/.aios-chevron/
+   .aios-pill. Body: an ACTIVE SESSIONS group and an OPEN QUESTIONS group,
+   each omitted (not empty-stated) when it has nothing to show.
+--------------------------------------------------------------------- */
+.aios-dashboard-root .aios-coord-cards {
+  display: flex;
+  flex-direction: column;
+}
+.aios-dashboard-root .aios-coord-head {
+  cursor: pointer;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  min-height: 0;
+}
+.aios-dashboard-root .aios-coord-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.aios-dashboard-root .aios-coord-stale-pill {
+  color: var(--aios-p1);
+  background: rgba(249, 112, 102, 0.14);
+}
+.aios-dashboard-root .aios-coord-group {
+  margin-bottom: 14px;
+}
+.aios-dashboard-root .aios-coord-group:last-child {
+  margin-bottom: 0;
+}
+.aios-dashboard-root .aios-coord-group-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--aios-faint);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+/* Active sessions: session name, branch, last-update, stale flag. */
+.aios-dashboard-root .aios-coord-session-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 6px;
+  border-left: 2px solid transparent;
+  font-size: 12.5px;
+}
+.aios-dashboard-root .aios-coord-session-stale {
+  border-left-color: var(--aios-p1);
+  background: rgba(249, 112, 102, 0.06);
+}
+.aios-dashboard-root .aios-coord-session-name {
+  color: var(--aios-text);
+  font-weight: 600;
+}
+.aios-dashboard-root .aios-coord-session-branch {
+  color: var(--aios-dim);
+  font-family: var(--font-monospace, monospace);
+  font-size: 11.5px;
+}
+.aios-dashboard-root .aios-coord-session-updated {
+  color: var(--aios-faint);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+/* Open questions: title (click opens questions.md), id + date, an
+   "answered" pill when the file already carries answer text, and an
+   inline single-line answer input + Save button (the write-back path). */
+.aios-dashboard-root .aios-coord-question {
+  padding: 8px 6px;
+  border-top: 1px solid var(--aios-border);
+}
+.aios-dashboard-root .aios-coord-question:first-child {
+  border-top: none;
+}
+.aios-dashboard-root .aios-coord-question-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.aios-dashboard-root .aios-coord-question-title {
+  color: var(--aios-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-coord-question-title:hover {
+  color: var(--aios-white);
+  text-decoration: underline;
+}
+.aios-dashboard-root .aios-coord-question-meta {
+  color: var(--aios-faint);
+  font-size: 11px;
+}
+.aios-dashboard-root .aios-coord-answered-pill {
+  color: var(--aios-done-color);
+  background: rgba(64, 214, 154, 0.12);
+}
+.aios-dashboard-root .aios-coord-answer-row {
+  display: flex;
+  gap: 6px;
+}
+.aios-dashboard-root .aios-coord-answer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  transition: border-color 140ms ease;
+}
+.aios-dashboard-root .aios-coord-answer-input:focus {
+  outline: none;
+  border-color: var(--aios-accent);
+}
+.aios-dashboard-root .aios-coord-answer-save {
+  flex: 0 0 auto;
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.aios-dashboard-root .aios-coord-answer-save:hover {
+  border-color: var(--aios-accent);
+  color: var(--aios-white);
+}
+
+/* ---------------------------------------------------------------------
    Responsive
 --------------------------------------------------------------------- */
 @media (max-width: 560px) {
