@@ -66,6 +66,8 @@ import {
   undoCollisionNoticeText,
   isEditableEventTarget,
   taskStatusActionLabel,
+  computeCoordinationView,
+  spliceAnswer,
 } from "./model.mjs";
 
 // ---------------------------------------------------------------------------
@@ -216,6 +218,11 @@ interface ViewState {
   // System tab sub-tabs (2026-08): which second-level section is showing.
   // Persists across re-renders like activeTab does for the primary nav.
   systemActiveSubTab: "agents" | "skills" | "workflows";
+  // Coordination panel (GL-011, Today tab): half-typed answer drafts, keyed
+  // "<projectSlug>::<questionId>", surviving the 200ms debounced live
+  // re-render (see renderCoordinationQuestion/captureCoordinationFocus).
+  // Cleared per-key on a successful save.
+  coordinationDrafts: Map<string, string>;
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -235,6 +242,7 @@ function makeViewState(): ViewState {
     systemSkillsFilter: "",
     systemSkillsExpandedGroups: new Set(),
     systemActiveSubTab: "agents",
+    coordinationDrafts: new Map(),
   };
 }
 
@@ -361,6 +369,96 @@ function readProjects(app: App, projectsRoot: string): ProjectItem[] {
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Coordination panel (GL-011): a project is "participating" when
+// <projectsRoot>/<slug>/work-ledger.md exists. This is a synchronous
+// vault-index check (no file content read), so the caller can decide
+// "render nothing at all" before any I/O -- no empty-section flash while
+// content loads. Sorted alphabetically for a stable card order independent
+// of directory-listing order.
+// ---------------------------------------------------------------------------
+function participatingProjectSlugs(app: App, projectsRoot: string): string[] {
+  const root = app.vault.getAbstractFileByPath(normalizePath(projectsRoot));
+  if (!(root instanceof TFolder)) return [];
+  const slugs: string[] = [];
+  for (const child of root.children) {
+    if (!(child instanceof TFolder)) continue;
+    const ledgerPath = normalizePath(`${projectsRoot}/${child.name}/work-ledger.md`);
+    if (app.vault.getAbstractFileByPath(ledgerPath) instanceof TFile) slugs.push(child.name);
+  }
+  return slugs.sort((a, b) => a.localeCompare(b));
+}
+
+// The impure gather half (mirrors loadOpsMap's gather-then-render split):
+// vault.cachedRead of each participating project's work-ledger.md and
+// questions.md, handed as plain strings to computeCoordinationView (pure,
+// model.mjs). questions.md missing or unreadable degrades to null content
+// (the model turns that into zero questions), never an error -- same
+// optional-data pattern as automation-health.json/usage-stats.json.
+async function gatherCoordinationInputs(
+  app: App,
+  projectsRoot: string,
+  slugs: string[]
+): Promise<{ slug: string; ledgerContent: string; questionsContent: string | null }[]> {
+  const out: { slug: string; ledgerContent: string; questionsContent: string | null }[] = [];
+  for (const slug of slugs) {
+    const ledgerFile = app.vault.getAbstractFileByPath(
+      normalizePath(`${projectsRoot}/${slug}/work-ledger.md`)
+    );
+    let ledgerContent = "";
+    if (ledgerFile instanceof TFile) {
+      try {
+        ledgerContent = await app.vault.cachedRead(ledgerFile);
+      } catch {
+        ledgerContent = "";
+      }
+    }
+    const questionsFile = app.vault.getAbstractFileByPath(
+      normalizePath(`${projectsRoot}/${slug}/questions.md`)
+    );
+    let questionsContent: string | null = null;
+    if (questionsFile instanceof TFile) {
+      try {
+        questionsContent = await app.vault.cachedRead(questionsFile);
+      } catch {
+        questionsContent = null;
+      }
+    }
+    out.push({ slug, ledgerContent, questionsContent });
+  }
+  return out;
+}
+
+// Write-back for one question's answer: read-mutate-write, exactly the
+// setTaskStatus pattern (read contentBefore, compute new content with a pure
+// function, write, return the before/after pair so the caller can record an
+// undo entry). Returns null -- and fires a Notice, never a write -- when
+// questions.md cannot be found or spliceAnswer cannot locate the question or
+// its Answer line (a stale card: the question was filed/removed since this
+// render loaded).
+async function saveCoordinationAnswer(
+  app: App,
+  projectsRoot: string,
+  slug: string,
+  qid: string,
+  text: string
+): Promise<{ path: string; contentBefore: string; contentAfter: string } | null> {
+  const path = `${projectsRoot}/${slug}/questions.md`;
+  const file = app.vault.getAbstractFileByPath(normalizePath(path));
+  if (!(file instanceof TFile)) {
+    new Notice("AIOS: could not find " + path);
+    return null;
+  }
+  const contentBefore = await app.vault.read(file);
+  const contentAfter = spliceAnswer(contentBefore, qid, text, isoDate());
+  if (contentAfter == null) {
+    new Notice(`AIOS: could not locate ${qid}'s Answer line in ${path}`);
+    return null;
+  }
+  await app.vault.modify(file, contentAfter);
+  return { path: file.path, contentBefore, contentAfter };
 }
 
 // Resolve the ordered phase list for a project: declared phases first (in order),
@@ -3140,6 +3238,224 @@ function renderTodayStatRow(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Coordination panel (GL-011, Today tab): one card per participating project
+// (settings.projectsRoot/<slug>/work-ledger.md exists -- see
+// participatingProjectSlugs above). Renders nothing at all -- no section, no
+// label -- when no project participates. computeCoordinationView (model.mjs)
+// is the pure half; everything here is the impure gather-then-render half,
+// mirroring the ops-map tab's loadOpsMap split.
+// ---------------------------------------------------------------------------
+
+interface CoordinationActiveSession {
+  session: string;
+  branch: string;
+  lastUpdate: string;
+  stale: boolean;
+}
+
+interface CoordinationQuestion {
+  id: string;
+  date: string;
+  title: string;
+  answer: string;
+}
+
+interface CoordinationProjectView {
+  slug: string;
+  activeSessions: CoordinationActiveSession[];
+  unlanded: number;
+  questions: CoordinationQuestion[];
+}
+
+// What (if anything) was focused inside the coordination section right
+// before this render wiped the DOM (captured in renderDashboard, before
+// root.empty()). Threaded down through renderTodayTab so the async
+// card-population pass below can restore focus + cursor to the matching
+// recreated input once it exists -- never to anything else (same
+// never-steal-focus principle as the Systems drawer's own focus guard).
+interface CoordinationFocusCapture {
+  key: string; // data-key on the answer input: "<projectSlug>::<questionId>"
+  selectionStart: number | null;
+}
+
+function captureCoordinationFocus(root: HTMLElement): CoordinationFocusCapture | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement)) return null;
+  if (!active.classList.contains("aios-coord-answer-input")) return null;
+  if (!root.contains(active)) return null;
+  const key = active.getAttribute("data-key");
+  if (!key) return null;
+  return { key, selectionStart: active.selectionStart };
+}
+
+function restoreCoordinationFocus(body: HTMLElement, capture: CoordinationFocusCapture | null) {
+  if (!capture) return;
+  let target: HTMLInputElement | null = null;
+  body.querySelectorAll<HTMLInputElement>(".aios-coord-answer-input").forEach((el) => {
+    if (el.getAttribute("data-key") === capture.key) target = el;
+  });
+  if (!target) return;
+  target.focus();
+  const pos = capture.selectionStart ?? target.value.length;
+  try {
+    target.setSelectionRange(pos, pos);
+  } catch {
+    /* some input states don't support selection ranges; harmless to skip */
+  }
+}
+
+function renderCoordinationQuestion(
+  app: App,
+  settings: AiosDashboardSettings,
+  container: HTMLElement,
+  slug: string,
+  q: CoordinationQuestion,
+  viewState: ViewState,
+  refresh: () => void,
+  undoCtx: UndoCtx
+) {
+  const row = container.createDiv({ cls: "aios-coord-question" });
+
+  const head = row.createDiv({ cls: "aios-coord-question-head" });
+  const titleEl = head.createSpan({ cls: "aios-coord-question-title", text: q.title });
+  titleEl.addEventListener("click", () => {
+    app.workspace.openLinkText(`${settings.projectsRoot}/${slug}/questions.md`, "", false);
+  });
+  head.createSpan({
+    cls: "aios-coord-question-meta",
+    text: `${q.id.replace(/^Q-/, "")} · asked ${q.date}`,
+  });
+  if (q.answer.trim().length > 0) {
+    head.createSpan({ cls: "aios-pill aios-coord-answered-pill", text: "answered" });
+  }
+
+  const answerRow = row.createDiv({ cls: "aios-coord-answer-row" });
+  const draftKey = slug + "::" + q.id;
+  const input = answerRow.createEl("input", {
+    cls: "aios-coord-answer-input",
+    attr: { type: "text", placeholder: "Type an answer..." },
+  }) as HTMLInputElement;
+  input.setAttr("data-key", draftKey);
+  // A half-typed draft (kept in viewState across the live-refresh re-render)
+  // wins over the file's own parsed answer; cleared only on a successful save.
+  input.value = viewState.coordinationDrafts.has(draftKey)
+    ? (viewState.coordinationDrafts.get(draftKey) as string)
+    : q.answer;
+  input.addEventListener("input", () => {
+    viewState.coordinationDrafts.set(draftKey, input.value);
+  });
+
+  const saveBtn = answerRow.createEl("button", { cls: "aios-coord-answer-save", text: "Save" });
+
+  const save = async () => {
+    const text = input.value;
+    const result = await saveCoordinationAnswer(app, settings.projectsRoot, slug, q.id, text);
+    if (result) {
+      recordMutation(undoCtx.plugin, undoCtx.isLeafView, {
+        id: undoEntryId(),
+        label: `Answered ${q.id}`,
+        kind: "edit-move",
+        pathBefore: result.path,
+        pathAfter: result.path,
+        contentBefore: result.contentBefore,
+        contentAfter: result.contentAfter,
+      });
+      viewState.coordinationDrafts.delete(draftKey);
+    }
+    refresh();
+  };
+
+  saveBtn.addEventListener("click", () => void save());
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      void save();
+    }
+  });
+}
+
+function renderCoordinationCard(
+  app: App,
+  settings: AiosDashboardSettings,
+  container: HTMLElement,
+  view: CoordinationProjectView,
+  viewState: ViewState,
+  refresh: () => void,
+  undoCtx: UndoCtx
+) {
+  const card = container.createDiv({ cls: "aios-card aios-coord-card" });
+  const expandKey = "coord:" + view.slug;
+  if (viewState.expanded.has(expandKey)) card.addClass("aios-expanded");
+
+  const head = card.createDiv({ cls: "aios-card-head aios-coord-head" });
+  const left = head.createDiv({ cls: "aios-head-left" });
+  renderChevron(left);
+  left.createSpan({ cls: "aios-card-title", text: view.slug });
+
+  const pills = head.createDiv({ cls: "aios-coord-pills" });
+  pills.createSpan({ cls: "aios-pill", text: `${view.activeSessions.length} active` });
+  pills.createSpan({ cls: "aios-pill", text: `${view.unlanded} unlanded` });
+  pills.createSpan({ cls: "aios-pill", text: `${view.questions.length} questions` });
+  if (view.activeSessions.some((s) => s.stale)) {
+    pills.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale claim" });
+  }
+
+  head.addEventListener("click", () => {
+    const nowExpanded = card.classList.toggle("aios-expanded");
+    if (nowExpanded) viewState.expanded.add(expandKey);
+    else viewState.expanded.delete(expandKey);
+  });
+
+  const body = card.createDiv({ cls: "aios-card-body" });
+
+  if (view.activeSessions.length > 0) {
+    const group = body.createDiv({ cls: "aios-coord-group" });
+    group.createDiv({ cls: "aios-coord-group-label", text: "ACTIVE SESSIONS" });
+    for (const s of view.activeSessions) {
+      const row = group.createDiv({
+        cls: "aios-coord-session-row" + (s.stale ? " aios-coord-session-stale" : ""),
+      });
+      row.createSpan({ cls: "aios-coord-session-name", text: s.session });
+      row.createSpan({ cls: "aios-coord-session-branch", text: s.branch });
+      row.createSpan({ cls: "aios-coord-session-updated", text: "updated " + s.lastUpdate });
+      if (s.stale) row.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale" });
+    }
+  }
+
+  if (view.questions.length > 0) {
+    const group = body.createDiv({ cls: "aios-coord-group" });
+    group.createDiv({ cls: "aios-coord-group-label", text: "OPEN QUESTIONS" });
+    for (const q of view.questions) {
+      renderCoordinationQuestion(app, settings, group, view.slug, q, viewState, refresh, undoCtx);
+    }
+  }
+}
+
+function renderCoordinationSection(
+  app: App,
+  settings: AiosDashboardSettings,
+  container: HTMLElement,
+  viewState: ViewState,
+  refresh: () => void,
+  undoCtx: UndoCtx,
+  focusCapture: CoordinationFocusCapture | null
+) {
+  const slugs = participatingProjectSlugs(app, settings.projectsRoot);
+  if (slugs.length === 0) return; // no participating project: no section, no label, nothing at all
+
+  const section = container.createDiv({ cls: "aios-today-section aios-coord-section" });
+  section.createDiv({ cls: "aios-today-section-label", text: "COORDINATION" });
+  const body = section.createDiv({ cls: "aios-coord-cards" });
+
+  gatherCoordinationInputs(app, settings.projectsRoot, slugs).then((inputs) => {
+    const views: CoordinationProjectView[] = computeCoordinationView(inputs, new Date());
+    body.empty();
+    for (const v of views) renderCoordinationCard(app, settings, body, v, viewState, refresh, undoCtx);
+    restoreCoordinationFocus(body, focusCapture);
+  });
+}
+
 function renderTodayTab(
   app: App,
   container: HTMLElement,
@@ -3148,7 +3464,9 @@ function renderTodayTab(
   tasks: TaskItem[],
   healthTiles: HealthTile[],
   refresh: () => void,
-  undoCtx: UndoCtx
+  undoCtx: UndoCtx,
+  viewState: ViewState,
+  coordFocus: CoordinationFocusCapture | null
 ) {
   const wrap = container.createDiv({ cls: "aios-today-tab" });
 
@@ -3157,6 +3475,7 @@ function renderTodayTab(
 
   renderTopTasksSection(app, tasksRoot, wrap, tasks, refresh, undoCtx);
   renderQuickCapture(app, settings, wrap, undoCtx);
+  renderCoordinationSection(app, settings, wrap, viewState, refresh, undoCtx, coordFocus);
   renderTodayStatRow(app, settings, wrap, healthTiles);
 }
 
@@ -4005,6 +4324,12 @@ function renderDashboard(
   isLeafView: boolean,
   sourcePath?: string
 ) {
+  // Capture BEFORE the wipe: if a coordination answer input has focus, its
+  // key + cursor position are restored once the async coordination card pass
+  // (renderCoordinationSection) recreates it. Every re-render destroys and
+  // recreates the whole DOM tree 200ms after any vault change, including the
+  // save this input's own submit just made.
+  const coordFocus = captureCoordinationFocus(root);
   root.empty();
   root.addClass("aios-dashboard-root");
   const undoCtx: UndoCtx = { plugin, isLeafView };
@@ -4186,7 +4511,7 @@ function renderDashboard(
   // ----- Tab body -----
   const body = scroll.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "today") {
-    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh, undoCtx);
+    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh, undoCtx, viewState, coordFocus);
   } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh, undoCtx);
   } else if (viewState.activeTab === "usage") {
