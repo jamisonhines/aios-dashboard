@@ -218,9 +218,10 @@ interface ViewState {
   // System tab sub-tabs (2026-08): which second-level section is showing.
   // Persists across re-renders like activeTab does for the primary nav.
   systemActiveSubTab: "agents" | "skills" | "workflows";
-  // Coordination panel (GL-011, Today tab): half-typed answer drafts, keyed
-  // "<projectSlug>::<questionId>", surviving the 200ms debounced live
-  // re-render (see renderCoordinationQuestion/captureCoordinationFocus).
+  // Coordination panel (GL-011, Projects tab -- moved off Today 2026-08-29):
+  // half-typed answer drafts, keyed "<projectSlug>::<questionId>",
+  // surviving the 200ms debounced live re-render (see
+  // renderCoordinationQuestion/captureCoordinationFocus).
   // Cleared per-key on a successful save.
   coordinationDrafts: Map<string, string>;
 }
@@ -1610,8 +1611,9 @@ function renderProjectCard(
   allTasks: TaskItem[],
   viewState: ViewState,
   refresh: () => void,
-  undoCtx: UndoCtx
-) {
+  undoCtx: UndoCtx,
+  isCoordParticipant: boolean
+): CoordinationCardHosts | null {
   // All non-cancelled tasks for this project (drives progress + display).
   const projTasks = allTasks.filter(
     (t) => t.project === proj.slug && t.status !== "cancelled"
@@ -1642,16 +1644,49 @@ function renderProjectCard(
 
   const right = head.createDiv({ cls: "aios-head-right" });
   renderProgressBar(right, computeProgress(projTasks), "aios-bar-project");
+  // Coordination at-a-glance pills (GL-011), only for a participating
+  // project: N active / M unlanded / Q questions + a stale-claim warning
+  // pill when applicable. Placeholder created empty; filled in once the
+  // async gather in renderProjectsTab resolves.
+  let pillsHost: HTMLElement | null = null;
+  if (isCoordParticipant) {
+    pillsHost = right.createDiv({ cls: "aios-coord-pills" });
+  }
   renderProjectToggles(right, proj, viewState, refresh);
 
   head.addEventListener("click", () => {
     const nowExpanded = card.classList.toggle("aios-expanded");
     if (nowExpanded) viewState.expanded.add(expandKey);
     else viewState.expanded.delete(expandKey);
+    // Any coordination answer textarea that was sized while this card's
+    // body was still display:none measured scrollHeight 0 (the CSS
+    // min-height floor is what kept it from rendering as a sliver). Now
+    // that the card is actually visible, re-measure so a long prefilled
+    // answer grows to its real height instead of sitting at the floor.
+    // No-op for a non-participating card (querySelectorAll finds nothing)
+    // and safe to re-run even if the async coordination fill already sized
+    // these correctly (autoGrowCoordinationTextarea is a pure
+    // measure-and-set off the textarea's own current value).
+    if (nowExpanded && isCoordParticipant) {
+      card.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+        autoGrowCoordinationTextarea(el);
+      });
+    }
   });
 
   // Collapsible body.
   const body = card.createDiv({ cls: "aios-card-body" });
+
+  // Coordination content (GL-011), relocated here from its own Today-tab
+  // section (owner feedback 2026-08-29: "this should live in the project
+  // not the today tab"). Sits at the TOP of the body, above even the
+  // doing-now strip. Placeholder created empty; filled in by
+  // renderProjectsTab once the async ledger/questions gather resolves.
+  let bodyHost: HTMLElement | null = null;
+  if (isCoordParticipant) {
+    bodyHost = body.createDiv({ cls: "aios-coord-inline" });
+  }
+
   const split = splitProjectTasks(projTasks);
 
   // Doing now strip: in-progress tasks pinned at the top with an accent.
@@ -1711,6 +1746,8 @@ function renderProjectCard(
   } else {
     renderPhaseCard(null, projTasks, `Project: ${proj.name}`);
   }
+
+  return pillsHost && bodyHost ? { pillsHost, bodyHost } : null;
 }
 
 // A single-select chip row. One engine for both the status chips (Projects tab) and the
@@ -1743,7 +1780,9 @@ function renderProjectsTab(
   viewState: ViewState,
   refresh: () => void,
   hostFm: Record<string, unknown> | undefined,
-  undoCtx: UndoCtx
+  undoCtx: UndoCtx,
+  settings: AiosDashboardSettings,
+  coordFocus: CoordinationFocusCapture | null
 ) {
   const statusSections = resolveStatusSections(hostFm);
   const groups = groupProjectsByStatus(projects, statusSections);
@@ -1767,8 +1806,44 @@ function renderProjectsTab(
 
   const group = groups.find((g) => g.slug === active);
   if (!group) return;
+
+  // Coordination panel (GL-011), relocated from the Today tab (owner
+  // feedback 2026-08-29: "this should live in the project not the today
+  // tab"). A participating project (Projects/<slug>/work-ledger.md exists)
+  // gets a pills host in its card head plus a body host at the top of its
+  // card body; both start empty. One batched gather covers every
+  // participating card in the currently-visible status group, mirroring the
+  // old Today-tab section's gather-then-render split (just fanned out to N
+  // card hosts instead of one section body).
+  const participatingSlugs = participatingProjectSlugs(app, settings.projectsRoot);
+  const coordHosts = new Map<string, CoordinationCardHosts>();
   for (const proj of group.projects) {
-    renderProjectCard(app, tasksRoot, container, proj, tasks, viewState, refresh, undoCtx);
+    const hosts = renderProjectCard(
+      app,
+      tasksRoot,
+      container,
+      proj,
+      tasks,
+      viewState,
+      refresh,
+      undoCtx,
+      participatingSlugs.includes(proj.slug)
+    );
+    if (hosts) coordHosts.set(proj.slug, hosts);
+  }
+
+  if (coordHosts.size > 0) {
+    const slugs = Array.from(coordHosts.keys());
+    gatherCoordinationInputs(app, settings.projectsRoot, slugs).then((inputs) => {
+      const views: CoordinationProjectView[] = computeCoordinationView(inputs, new Date());
+      for (const v of views) {
+        const hosts = coordHosts.get(v.slug);
+        if (!hosts) continue;
+        renderCoordinationPills(hosts.pillsHost, v);
+        renderCoordinationBody(app, settings, hosts.bodyHost, v, viewState, refresh, undoCtx);
+      }
+      restoreCoordinationFocus(container, coordFocus);
+    });
   }
 }
 
@@ -3281,7 +3356,7 @@ interface CoordinationFocusCapture {
 
 function captureCoordinationFocus(root: HTMLElement): CoordinationFocusCapture | null {
   const active = document.activeElement;
-  if (!(active instanceof HTMLInputElement)) return null;
+  if (!(active instanceof HTMLTextAreaElement)) return null;
   if (!active.classList.contains("aios-coord-answer-input")) return null;
   if (!root.contains(active)) return null;
   const key = active.getAttribute("data-key");
@@ -3289,10 +3364,13 @@ function captureCoordinationFocus(root: HTMLElement): CoordinationFocusCapture |
   return { key, selectionStart: active.selectionStart };
 }
 
-function restoreCoordinationFocus(body: HTMLElement, capture: CoordinationFocusCapture | null) {
+// Scans whatever container the caller passes -- the whole Projects-tab body
+// now that answer boxes live inside per-project cards rather than one
+// Today-tab section, so the matching textarea could be under any card.
+function restoreCoordinationFocus(container: HTMLElement, capture: CoordinationFocusCapture | null) {
   if (!capture) return;
-  let target: HTMLInputElement | null = null;
-  body.querySelectorAll<HTMLInputElement>(".aios-coord-answer-input").forEach((el) => {
+  let target: HTMLTextAreaElement | null = null;
+  container.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
     if (el.getAttribute("data-key") === capture.key) target = el;
   });
   if (!target) return;
@@ -3305,6 +3383,22 @@ function restoreCoordinationFocus(body: HTMLElement, capture: CoordinationFocusC
   }
 }
 
+// Shared auto-grow sizer for a coordination answer textarea: reset to
+// "auto" so scrollHeight reflects the CURRENT content (not a stale taller
+// value from before a shrink), then set height to that measured content
+// height. Must be re-run whenever the element's content OR its visibility
+// changes -- scrollHeight reads 0 for anything inside a display:none
+// subtree (a collapsed project card's .aios-card-body), which is exactly
+// why this needs a second call site: once here per-keystroke/at-creation,
+// and again from renderProjectCard's expand handler for whichever
+// textareas were sized at 0 while their card was still collapsed. Pure
+// measure-and-set off the textarea's own live value, so re-running it from
+// either call site is idempotent -- the two paths cannot fight.
+function autoGrowCoordinationTextarea(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+
 function renderCoordinationQuestion(
   app: App,
   settings: AiosDashboardSettings,
@@ -3315,6 +3409,8 @@ function renderCoordinationQuestion(
   refresh: () => void,
   undoCtx: UndoCtx
 ) {
+  // The question itself: a muted surface box with a faint left accent so it
+  // reads as "incoming" (an agent asked this).
   const row = container.createDiv({ cls: "aios-coord-question" });
 
   const head = row.createDiv({ cls: "aios-coord-question-head" });
@@ -3330,21 +3426,41 @@ function renderCoordinationQuestion(
     head.createSpan({ cls: "aios-pill aios-coord-answered-pill", text: "answered" });
   }
 
-  const answerRow = row.createDiv({ cls: "aios-coord-answer-row" });
+  // The answer: a visually distinct sub-block offset under the question,
+  // tinted a different hue (green/positive, not the red used for stale) so
+  // "what Jaymo wrote" reads as unmistakably his at a glance -- owner
+  // feedback 2026-08-29 was that question and answer used to look the same.
+  const answerBlock = row.createDiv({ cls: "aios-coord-answer-block" });
+  answerBlock.createDiv({ cls: "aios-coord-answer-label", text: "YOUR ANSWER" });
+
+  const answerRow = answerBlock.createDiv({ cls: "aios-coord-answer-row" });
   const draftKey = slug + "::" + q.id;
-  const input = answerRow.createEl("input", {
+  const input = answerRow.createEl("textarea", {
     cls: "aios-coord-answer-input",
-    attr: { type: "text", placeholder: "Type an answer..." },
-  }) as HTMLInputElement;
+    attr: { rows: 1, placeholder: "Type an answer... (Shift+Enter for a new line)" },
+  });
   input.setAttr("data-key", draftKey);
   // A half-typed draft (kept in viewState across the live-refresh re-render)
   // wins over the file's own parsed answer; cleared only on a successful save.
   input.value = viewState.coordinationDrafts.has(draftKey)
     ? (viewState.coordinationDrafts.get(draftKey) as string)
     : q.answer;
+
+  // Auto-grow: starts at ~1-2 rows, grows with content up to the CSS
+  // max-height (styles.css), then scrolls. 13 of 18 real answers in the
+  // vagabond-ops-app questions.md are long prose, so a fixed single-line
+  // input truncated most of what Jaymo actually writes.
   input.addEventListener("input", () => {
     viewState.coordinationDrafts.set(draftKey, input.value);
+    autoGrowCoordinationTextarea(input);
   });
+  // Size once up front too, since the starting value (a real answer or a
+  // restored draft) may already be multiple lines long. If this card is
+  // still collapsed right now, scrollHeight reads 0 here (display:none
+  // subtree) -- the CSS min-height floor covers that until
+  // renderProjectCard's expand handler re-runs this same sizer once the
+  // card actually becomes visible.
+  autoGrowCoordinationTextarea(input);
 
   const saveBtn = answerRow.createEl("button", { cls: "aios-coord-answer-save", text: "Save" });
 
@@ -3368,14 +3484,39 @@ function renderCoordinationQuestion(
 
   saveBtn.addEventListener("click", () => void save());
   input.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") {
+    // Enter saves; Shift+Enter inserts a newline. Newlines are collapsed to
+    // a single line on write by spliceAnswer (model.mjs), unchanged.
+    if (ev.key === "Enter" && !ev.shiftKey) {
       ev.preventDefault();
       void save();
     }
   });
 }
 
-function renderCoordinationCard(
+// Hosts for one participating project's coordination content, created
+// synchronously (empty) inside renderProjectCard and filled in once the
+// async gather below resolves: pillsHost sits in the card's always-visible
+// head row, bodyHost sits at the top of the collapsible body.
+interface CoordinationCardHosts {
+  pillsHost: HTMLElement;
+  bodyHost: HTMLElement;
+}
+
+function renderCoordinationPills(container: HTMLElement, view: CoordinationProjectView) {
+  container.empty();
+  container.createSpan({ cls: "aios-pill", text: `${view.activeSessions.length} active` });
+  container.createSpan({ cls: "aios-pill", text: `${view.unlanded} unlanded` });
+  container.createSpan({ cls: "aios-pill", text: `${view.questions.length} questions` });
+  if (view.activeSessions.some((s) => s.stale)) {
+    container.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale claim" });
+  }
+}
+
+// Coordination content for one participating project, rendered directly as
+// groups (no separate collapsible card/chevron of its own -- the project
+// card's own expand state governs visibility). Each group is omitted, not
+// empty-stated, when it has nothing to show.
+function renderCoordinationBody(
   app: App,
   settings: AiosDashboardSettings,
   container: HTMLElement,
@@ -3384,33 +3525,10 @@ function renderCoordinationCard(
   refresh: () => void,
   undoCtx: UndoCtx
 ) {
-  const card = container.createDiv({ cls: "aios-card aios-coord-card" });
-  const expandKey = "coord:" + view.slug;
-  if (viewState.expanded.has(expandKey)) card.addClass("aios-expanded");
-
-  const head = card.createDiv({ cls: "aios-card-head aios-coord-head" });
-  const left = head.createDiv({ cls: "aios-head-left" });
-  renderChevron(left);
-  left.createSpan({ cls: "aios-card-title", text: view.slug });
-
-  const pills = head.createDiv({ cls: "aios-coord-pills" });
-  pills.createSpan({ cls: "aios-pill", text: `${view.activeSessions.length} active` });
-  pills.createSpan({ cls: "aios-pill", text: `${view.unlanded} unlanded` });
-  pills.createSpan({ cls: "aios-pill", text: `${view.questions.length} questions` });
-  if (view.activeSessions.some((s) => s.stale)) {
-    pills.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale claim" });
-  }
-
-  head.addEventListener("click", () => {
-    const nowExpanded = card.classList.toggle("aios-expanded");
-    if (nowExpanded) viewState.expanded.add(expandKey);
-    else viewState.expanded.delete(expandKey);
-  });
-
-  const body = card.createDiv({ cls: "aios-card-body" });
+  container.empty();
 
   if (view.activeSessions.length > 0) {
-    const group = body.createDiv({ cls: "aios-coord-group" });
+    const group = container.createDiv({ cls: "aios-coord-group" });
     group.createDiv({ cls: "aios-coord-group-label", text: "ACTIVE SESSIONS" });
     for (const s of view.activeSessions) {
       const row = group.createDiv({
@@ -3424,36 +3542,12 @@ function renderCoordinationCard(
   }
 
   if (view.questions.length > 0) {
-    const group = body.createDiv({ cls: "aios-coord-group" });
+    const group = container.createDiv({ cls: "aios-coord-group" });
     group.createDiv({ cls: "aios-coord-group-label", text: "OPEN QUESTIONS" });
     for (const q of view.questions) {
       renderCoordinationQuestion(app, settings, group, view.slug, q, viewState, refresh, undoCtx);
     }
   }
-}
-
-function renderCoordinationSection(
-  app: App,
-  settings: AiosDashboardSettings,
-  container: HTMLElement,
-  viewState: ViewState,
-  refresh: () => void,
-  undoCtx: UndoCtx,
-  focusCapture: CoordinationFocusCapture | null
-) {
-  const slugs = participatingProjectSlugs(app, settings.projectsRoot);
-  if (slugs.length === 0) return; // no participating project: no section, no label, nothing at all
-
-  const section = container.createDiv({ cls: "aios-today-section aios-coord-section" });
-  section.createDiv({ cls: "aios-today-section-label", text: "COORDINATION" });
-  const body = section.createDiv({ cls: "aios-coord-cards" });
-
-  gatherCoordinationInputs(app, settings.projectsRoot, slugs).then((inputs) => {
-    const views: CoordinationProjectView[] = computeCoordinationView(inputs, new Date());
-    body.empty();
-    for (const v of views) renderCoordinationCard(app, settings, body, v, viewState, refresh, undoCtx);
-    restoreCoordinationFocus(body, focusCapture);
-  });
 }
 
 function renderTodayTab(
@@ -3464,9 +3558,7 @@ function renderTodayTab(
   tasks: TaskItem[],
   healthTiles: HealthTile[],
   refresh: () => void,
-  undoCtx: UndoCtx,
-  viewState: ViewState,
-  coordFocus: CoordinationFocusCapture | null
+  undoCtx: UndoCtx
 ) {
   const wrap = container.createDiv({ cls: "aios-today-tab" });
 
@@ -3475,7 +3567,6 @@ function renderTodayTab(
 
   renderTopTasksSection(app, tasksRoot, wrap, tasks, refresh, undoCtx);
   renderQuickCapture(app, settings, wrap, undoCtx);
-  renderCoordinationSection(app, settings, wrap, viewState, refresh, undoCtx, coordFocus);
   renderTodayStatRow(app, settings, wrap, healthTiles);
 }
 
@@ -4324,11 +4415,11 @@ function renderDashboard(
   isLeafView: boolean,
   sourcePath?: string
 ) {
-  // Capture BEFORE the wipe: if a coordination answer input has focus, its
-  // key + cursor position are restored once the async coordination card pass
-  // (renderCoordinationSection) recreates it. Every re-render destroys and
-  // recreates the whole DOM tree 200ms after any vault change, including the
-  // save this input's own submit just made.
+  // Capture BEFORE the wipe: if a coordination answer textarea has focus,
+  // its key + cursor position are restored once the async coordination
+  // gather (renderProjectsTab, Projects tab) recreates it. Every re-render
+  // destroys and recreates the whole DOM tree 200ms after any vault change,
+  // including the save this input's own submit just made.
   const coordFocus = captureCoordinationFocus(root);
   root.empty();
   root.addClass("aios-dashboard-root");
@@ -4518,7 +4609,7 @@ function renderDashboard(
   // ----- Tab body -----
   const body = scroll.createDiv({ cls: "aios-tab-body" });
   if (viewState.activeTab === "today") {
-    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh, undoCtx, viewState, coordFocus);
+    renderTodayTab(app, body, settings, settings.tasksRoot, tasks, healthTiles, refresh, undoCtx);
   } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh, undoCtx);
   } else if (viewState.activeTab === "usage") {
@@ -4528,7 +4619,7 @@ function renderDashboard(
   } else if (viewState.activeTab === "opsmap") {
     renderOpsMapTab(app, body, settings);
   } else {
-    renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm, undoCtx);
+    renderProjectsTab(app, settings.tasksRoot, body, projects, tasks, viewState, refresh, hostFm, undoCtx, settings, coordFocus);
   }
 
   scroll.createDiv({ cls: "aios-foot" }).setText(
