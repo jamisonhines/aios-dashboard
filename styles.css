@@ -1966,6 +1966,31 @@
   margin-bottom: 6px;
 }
 
+/* OPEN QUESTIONS group: collapsible, collapsed by default. Standard
+   chevron treatment -- same rotate-on-.aios-expanded mechanism as a
+   project/phase card head, just scoped to .aios-coord-group-questions
+   instead of .aios-card. ACTIVE SESSIONS above is unchanged: a plain
+   .aios-coord-group-label with no head/chevron, always shown. */
+.aios-dashboard-root .aios-coord-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-coord-group-head .aios-coord-group-label {
+  margin-bottom: 0;
+}
+.aios-dashboard-root .aios-coord-group-questions .aios-coord-group-body {
+  display: none;
+}
+.aios-dashboard-root .aios-coord-group-questions.aios-expanded .aios-coord-group-body {
+  display: block;
+  margin-top: 8px;
+}
+.aios-dashboard-root .aios-coord-group-questions.aios-expanded .aios-coord-group-head .aios-chevron {
+  transform: rotate(90deg);
+}
+
 /* Active sessions: session name, branch, last-update, stale flag. */
 .aios-dashboard-root .aios-coord-session-row {
   display: flex;
@@ -1996,12 +2021,20 @@
 }
 
 /* Open questions: a muted surface box per question ("incoming") with a
-   faint left accent -- title (click opens questions.md), id + date, an
-   "answered" pill when the file already carries answer text. The gap
-   BETWEEN question entries (margin-bottom here) is deliberately larger
-   than the gap between a question and its own answer block below
-   (.aios-coord-answer-block's margin-top), so each Q+A pair reads as one
-   unit and separate questions read as separate units. */
+   faint left accent. Collapsed by default to the head row (title + Q-id/
+   date + "answered" pill); clicking the HEAD expands it to reveal the body
+   (CONTEXT + YOUR ANSWER) below. Only the head is the click target (cursor:
+   pointer lives there, not on the whole question box) -- Reviewer finding
+   2026-08-30: with the toggle on the whole box, clicking or selecting text
+   in CONTEXT or in the answer block's padding collapsed the question out
+   from under Jaymo. The Q-id link (a head descendant) still needs its own
+   stopPropagation in main.ts so it opens the file instead of toggling; the
+   answer textarea and Save button no longer need one, since they live in
+   the body, a sibling of head, and a click there never reaches head's
+   listener. The gap BETWEEN question entries (margin-bottom here) is
+   deliberately larger than the gap between a question's head and its own
+   body (.aios-coord-question-body's margin-top), so each Q+A pair reads as
+   one unit and separate questions read as separate units. */
 .aios-dashboard-root .aios-coord-question {
   background: var(--aios-surface-2);
   border: 1px solid var(--aios-border);
@@ -2017,34 +2050,55 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
+  cursor: pointer;
 }
 .aios-dashboard-root .aios-coord-question-title {
   color: var(--aios-text);
   font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
-}
-.aios-dashboard-root .aios-coord-question-title:hover {
-  color: var(--aios-white);
-  text-decoration: underline;
 }
 .aios-dashboard-root .aios-coord-question-meta {
   color: var(--aios-faint);
   font-size: 11px;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-coord-question-meta:hover {
+  color: var(--aios-white);
+  text-decoration: underline;
 }
 .aios-dashboard-root .aios-coord-answered-pill {
   color: var(--aios-done-color);
   background: rgba(64, 214, 154, 0.12);
 }
 
+/* Body: CONTEXT then YOUR ANSWER, hidden until the question expands.
+   Context reads as background info, not a second question -- small, muted
+   type, no accent border of its own (it stays visually part of the same
+   "incoming" question box as the head above it). Omitted entirely when the
+   question has no Context field. */
+.aios-dashboard-root .aios-coord-question-body {
+  display: none;
+}
+.aios-dashboard-root .aios-coord-question.aios-expanded .aios-coord-question-body {
+  display: block;
+  margin-top: 8px;
+}
+.aios-dashboard-root .aios-coord-question-context {
+  color: var(--aios-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
 /* The answer: a visually distinct sub-block offset/indented under its
    question, tinted a DIFFERENT hue (green/positive -- same accent as the
    "answered" pill above, never the red used for stale) than the question's
    neutral-grey box, so "what Jaymo wrote" reads as unmistakably his at a
-   glance. margin-top here is intentionally smaller than
-   .aios-coord-question's own margin-bottom (the between-entries gap). */
+   glance. No margin-top of its own: .aios-coord-question-body already
+   supplies the head-to-body gap, and .aios-coord-question-context (when
+   present) already supplies its own margin-bottom before this block, so
+   the answer sits flush under whichever one is its immediate predecessor. */
 .aios-dashboard-root .aios-coord-answer-block {
-  margin-top: 8px;
   margin-left: 14px;
   padding: 8px 10px;
   background: rgba(64, 214, 154, 0.06);

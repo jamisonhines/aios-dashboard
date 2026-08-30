@@ -3333,6 +3333,7 @@ interface CoordinationQuestion {
   id: string;
   date: string;
   title: string;
+  context: string;
   answer: string;
 }
 
@@ -3399,6 +3400,18 @@ function autoGrowCoordinationTextarea(el: HTMLTextAreaElement) {
   el.style.height = el.scrollHeight + "px";
 }
 
+// One question, collapsed by default to a compact row (title + answered
+// pill + faint id/date), clicking the head expands it to reveal, top to
+// bottom: the title (unchanged, already visible in the collapsed row), a
+// CONTEXT block, then the YOUR ANSWER block. Collapsed, the head IS
+// effectively the whole visible row (the body is display:none), so the hit
+// target does not shrink; it only stops covering the body once expanded.
+// Owner feedback 2026-08-30:
+// "clicking on a question should open the main question, context should be
+// below it and the answer field below that." Per-question expand state is
+// keyed "<slug>::<id>" in viewState.expanded, the exact same shape as the
+// draft key (a different Map, so no collision) -- both survive the
+// live-refresh re-render the same way.
 function renderCoordinationQuestion(
   app: App,
   settings: AiosDashboardSettings,
@@ -3409,32 +3422,77 @@ function renderCoordinationQuestion(
   refresh: () => void,
   undoCtx: UndoCtx
 ) {
+  const draftKey = slug + "::" + q.id;
+  const qExpandKey = draftKey;
+
   // The question itself: a muted surface box with a faint left accent so it
   // reads as "incoming" (an agent asked this).
   const row = container.createDiv({ cls: "aios-coord-question" });
+  if (viewState.expanded.has(qExpandKey)) row.addClass("aios-expanded");
 
+  // Head: the compact collapsed row, and still the always-visible top of
+  // the expanded layout. The HEAD (not the whole row) carries the toggle
+  // click listener: the body (CONTEXT text, the answer textarea, the
+  // answer block's padding) is a SIBLING of head, not a descendant, so a
+  // click anywhere in the body never bubbles into this listener at all --
+  // no stopPropagation needed there. Reviewer finding 2026-08-30: with the
+  // listener on the whole row, clicking (or finishing a text selection)
+  // anywhere in CONTEXT or in the answer block's padding collapsed the
+  // question out from under Jaymo, e.g. the moment he tried to copy a
+  // wiki-link name out of a context line. metaEl's own stopPropagation
+  // below still matters: it IS a head descendant, so without it, clicking
+  // the Q-id/date link would also toggle collapse instead of opening the
+  // file.
   const head = row.createDiv({ cls: "aios-coord-question-head" });
-  const titleEl = head.createSpan({ cls: "aios-coord-question-title", text: q.title });
-  titleEl.addEventListener("click", () => {
-    app.workspace.openLinkText(`${settings.projectsRoot}/${slug}/questions.md`, "", false);
-  });
-  head.createSpan({
+  head.createSpan({ cls: "aios-coord-question-title", text: q.title });
+  // The Q-id + date is now the open-the-file affordance (title itself no
+  // longer opens questions.md -- clicking the head toggles expansion
+  // instead, so the click target had to move).
+  const metaEl = head.createSpan({
     cls: "aios-coord-question-meta",
     text: `${q.id.replace(/^Q-/, "")} · asked ${q.date}`,
   });
+  metaEl.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    app.workspace.openLinkText(`${settings.projectsRoot}/${slug}/questions.md`, "", false);
+  });
   if (q.answer.trim().length > 0) {
     head.createSpan({ cls: "aios-pill aios-coord-answered-pill", text: "answered" });
+  }
+  head.addEventListener("click", () => {
+    const nowOpen = row.classList.toggle("aios-expanded");
+    if (nowOpen) viewState.expanded.add(qExpandKey);
+    else viewState.expanded.delete(qExpandKey);
+    // Re-measure this question's own answer textarea now that its body is
+    // actually visible (see the zero-height comment above autoGrow()).
+    // Queried from row, not head: the textarea lives in body, a sibling of
+    // head, so head itself has nothing to find.
+    if (nowOpen) {
+      row.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+        autoGrowCoordinationTextarea(el);
+      });
+    }
+  });
+
+  // Body: CONTEXT (when present) then YOUR ANSWER, hidden until the head
+  // toggles this question open.
+  const body = row.createDiv({ cls: "aios-coord-question-body" });
+
+  // Context: background info, not a second question -- small, muted type,
+  // still visually part of the "incoming" question box (no accent border
+  // of its own). Omitted entirely when "".
+  if (q.context) {
+    body.createDiv({ cls: "aios-coord-question-context", text: q.context });
   }
 
   // The answer: a visually distinct sub-block offset under the question,
   // tinted a different hue (green/positive, not the red used for stale) so
   // "what Jaymo wrote" reads as unmistakably his at a glance -- owner
   // feedback 2026-08-29 was that question and answer used to look the same.
-  const answerBlock = row.createDiv({ cls: "aios-coord-answer-block" });
+  const answerBlock = body.createDiv({ cls: "aios-coord-answer-block" });
   answerBlock.createDiv({ cls: "aios-coord-answer-label", text: "YOUR ANSWER" });
 
   const answerRow = answerBlock.createDiv({ cls: "aios-coord-answer-row" });
-  const draftKey = slug + "::" + q.id;
   const input = answerRow.createEl("textarea", {
     cls: "aios-coord-answer-input",
     attr: { rows: 1, placeholder: "Type an answer... (Shift+Enter for a new line)" },
@@ -3455,11 +3513,13 @@ function renderCoordinationQuestion(
     autoGrowCoordinationTextarea(input);
   });
   // Size once up front too, since the starting value (a real answer or a
-  // restored draft) may already be multiple lines long. If this card is
-  // still collapsed right now, scrollHeight reads 0 here (display:none
-  // subtree) -- the CSS min-height floor covers that until
-  // renderProjectCard's expand handler re-runs this same sizer once the
-  // card actually becomes visible.
+  // restored draft) may already be multiple lines long. This textarea now
+  // sits inside TWO layers that can each be display:none at creation time
+  // (this question's own body, and its parent OPEN QUESTIONS group's body)
+  // -- scrollHeight reads 0 whenever either is collapsed. The CSS
+  // min-height floor covers that until the group-expand or question-expand
+  // handler below re-runs this same sizer once the textarea is actually
+  // visible.
   autoGrowCoordinationTextarea(input);
 
   const saveBtn = answerRow.createEl("button", { cls: "aios-coord-answer-save", text: "Save" });
@@ -3541,11 +3601,44 @@ function renderCoordinationBody(
     }
   }
 
+  // OPEN QUESTIONS: collapsible, collapsed by default (owner feedback
+  // 2026-08-30: "questions section should be collapsable so it's not
+  // showing all by default"). Standard chevron treatment, same rotate-on-
+  // expand mechanism as a project/phase card head. Expand state persists in
+  // viewState.expanded under "coordq:<slug>" -- ACTIVE SESSIONS above is
+  // unchanged, not collapsible.
   if (view.questions.length > 0) {
-    const group = container.createDiv({ cls: "aios-coord-group" });
-    group.createDiv({ cls: "aios-coord-group-label", text: "OPEN QUESTIONS" });
+    const group = container.createDiv({ cls: "aios-coord-group aios-coord-group-questions" });
+    const qGroupKey = "coordq:" + view.slug;
+    if (viewState.expanded.has(qGroupKey)) group.addClass("aios-expanded");
+
+    const groupHead = group.createDiv({ cls: "aios-coord-group-head" });
+    renderChevron(groupHead);
+    groupHead.createSpan({
+      cls: "aios-coord-group-label",
+      text: `OPEN QUESTIONS (${view.questions.length})`,
+    });
+    groupHead.addEventListener("click", () => {
+      const nowOpen = group.classList.toggle("aios-expanded");
+      if (nowOpen) viewState.expanded.add(qGroupKey);
+      else viewState.expanded.delete(qGroupKey);
+      // A question that was already expanded (persisted in viewState from
+      // an earlier interaction) has its own body visible now that this
+      // group is too, but its textarea was measured at scrollHeight 0 while
+      // the group hid it -- re-measure every answer textarea in the group,
+      // not just this group's own newly-revealed content. Idempotent: a
+      // textarea whose question is still collapsed just gets re-measured
+      // at 0 again, harmless since it stays hidden.
+      if (nowOpen) {
+        group.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+          autoGrowCoordinationTextarea(el);
+        });
+      }
+    });
+
+    const groupBody = group.createDiv({ cls: "aios-coord-group-body" });
     for (const q of view.questions) {
-      renderCoordinationQuestion(app, settings, group, view.slug, q, viewState, refresh, undoCtx);
+      renderCoordinationQuestion(app, settings, groupBody, view.slug, q, viewState, refresh, undoCtx);
     }
   }
 }

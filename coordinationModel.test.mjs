@@ -112,9 +112,36 @@ function questions(entries) {
   assert.equal(v.unlanded, 2, "2 of 3 landing-order items are not landed (item 1 says 'landed')");
 
   assert.deepEqual(v.questions, [
-    { id: "Q-2026-08-28-01", date: "2026-08-28", title: "Answered but unfiled question", answer: "yes go ahead" },
-    { id: "Q-2026-08-28-02", date: "2026-08-28", title: "Still blank", answer: "" },
+    { id: "Q-2026-08-28-01", date: "2026-08-28", title: "Answered but unfiled question", context: "c", answer: "yes go ahead" },
+    { id: "Q-2026-08-28-02", date: "2026-08-28", title: "Still blank", context: "c", answer: "" },
   ]);
+}
+
+// --- context passthrough: distinct per-question values, so a wiring bug
+// (e.g. context accidentally echoing answer, or the field being dropped)
+// cannot hide behind a coincidental match ---
+{
+  const LEDGER = ledger([], ["1. feat/x - ready"]);
+  const QUESTIONS = questions([
+    "### Q-2026-08-30-01 Question with a distinct multi-word context",
+    "- Context: the background info goes here, not the answer",
+    "- Asked by: s, 2026-08-30",
+    "- Answer: the actual answer text, different from context",
+    "",
+    "### Q-2026-08-30-02 Question with no Context field at all",
+    "- Asked by: s, 2026-08-30",
+    "- Answer:",
+    "",
+  ]);
+  const views = computeCoordinationView(
+    [{ slug: "proj-a", ledgerContent: LEDGER, questionsContent: QUESTIONS }],
+    NOW
+  );
+  const [q1, q2] = views[0].questions;
+  assert.equal(q1.context, "the background info goes here, not the answer");
+  assert.equal(q1.answer, "the actual answer text, different from context");
+  assert.notEqual(q1.context, q1.answer, "context and answer are genuinely different fields, not the same value twice");
+  assert.equal(q2.context, "", "absent Context field -> '', not undefined and not a throw");
 }
 
 // --- stale boundary: exactly 24h is NOT stale (matches coordination-report.mjs's strict `> 24`) ---
