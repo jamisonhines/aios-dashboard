@@ -1929,21 +1929,17 @@
 }
 
 /* ---------------------------------------------------------------------
-   Coordination panel (Today tab, GL-011). One collapsible card per
-   participating project, reusing .aios-card/.aios-card-head/.aios-chevron/
-   .aios-pill. Body: an ACTIVE SESSIONS group and an OPEN QUESTIONS group,
-   each omitted (not empty-stated) when it has nothing to show.
+   Coordination panel (Projects tab, GL-011 -- moved off the Today tab
+   2026-08-29 per owner feedback: "this should live in the project not the
+   today tab"). No card/chevron of its own any more: pills sit inline in
+   the project card's head row (.aios-coord-pills reused there), and the
+   group content (.aios-coord-inline) sits at the top of the project card's
+   own body, visibility governed entirely by the project card's expand
+   state. An ACTIVE SESSIONS group and an OPEN QUESTIONS group, each
+   omitted (not empty-stated) when it has nothing to show.
 --------------------------------------------------------------------- */
-.aios-dashboard-root .aios-coord-cards {
-  display: flex;
-  flex-direction: column;
-}
-.aios-dashboard-root .aios-coord-head {
-  cursor: pointer;
-  align-items: center;
-  gap: 12px;
-  padding: 0;
-  min-height: 0;
+.aios-dashboard-root .aios-coord-inline:not(:empty) {
+  margin-bottom: 16px;
 }
 .aios-dashboard-root .aios-coord-pills {
   display: flex;
@@ -1999,22 +1995,28 @@
   margin-left: auto;
 }
 
-/* Open questions: title (click opens questions.md), id + date, an
-   "answered" pill when the file already carries answer text, and an
-   inline single-line answer input + Save button (the write-back path). */
+/* Open questions: a muted surface box per question ("incoming") with a
+   faint left accent -- title (click opens questions.md), id + date, an
+   "answered" pill when the file already carries answer text. The gap
+   BETWEEN question entries (margin-bottom here) is deliberately larger
+   than the gap between a question and its own answer block below
+   (.aios-coord-answer-block's margin-top), so each Q+A pair reads as one
+   unit and separate questions read as separate units. */
 .aios-dashboard-root .aios-coord-question {
-  padding: 8px 6px;
-  border-top: 1px solid var(--aios-border);
+  background: var(--aios-surface-2);
+  border: 1px solid var(--aios-border);
+  border-left: 2px solid var(--aios-border-hi);
+  padding: 10px 12px;
+  margin-bottom: 16px;
 }
-.aios-dashboard-root .aios-coord-question:first-child {
-  border-top: none;
+.aios-dashboard-root .aios-coord-question:last-child {
+  margin-bottom: 0;
 }
 .aios-dashboard-root .aios-coord-question-head {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 6px;
 }
 .aios-dashboard-root .aios-coord-question-title {
   color: var(--aios-text);
@@ -2034,19 +2036,48 @@
   color: var(--aios-done-color);
   background: rgba(64, 214, 154, 0.12);
 }
+
+/* The answer: a visually distinct sub-block offset/indented under its
+   question, tinted a DIFFERENT hue (green/positive -- same accent as the
+   "answered" pill above, never the red used for stale) than the question's
+   neutral-grey box, so "what Jaymo wrote" reads as unmistakably his at a
+   glance. margin-top here is intentionally smaller than
+   .aios-coord-question's own margin-bottom (the between-entries gap). */
+.aios-dashboard-root .aios-coord-answer-block {
+  margin-top: 8px;
+  margin-left: 14px;
+  padding: 8px 10px;
+  background: rgba(64, 214, 154, 0.06);
+  border: 1px solid rgba(64, 214, 154, 0.18);
+  border-left: 2px solid var(--aios-done-color);
+}
+.aios-dashboard-root .aios-coord-answer-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--aios-done-color);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
 .aios-dashboard-root .aios-coord-answer-row {
   display: flex;
   gap: 6px;
+  align-items: flex-end;
 }
 .aios-dashboard-root .aios-coord-answer-input {
   flex: 1 1 auto;
   min-width: 0;
-  background: var(--aios-surface-2);
+  background: var(--aios-surface);
   color: var(--aios-text);
   border: 1px solid var(--aios-border);
   border-radius: 0;
   padding: 6px 10px;
+  font-family: inherit;
   font-size: 12.5px;
+  line-height: 1.45;
+  resize: none;
+  overflow-y: auto;
+  max-height: 220px;
   transition: border-color 140ms ease;
 }
 .aios-dashboard-root .aios-coord-answer-input:focus {
@@ -2088,6 +2119,9 @@
   }
   .aios-dashboard-root .aios-proj-head .aios-head-right {
     width: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 6px;
   }
   .aios-dashboard-root .aios-proj-head .aios-bar-wrap {
     width: 130px;
