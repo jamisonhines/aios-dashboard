@@ -67,6 +67,9 @@ import {
   isEditableEventTarget,
   taskStatusActionLabel,
   computeCoordinationView,
+  isCoordinationQuestionAnswered,
+  filterCoordinationQuestions,
+  coordinationQuestionFilterCounts,
   spliceAnswer,
 } from "./model.mjs";
 
@@ -224,6 +227,12 @@ interface ViewState {
   // renderCoordinationQuestion/captureCoordinationFocus).
   // Cleared per-key on a successful save.
   coordinationDrafts: Map<string, string>;
+  // OPEN QUESTIONS filter chip (owner feedback 2026-08-30), keyed per
+  // project slug so two participating projects can hold different filters
+  // at once. Absent key defaults to "unanswered" (see
+  // renderCoordinationBody) -- "the things I need" is the default view,
+  // not a blank/unset state that has to be distinguished from it.
+  coordinationQuestionFilter: Map<string, CoordinationQuestionFilter>;
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -244,6 +253,7 @@ function makeViewState(): ViewState {
     systemSkillsExpandedGroups: new Set(),
     systemActiveSubTab: "agents",
     coordinationDrafts: new Map(),
+    coordinationQuestionFilter: new Map(),
   };
 }
 
@@ -3337,6 +3347,11 @@ interface CoordinationQuestion {
   answer: string;
 }
 
+// OPEN QUESTIONS filter chip (owner feedback 2026-08-30). Mirrors model.mjs's
+// CoordinationQuestionFilter JSDoc typedef; declared independently here,
+// same convention as CoordinationQuestion/CoordinationProjectView above.
+type CoordinationQuestionFilter = "unanswered" | "answered" | "all";
+
 interface CoordinationProjectView {
   slug: string;
   activeSessions: CoordinationActiveSession[];
@@ -3456,7 +3471,9 @@ function renderCoordinationQuestion(
     ev.stopPropagation();
     app.workspace.openLinkText(`${settings.projectsRoot}/${slug}/questions.md`, "", false);
   });
-  if (q.answer.trim().length > 0) {
+  // Shared predicate (model.mjs) so the pill and the OPEN QUESTIONS filter
+  // chips (renderCoordinationBody) can never disagree about "answered".
+  if (isCoordinationQuestionAnswered(q)) {
     head.createSpan({ cls: "aios-pill aios-coord-answered-pill", text: "answered" });
   }
   head.addEventListener("click", () => {
@@ -3637,9 +3654,57 @@ function renderCoordinationBody(
     });
 
     const groupBody = group.createDiv({ cls: "aios-coord-group-body" });
-    for (const q of view.questions) {
-      renderCoordinationQuestion(app, settings, groupBody, view.slug, q, viewState, refresh, undoCtx);
+
+    // Filter bar (owner feedback 2026-08-30: "lets put a filtered tab
+    // (answered, unanswered, all) next to Open Questions? So i can see
+    // only the things i want/need"). Lives in groupBody, NOT groupHead --
+    // a sibling of the head, so a chip click can never fight the group's
+    // own expand/collapse toggle. Same chip engine as the Projects tab's
+    // status filter and the Tasks tab's category filter (renderChips),
+    // placed above the list the same way those tabs do. Default
+    // "unanswered": that IS "the things I need" Jaymo asked for, not an
+    // unset state. Persists per project slug so two participating projects
+    // can hold different filters; unaffected by the group's own expand
+    // state, so it survives a collapse/re-expand of the group itself.
+    const filterMode: CoordinationQuestionFilter =
+      viewState.coordinationQuestionFilter.get(view.slug) ?? "unanswered";
+    const counts = coordinationQuestionFilterCounts(view.questions);
+    const filterChips: Chip[] = [
+      { slug: "unanswered", label: "Unanswered", count: counts.unanswered },
+      { slug: "answered", label: "Answered", count: counts.answered },
+      { slug: "all", label: "All", count: counts.all },
+    ];
+    renderChips(groupBody, filterChips, filterMode, (pickedSlug) => {
+      viewState.coordinationQuestionFilter.set(view.slug, pickedSlug as CoordinationQuestionFilter);
+      refresh();
+    });
+
+    // The group header keeps the TOTAL count (OPEN QUESTIONS (N), above),
+    // unaffected by which filter is active -- only the list below is
+    // filtered.
+    const filtered = filterCoordinationQuestions(view.questions, filterMode);
+    if (filtered.length === 0) {
+      renderEmptyState(groupBody, "No questions match this filter.");
+    } else {
+      // Per-question expand state and drafts are keyed by qid (slug::id),
+      // not by filter or list position, so a question expanded under "All"
+      // stays expanded when the filter switches back to "Unanswered" and
+      // it reappears -- no extra bookkeeping needed here, the key survives
+      // filter switches by construction.
+      for (const q of filtered) {
+        renderCoordinationQuestion(app, settings, groupBody, view.slug, q, viewState, refresh, undoCtx);
+      }
     }
+
+    // Switching the filter rebuilds this whole list from scratch (every
+    // renderCoordinationQuestion call above is a brand-new DOM node), so a
+    // question that reappears already expanded (persisted in viewState from
+    // before it was filtered out) needs its textarea re-measured here too --
+    // same zero-height discipline as the group-expand and question-expand
+    // handlers above. Idempotent and harmless for a still-collapsed one.
+    groupBody.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+      autoGrowCoordinationTextarea(el);
+    });
   }
 }
 
