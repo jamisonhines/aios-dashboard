@@ -6,6 +6,7 @@ import {
   DEFAULT_STATUS_SECTIONS,
   resolveStatusSections,
   groupProjectsByStatus,
+  orderProjects,
 } from "./model.mjs";
 
 // --- resolveStatusSections ---
@@ -54,5 +55,66 @@ assert.equal(
   "multiple drift statuses collected into Other and sorted by name"
 );
 assert.equal(groupProjectsByStatus([], DEFAULT_STATUS_SECTIONS).length, 0, "no projects -> no groups");
+
+// --- orderProjects (owner feedback 2026-08-30: drag-to-reorder projects) ---
+// alphabetical default order for this fixture is Alpha, Bravo, Charlie, Delta
+
+const OP = ["Alpha", "Bravo", "Charlie", "Delta"].map((n) => P(n, "active"));
+
+// Ordered-first rule: every slug in orderList appears first, in orderList's
+// own sequence, regardless of the input array's own order.
+assert.deepEqual(
+  orderProjects(OP, ["Delta", "Alpha"]).map((p) => p.slug),
+  ["Delta", "Alpha", "Bravo", "Charlie"],
+  "ordered-first: listed slugs lead, in orderList's sequence"
+);
+
+// Unknown-slug append rule: an orderList slug with no matching item is
+// silently skipped, never inserted as a gap or a throw.
+assert.deepEqual(
+  orderProjects(OP, ["Zulu", "Delta", "Echo", "Alpha"]).map((p) => p.slug),
+  ["Delta", "Alpha", "Bravo", "Charlie"],
+  "unknown-slug append: orderList entries with no matching item are skipped"
+);
+
+// Stable order for unlisted: projects NOT in orderList keep their own
+// relative order from the input array (not re-sorted by this function).
+assert.deepEqual(
+  orderProjects(OP, ["Charlie"]).map((p) => p.slug),
+  ["Charlie", "Alpha", "Bravo", "Delta"],
+  "stable for unlisted: Alpha/Bravo/Delta keep their input-array relative order"
+);
+
+// Empty orderList -> input order preserved untouched (the "brand-new
+// install, nothing dragged yet" case).
+assert.deepEqual(
+  orderProjects(OP, []).map((p) => p.slug),
+  ["Alpha", "Bravo", "Charlie", "Delta"],
+  "empty orderList -> every project falls through to the unlisted/stable path"
+);
+
+// Empty items -> empty output, no throw.
+assert.deepEqual(orderProjects([], ["Alpha"]), [], "no projects -> no output, no throw");
+
+// Duplicate slug in orderList -> deduped, first occurrence wins, no
+// double-inclusion of the same project.
+assert.deepEqual(
+  orderProjects(OP, ["Bravo", "Bravo"]).map((p) => p.slug),
+  ["Bravo", "Alpha", "Charlie", "Delta"],
+  "duplicate orderList entry does not duplicate the project in the output"
+);
+
+// Pure: never mutates the inputs, and always returns a NEW array (even when
+// orderList is empty and nothing conceptually "changed").
+{
+  const inputCopy = OP.slice();
+  const orderListCopy = ["Delta"];
+  const result = orderProjects(OP, orderListCopy);
+  assert.deepEqual(OP, inputCopy, "items array is not mutated");
+  assert.deepEqual(orderListCopy, ["Delta"], "orderList array is not mutated");
+  assert.notEqual(result, OP, "returns a new array, not the same reference");
+  const resultEmptyOrder = orderProjects(OP, []);
+  assert.notEqual(resultEmptyOrder, OP, "empty orderList still returns a new array, not the same reference");
+}
 
 console.log("groupProjects: all assertions passed");
