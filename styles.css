@@ -2077,6 +2077,16 @@
   line-height: 1.45;
   resize: none;
   overflow-y: auto;
+  /* box-sizing: border-box makes this an exact, self-contained floor: two
+     text lines at 12.5px/1.45 (~36px) plus the 6px top/bottom padding plus
+     the 1px top/bottom border, all included in the 50px. Without this a
+     JS-set inline height of 0 (see autoGrowCoordinationTextarea -- a
+     textarea inside a collapsed .aios-card-body's display:none subtree
+     measures scrollHeight 0) renders as a ~0-height sliver until the next
+     input event, which is exactly what a fresh dashboard open + expanding
+     a participating project card hit by default. */
+  box-sizing: border-box;
+  min-height: 50px;
   max-height: 220px;
   transition: border-color 140ms ease;
 }

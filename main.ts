@@ -1658,6 +1658,20 @@ function renderProjectCard(
     const nowExpanded = card.classList.toggle("aios-expanded");
     if (nowExpanded) viewState.expanded.add(expandKey);
     else viewState.expanded.delete(expandKey);
+    // Any coordination answer textarea that was sized while this card's
+    // body was still display:none measured scrollHeight 0 (the CSS
+    // min-height floor is what kept it from rendering as a sliver). Now
+    // that the card is actually visible, re-measure so a long prefilled
+    // answer grows to its real height instead of sitting at the floor.
+    // No-op for a non-participating card (querySelectorAll finds nothing)
+    // and safe to re-run even if the async coordination fill already sized
+    // these correctly (autoGrowCoordinationTextarea is a pure
+    // measure-and-set off the textarea's own current value).
+    if (nowExpanded && isCoordParticipant) {
+      card.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+        autoGrowCoordinationTextarea(el);
+      });
+    }
   });
 
   // Collapsible body.
@@ -3369,6 +3383,22 @@ function restoreCoordinationFocus(container: HTMLElement, capture: CoordinationF
   }
 }
 
+// Shared auto-grow sizer for a coordination answer textarea: reset to
+// "auto" so scrollHeight reflects the CURRENT content (not a stale taller
+// value from before a shrink), then set height to that measured content
+// height. Must be re-run whenever the element's content OR its visibility
+// changes -- scrollHeight reads 0 for anything inside a display:none
+// subtree (a collapsed project card's .aios-card-body), which is exactly
+// why this needs a second call site: once here per-keystroke/at-creation,
+// and again from renderProjectCard's expand handler for whichever
+// textareas were sized at 0 while their card was still collapsed. Pure
+// measure-and-set off the textarea's own live value, so re-running it from
+// either call site is idempotent -- the two paths cannot fight.
+function autoGrowCoordinationTextarea(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+
 function renderCoordinationQuestion(
   app: App,
   settings: AiosDashboardSettings,
@@ -3420,17 +3450,17 @@ function renderCoordinationQuestion(
   // max-height (styles.css), then scrolls. 13 of 18 real answers in the
   // vagabond-ops-app questions.md are long prose, so a fixed single-line
   // input truncated most of what Jaymo actually writes.
-  const autoGrow = () => {
-    input.style.height = "auto";
-    input.style.height = input.scrollHeight + "px";
-  };
   input.addEventListener("input", () => {
     viewState.coordinationDrafts.set(draftKey, input.value);
-    autoGrow();
+    autoGrowCoordinationTextarea(input);
   });
   // Size once up front too, since the starting value (a real answer or a
-  // restored draft) may already be multiple lines long.
-  autoGrow();
+  // restored draft) may already be multiple lines long. If this card is
+  // still collapsed right now, scrollHeight reads 0 here (display:none
+  // subtree) -- the CSS min-height floor covers that until
+  // renderProjectCard's expand handler re-runs this same sizer once the
+  // card actually becomes visible.
+  autoGrowCoordinationTextarea(input);
 
   const saveBtn = answerRow.createEl("button", { cls: "aios-coord-answer-save", text: "Save" });
 
