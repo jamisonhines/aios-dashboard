@@ -1294,6 +1294,47 @@
   padding: 10px 16px;
   min-height: 0;
 }
+
+/* Drag-to-reorder (owner feedback 2026-08-30, desktop only --
+   Platform.isDesktop-gated in main.ts). Grip icon at the head's left edge,
+   cursor: grab at rest / grabbing while active. Dragged card dims in
+   place; the hovered drop target gets a 2px accent insertion line on
+   whichever edge (top/bottom) the cursor is closer to, matching the
+   dashboard's existing accent styling (same var(--aios-accent) as the
+   progress bar / active states elsewhere, not a new color). box-shadow,
+   not border: .aios-card already carries a 1px border on all four sides,
+   and an inset box-shadow layers the indicator on top without touching
+   that border's own color/width, so a card that is not currently a drop
+   target looks byte-for-byte the same as before this feature existed. */
+.aios-dashboard-root .aios-proj-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--aios-faint);
+  cursor: grab;
+  flex: 0 0 auto;
+  transition: color 140ms ease;
+}
+.aios-dashboard-root .aios-proj-drag-handle:active {
+  cursor: grabbing;
+}
+.aios-dashboard-root .aios-proj-drag-handle:hover {
+  color: var(--aios-dim);
+}
+.aios-dashboard-root .aios-proj-drag-handle svg {
+  width: 13px;
+  height: 13px;
+}
+.aios-dashboard-root .aios-proj-card-dragging {
+  opacity: 0.45;
+}
+.aios-dashboard-root .aios-proj-card-drop-before {
+  box-shadow: inset 0 2px 0 0 var(--aios-accent);
+}
+.aios-dashboard-root .aios-proj-card-drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--aios-accent);
+}
+
 /* Bar + toggles inline on one row (was stacked; stacked reserved a second
    line of height even while the toggles were hover-hidden). */
 .aios-dashboard-root .aios-proj-head .aios-head-right {

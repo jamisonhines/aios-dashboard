@@ -89,29 +89,81 @@ export function resolveStatusSections(fm) {
 }
 
 /**
+ * The dashboard's stable default project ordering: by name, then slug as a
+ * tiebreaker (two projects can share a display name in principle). Exported
+ * so both groupProjectsByStatus (below) and the drag-to-reorder machinery
+ * (main.ts, owner feedback 2026-08-30) agree on what "default order" means
+ * when computing which projects a saved projectOrder hasn't mentioned yet --
+ * one definition, not two that could quietly drift apart.
+ * @param {{ name: string, slug: string }} a
+ * @param {{ name: string, slug: string }} b
+ * @returns {number}
+ */
+export function compareProjectsByName(a, b) {
+  return a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug);
+}
+
+/**
  * Bucket projects into ordered status groups. Returns ONLY non-empty groups,
  * in the order of `sections`; projects whose status is outside the
  * configured set are collected into a trailing "Other" group so drift is
  * surfaced, never silently dropped. Projects inside a group are sorted by
- * name.
+ * name (compareProjectsByName). Manual drag order (owner feedback
+ * 2026-08-30) is applied on TOP of this by the caller via orderProjects,
+ * not in here -- this function stays the pure "what would it look like with
+ * no custom order" baseline.
  * @param {any[]} projects
  * @param {StatusSection[]} sections
  */
 export function groupProjectsByStatus(projects, sections) {
   const known = new Set(sections.map((s) => s.slug));
-  const byName = (a, b) => a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug);
   const out = [];
   for (const sec of sections) {
-    const inSec = projects.filter((p) => p.status === sec.slug).sort(byName);
+    const inSec = projects.filter((p) => p.status === sec.slug).sort(compareProjectsByName);
     if (inSec.length > 0) {
       out.push({ slug: sec.slug, label: sec.label, open: sec.open, projects: inSec });
     }
   }
-  const drift = projects.filter((p) => !known.has(p.status)).sort(byName);
+  const drift = projects.filter((p) => !known.has(p.status)).sort(compareProjectsByName);
   if (drift.length > 0) {
     out.push({ slug: "other", label: "Other", open: true, projects: drift });
   }
   return out;
+}
+
+// Owner feedback 2026-08-30: "I would like to be able to drag projects up
+// and down... perhaps most active projects should order themselves (if
+// thats not a huge build)". Dispatch ruling: manual drag-to-reorder only,
+// no activity-based auto-ordering (it would fight the manual order).
+//
+/**
+ * Reorders `items` (each carrying a `.slug`) so that every slug present in
+ * `orderList` appears first, in orderList's own sequence; every remaining
+ * item (a slug orderList doesn't mention -- a brand-new project, or one
+ * dropped from a stale saved order) appends after, in ITS OWN original
+ * relative order from `items` (stable, never re-sorted here). Pure: never
+ * mutates `items` or `orderList`, and "all" always returns a new array.
+ * Duplicate slugs in orderList are deduped (first occurrence wins); an
+ * orderList slug with no matching item is silently skipped.
+ * @param {{ slug: string }[]} items
+ * @param {string[]} orderList
+ * @returns {{ slug: string }[]}
+ */
+export function orderProjects(items, orderList) {
+  const list = Array.isArray(items) ? items : [];
+  const order = Array.isArray(orderList) ? orderList : [];
+  const bySlug = new Map(list.map((it) => [it.slug, it]));
+  const seen = new Set();
+  const ordered = [];
+  for (const slug of order) {
+    const item = bySlug.get(slug);
+    if (item && !seen.has(slug)) {
+      ordered.push(item);
+      seen.add(slug);
+    }
+  }
+  const rest = list.filter((it) => !seen.has(it.slug));
+  return [...ordered, ...rest];
 }
 
 // ---------------------------------------------------------------------------
