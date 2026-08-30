@@ -233,6 +233,16 @@ interface ViewState {
   // renderCoordinationBody) -- "the things I need" is the default view,
   // not a blank/unset state that has to be distinguished from it.
   coordinationQuestionFilter: Map<string, CoordinationQuestionFilter>;
+  // Scroll position (owner feedback 2026-08-30: "when i click on a tab it
+  // changes the scroll position, so i want it to stay where i am currently
+  // scrolled"), keyed by main tab. Written continuously by a passive scroll
+  // listener on .aios-scroll (renderDashboard) as the user scrolls, so the
+  // map always holds the last-known position for the CURRENTLY active tab
+  // independent of what triggers the next re-render (tab click, a filter/
+  // status chip, a toggle, or the 200ms live-vault-change refresh). Read
+  // once at the end of renderDashboard's synchronous render to restore the
+  // newly active tab's saved position (0 when absent).
+  scrollTops: Map<string, number>;
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -254,6 +264,7 @@ function makeViewState(): ViewState {
     systemActiveSubTab: "agents",
     coordinationDrafts: new Map(),
     coordinationQuestionFilter: new Map(),
+    scrollTops: new Map(),
   };
 }
 
@@ -3390,7 +3401,17 @@ function restoreCoordinationFocus(container: HTMLElement, capture: CoordinationF
     if (el.getAttribute("data-key") === capture.key) target = el;
   });
   if (!target) return;
-  target.focus();
+  // preventScroll (owner feedback 2026-08-30, scroll position survives
+  // everything): this fires ASYNCHRONOUSLY, after renderDashboard's own
+  // synchronous scroll restore already ran (the async coordination gather
+  // resolves well after this function returns). Without preventScroll, a
+  // browser's default focus() behavior can scroll the focused element into
+  // view on its own, which would fight the position renderDashboard just
+  // restored. In the ordinary case the textarea is already in view (it's
+  // wherever the user was typing when their scroll position was last
+  // saved), so this is a no-behavior-change safety net, not a fix for an
+  // observed jump.
+  target.focus({ preventScroll: true });
   const pos = capture.selectionStart ?? target.value.length;
   try {
     target.setSelectionRange(pos, pos);
@@ -4761,6 +4782,26 @@ function renderDashboard(
   // trailing foot note) lives in here. -----
   const scroll = root.createDiv({ cls: "aios-scroll" });
 
+  // Scroll position survives everything (owner feedback 2026-08-30). Every
+  // interaction on this dashboard -- a tab click, a filter/status chip, a
+  // toggle, the 200ms live-vault-change refresh -- calls this function,
+  // which root.empty()s and rebuilds .aios-scroll from scratch, so a brand
+  // new element with scrollTop 0 replaces the old one every time. A passive
+  // listener on THIS render's scroll element writes the live position into
+  // viewState.scrollTops (keyed by tab) continuously as the user scrolls;
+  // the restore at the end of this function reads it back for whichever
+  // tab is active NOW. Attached fresh every render (the old element and its
+  // listener are gone with it), so there is never more than one listener
+  // alive, and it always reflects the CURRENT viewState.activeTab at the
+  // moment it fires, not a value captured at attach time.
+  scroll.addEventListener(
+    "scroll",
+    () => {
+      viewState.scrollTops.set(viewState.activeTab, scroll.scrollTop);
+    },
+    { passive: true }
+  );
+
   // App bar scrolls with content (see chrome comment above).
   scroll.appendChild(header);
 
@@ -4783,6 +4824,17 @@ function renderDashboard(
   scroll.createDiv({ cls: "aios-foot" }).setText(
     "Live view, computed from Operations/tasks and Projects. Progress bars are calculated from task completion - nothing is hand-entered."
   );
+
+  // Restore scroll position: the end of the synchronous render, 0 when this
+  // tab has no saved position yet (first render, or a tab never scrolled).
+  // Deliberately independent of focus -- unlike coordFocus/drawer.focus()
+  // above, this runs unconditionally on every render, whether or not
+  // anything was focused, and does not read document.activeElement at all.
+  // Deliberately NOT re-applied after the async coordination gather or
+  // Usage-tab load grows content later: the brief is explicit that the
+  // held pixel offset at restore time is the correct behavior, not a
+  // second restore chasing content that arrives after the fact.
+  scroll.scrollTop = viewState.scrollTops.get(viewState.activeTab) ?? 0;
 }
 
 // ---------------------------------------------------------------------------
