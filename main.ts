@@ -19,6 +19,8 @@ import {
   resolveBuckets,
   resolveStatusSections,
   groupProjectsByStatus,
+  compareProjectsByName,
+  orderProjects,
   statusChipsFromGroups,
   splitProjectTasks,
   categoryChipsFromTasks,
@@ -128,6 +130,13 @@ interface AiosDashboardSettings {
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
   dailyBudgetUsd: number; // spend guardrail; 0 = off
+  // Manual project drag order (owner feedback 2026-08-30: "I would like to
+  // be able to drag projects up and down"). One global array of slugs,
+  // most-recently-dropped-into-place first per the drag gesture; applies
+  // wherever a slug's status group renders (model.mjs's orderProjects). In
+  // settings, not viewState: must survive Obsidian restarts, unlike every
+  // other per-view UI-only state in ViewState.
+  projectOrder: string[];
 }
 
 const DEFAULT_SETTINGS: AiosDashboardSettings = {
@@ -156,6 +165,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
   dailyBudgetUsd: 0,
+  projectOrder: [],
 };
 
 // Parse the comma list into trimmed, non-empty path prefixes.
@@ -1624,6 +1634,20 @@ function renderProjectToggles(
   });
 }
 
+// Drag-to-reorder (owner feedback 2026-08-30). Bundles the drag session's
+// transient state (which slug is currently being dragged) and the drop
+// callback into one object so renderProjectCard doesn't need three more
+// positional params. Lives entirely in renderProjectsTab's closure for one
+// render pass -- never in viewState, because a drag gesture cannot span a
+// re-render (native HTML5 drag-and-drop holds the browser's own event
+// sequence; nothing calls renderDashboard again mid-drag), so there is
+// nothing here that needs to survive one.
+interface ProjectDragCtx {
+  getDraggingSlug: () => string | null;
+  setDraggingSlug: (slug: string | null) => void;
+  onDrop: (draggedSlug: string, targetSlug: string, position: "before" | "after") => void;
+}
+
 function renderProjectCard(
   app: App,
   tasksRoot: string,
@@ -1633,7 +1657,8 @@ function renderProjectCard(
   viewState: ViewState,
   refresh: () => void,
   undoCtx: UndoCtx,
-  isCoordParticipant: boolean
+  isCoordParticipant: boolean,
+  dragCtx: ProjectDragCtx | null
 ): CoordinationCardHosts | null {
   // All non-cancelled tasks for this project (drives progress + display).
   const projTasks = allTasks.filter(
@@ -1644,9 +1669,81 @@ function renderProjectCard(
   const expandKey = "proj:" + proj.slug;
   if (viewState.expanded.has(expandKey)) card.addClass("aios-expanded");
 
-  // Collapsed head: chevron + name (+ open-note) on the left, overall bar on the right.
+  // Collapsed head: [drag handle] chevron + name (+ open-note) on the left,
+  // overall bar on the right.
   const head = card.createDiv({ cls: "aios-card-head aios-proj-head" });
   const left = head.createDiv({ cls: "aios-head-left" });
+
+  // Drag-to-reorder handle (owner feedback 2026-08-30: "I would like to be
+  // able to drag projects up and down"). Dedicated grip icon, not the whole
+  // head, so dragging can never fight the head's own click-to-expand
+  // listener below -- same stopPropagation discipline as the open-note
+  // icon and the Open/Complete toggles. draggable=true is scoped to JUST
+  // this element (never an ancestor), which is what makes the rest of the
+  // card -- including head's click-to-expand -- completely unaffected by
+  // it: native HTML5 drag only initiates from an element that is itself
+  // draggable=true or has a draggable=true ANCESTOR, and this has no
+  // draggable ancestor. Absent entirely when dragCtx is null (mobile:
+  // native HTML5 drag-and-drop does not work reliably with touch, so the
+  // whole feature is Platform.isDesktop-gated in renderProjectsTab rather
+  // than shipping a grip icon that silently does nothing on tap).
+  if (dragCtx) {
+    const grip = left.createDiv({ cls: "aios-proj-drag-handle" });
+    setIcon(grip, "grip-vertical");
+    grip.setAttr("aria-label", "Drag to reorder");
+    grip.setAttr("draggable", "true");
+    grip.addEventListener("click", (ev) => ev.stopPropagation());
+    grip.addEventListener("dragstart", (ev) => {
+      dragCtx.setDraggingSlug(proj.slug);
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = "move";
+        ev.dataTransfer.setData("text/plain", proj.slug);
+        // Drag image is the WHOLE card, not just the small grip icon --
+        // setDragImage needs an offset; roughly centering it under the
+        // cursor's likely grab point (the handle) is close enough, this is
+        // a visual nicety, not something users will pixel-measure.
+        ev.dataTransfer.setDragImage(card, 20, 20);
+      }
+      card.addClass("aios-proj-card-dragging");
+    });
+    grip.addEventListener("dragend", () => {
+      dragCtx.setDraggingSlug(null);
+      card.removeClass("aios-proj-card-dragging");
+      card.removeClass("aios-proj-card-drop-before");
+      card.removeClass("aios-proj-card-drop-after");
+    });
+
+    // Drop target handling lives on the CARD (not the handle): while
+    // dragging, the mouse can be anywhere over another card, not just its
+    // handle. clientY vs. the card's own vertical midpoint decides
+    // before/after, redrawn on every dragover so the insertion line tracks
+    // the cursor.
+    card.addEventListener("dragover", (ev) => {
+      const draggingSlug = dragCtx.getDraggingSlug();
+      if (!draggingSlug || draggingSlug === proj.slug) return;
+      ev.preventDefault(); // required for a "drop" event to fire at all
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+      const rect = card.getBoundingClientRect();
+      const before = ev.clientY < rect.top + rect.height / 2;
+      card.toggleClass("aios-proj-card-drop-before", before);
+      card.toggleClass("aios-proj-card-drop-after", !before);
+    });
+    card.addEventListener("dragleave", () => {
+      card.removeClass("aios-proj-card-drop-before");
+      card.removeClass("aios-proj-card-drop-after");
+    });
+    card.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      const draggedSlug = ev.dataTransfer?.getData("text/plain") || dragCtx.getDraggingSlug();
+      card.removeClass("aios-proj-card-drop-before");
+      card.removeClass("aios-proj-card-drop-after");
+      if (!draggedSlug || draggedSlug === proj.slug) return;
+      const rect = card.getBoundingClientRect();
+      const before = ev.clientY < rect.top + rect.height / 2;
+      dragCtx.onDrop(draggedSlug, proj.slug, before ? "before" : "after");
+    });
+  }
+
   renderChevron(left);
   const nameBlock = left.createDiv({ cls: "aios-name-block" });
   const nameRow = nameBlock.createDiv({ cls: "aios-name-row" });
@@ -1828,6 +1925,60 @@ function renderProjectsTab(
   const group = groups.find((g) => g.slug === active);
   if (!group) return;
 
+  // Manual drag order (owner feedback 2026-08-30: "I would like to be able
+  // to drag projects up and down... OPS app is towards the bottome now but
+  // its the main project i am working on"). group.projects arrives
+  // alphabetical (groupProjectsByStatus's own default); orderProjects
+  // layers settings.projectOrder on top -- listed slugs first in their
+  // saved sequence, everything else falling back to that same alphabetical
+  // order it already had. Dispatch ruling: manual order only, no
+  // activity-based auto-ordering.
+  const orderedGroupProjects = orderProjects(group.projects, settings.projectOrder) as ProjectItem[];
+
+  // Drag-to-reorder wiring, Platform.isDesktop-gated (native HTML5
+  // drag-and-drop does not behave reliably with touch input, so mobile
+  // gets no grip icon at all rather than one that silently does nothing).
+  // draggingSlug is this render pass's own transient closure state -- see
+  // ProjectDragCtx's comment for why it never needs to be viewState.
+  let draggingSlug: string | null = null;
+  const dragCtx: ProjectDragCtx | null = Platform.isDesktop
+    ? {
+        getDraggingSlug: () => draggingSlug,
+        setDraggingSlug: (slug) => {
+          draggingSlug = slug;
+        },
+        onDrop: (draggedSlug, targetSlug, position) => {
+          if (draggedSlug === targetSlug) return;
+          // Baseline order: EVERY current project (not just this group),
+          // sorted the exact same way groupProjectsByStatus would with no
+          // custom order at all (compareProjectsByName), then
+          // settings.projectOrder layered on top. Building the splice
+          // target from this alphabetical baseline -- not projects' own
+          // raw read-from-disk order -- means the very first drag ever
+          // made only moves the two projects actually involved; every
+          // other project's relative position stays exactly what was
+          // already on screen, rather than silently freezing the whole
+          // list into filesystem order as a side effect of one drag.
+          const baseline = projects.slice().sort(compareProjectsByName);
+          const currentOrder = orderProjects(baseline, settings.projectOrder).map((p) => p.slug);
+          const from = currentOrder.indexOf(draggedSlug);
+          if (from === -1) return;
+          currentOrder.splice(from, 1);
+          let to = currentOrder.indexOf(targetSlug);
+          if (to === -1) return;
+          if (position === "after") to += 1;
+          currentOrder.splice(to, 0, draggedSlug);
+          settings.projectOrder = currentOrder;
+          // Persisted via the plugin's own settings machinery (saveData),
+          // same as every other setting -- survives Obsidian restarts,
+          // unlike viewState. refresh() after the write so the new order
+          // renders; Change 1's scroll-position fix means this drop does
+          // not also jump the list back to the top.
+          void undoCtx.plugin.saveSettings().then(() => refresh());
+        },
+      }
+    : null;
+
   // Coordination panel (GL-011), relocated from the Today tab (owner
   // feedback 2026-08-29: "this should live in the project not the today
   // tab"). A participating project (Projects/<slug>/work-ledger.md exists)
@@ -1838,7 +1989,7 @@ function renderProjectsTab(
   // card hosts instead of one section body).
   const participatingSlugs = participatingProjectSlugs(app, settings.projectsRoot);
   const coordHosts = new Map<string, CoordinationCardHosts>();
-  for (const proj of group.projects) {
+  for (const proj of orderedGroupProjects) {
     const hosts = renderProjectCard(
       app,
       tasksRoot,
@@ -1848,7 +1999,8 @@ function renderProjectsTab(
       viewState,
       refresh,
       undoCtx,
-      participatingSlugs.includes(proj.slug)
+      participatingSlugs.includes(proj.slug),
+      dragCtx
     );
     if (hosts) coordHosts.set(proj.slug, hosts);
   }
