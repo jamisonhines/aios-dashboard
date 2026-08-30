@@ -2288,7 +2288,7 @@ export function taskStatusActionLabel(verb, title) {
 
 /**
  * @typedef {{ session: string, branch: string, lastUpdate: string, stale: boolean }} CoordinationActiveSession
- * @typedef {{ id: string, date: string, title: string, answer: string }} CoordinationQuestion
+ * @typedef {{ id: string, date: string, title: string, context: string, answer: string }} CoordinationQuestion
  * @typedef {{ slug: string, activeSessions: CoordinationActiveSession[], unlanded: number, questions: CoordinationQuestion[] }} CoordinationProjectView
  */
 
@@ -2321,6 +2321,7 @@ export function computeCoordinationView(inputs, now) {
       id: q.id,
       date: q.date,
       title: q.title,
+      context: q.context,
       answer: q.answer,
     }));
 
