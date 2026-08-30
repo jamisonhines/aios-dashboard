@@ -2290,6 +2290,7 @@ export function taskStatusActionLabel(verb, title) {
  * @typedef {{ session: string, branch: string, lastUpdate: string, stale: boolean }} CoordinationActiveSession
  * @typedef {{ id: string, date: string, title: string, context: string, answer: string }} CoordinationQuestion
  * @typedef {{ slug: string, activeSessions: CoordinationActiveSession[], unlanded: number, questions: CoordinationQuestion[] }} CoordinationProjectView
+ * @typedef {"unanswered" | "answered" | "all"} CoordinationQuestionFilter
  */
 
 /**
@@ -2327,4 +2328,43 @@ export function computeCoordinationView(inputs, now) {
 
     return { slug: input?.slug, activeSessions, unlanded, questions };
   });
+}
+
+// Owner feedback 2026-08-30: "lets put a filtered tab (answered, unanswered,
+// all) next to Open Questions? So i can see only the things i want/need."
+//
+// The single shared predicate: a question counts as answered when its file
+// answer, trimmed, is non-empty -- exactly the same test the "answered"
+// pill in main.ts uses (renderCoordinationQuestion calls this function
+// instead of repeating .trim().length > 0 inline, so the pill and the
+// filter can never disagree). A whitespace-only answer (e.g. the file
+// literally has "- Answer:    ") trims to "" and counts as UNANSWERED.
+/**
+ * @param {CoordinationQuestion} q
+ * @returns {boolean}
+ */
+export function isCoordinationQuestionAnswered(q) {
+  return typeof q?.answer === "string" && q.answer.trim().length > 0;
+}
+
+/**
+ * @param {CoordinationQuestion[]} questions
+ * @param {CoordinationQuestionFilter} filter
+ * @returns {CoordinationQuestion[]}
+ */
+export function filterCoordinationQuestions(questions, filter) {
+  const list = Array.isArray(questions) ? questions : [];
+  if (filter === "answered") return list.filter(isCoordinationQuestionAnswered);
+  if (filter === "unanswered") return list.filter((q) => !isCoordinationQuestionAnswered(q));
+  return list.slice();
+}
+
+/**
+ * @param {CoordinationQuestion[]} questions
+ * @returns {{ unanswered: number, answered: number, all: number }}
+ */
+export function coordinationQuestionFilterCounts(questions) {
+  const list = Array.isArray(questions) ? questions : [];
+  const answered = list.filter(isCoordinationQuestionAnswered).length;
+  return { unanswered: list.length - answered, answered, all: list.length };
 }

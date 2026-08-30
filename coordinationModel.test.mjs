@@ -5,7 +5,12 @@
 // > 24; merge queue size = parseLandingOrder items where landed is false.
 // Run: node coordinationModel.test.mjs
 import assert from "node:assert";
-import { computeCoordinationView } from "./model.mjs";
+import {
+  computeCoordinationView,
+  isCoordinationQuestionAnswered,
+  filterCoordinationQuestions,
+  coordinationQuestionFilterCounts,
+} from "./model.mjs";
 
 const NOW = new Date("2026-08-29T09:30:00Z");
 
@@ -194,5 +199,63 @@ function questions(entries) {
 
 // --- empty inputs -> empty output ---
 assert.deepEqual(computeCoordinationView([], NOW), [], "no participating projects -> no views");
+
+// --- isCoordinationQuestionAnswered / filterCoordinationQuestions /
+// coordinationQuestionFilterCounts: the filter-chip data model, owner
+// feedback 2026-08-30 ("lets put a filtered tab (answered, unanswered,
+// all) next to Open Questions"). Same shared predicate the "answered" pill
+// uses in main.ts (renderCoordinationQuestion calls this function instead
+// of repeating .trim().length > 0), so the pill and the filter chips can
+// never disagree. ---
+
+const Q_ANSWERED = { id: "Q-1", date: "2026-08-30", title: "t1", context: "", answer: "yes go ahead" };
+const Q_BLANK = { id: "Q-2", date: "2026-08-30", title: "t2", context: "", answer: "" };
+// Boundary case: a whitespace-only answer (the file literally has
+// "- Answer:    ") must count as UNANSWERED, matching the pill's
+// .trim().length > 0 semantics exactly, not merely "answer !== ''".
+const Q_WHITESPACE = { id: "Q-3", date: "2026-08-30", title: "t3", context: "", answer: "   \t  " };
+
+assert.equal(isCoordinationQuestionAnswered(Q_ANSWERED), true, "non-empty trimmed answer -> answered");
+assert.equal(isCoordinationQuestionAnswered(Q_BLANK), false, "empty answer -> unanswered");
+assert.equal(
+  isCoordinationQuestionAnswered(Q_WHITESPACE),
+  false,
+  "whitespace-only answer -> unanswered (matches the answered-pill's .trim() semantics)"
+);
+
+const MIXED = [Q_ANSWERED, Q_BLANK, Q_WHITESPACE];
+
+assert.deepEqual(
+  filterCoordinationQuestions(MIXED, "answered").map((q) => q.id),
+  ["Q-1"],
+  "'answered' filter keeps only the trimmed-non-empty answer"
+);
+assert.deepEqual(
+  filterCoordinationQuestions(MIXED, "unanswered").map((q) => q.id),
+  ["Q-2", "Q-3"],
+  "'unanswered' filter includes both the blank AND the whitespace-only answer"
+);
+assert.deepEqual(
+  filterCoordinationQuestions(MIXED, "all").map((q) => q.id),
+  ["Q-1", "Q-2", "Q-3"],
+  "'all' filter returns every question, input order preserved"
+);
+assert.deepEqual(filterCoordinationQuestions([], "all"), [], "empty input -> empty output, no throw");
+assert.notEqual(
+  filterCoordinationQuestions(MIXED, "all"),
+  MIXED,
+  "'all' returns a new array (slice), not the same reference"
+);
+
+assert.deepEqual(
+  coordinationQuestionFilterCounts(MIXED),
+  { unanswered: 2, answered: 1, all: 3 },
+  "counts match the filtered lengths exactly, including the whitespace-only boundary case"
+);
+assert.deepEqual(
+  coordinationQuestionFilterCounts([]),
+  { unanswered: 0, answered: 0, all: 0 },
+  "empty input -> zeroed counts, no throw"
+);
 
 console.log("coordinationModel.test.mjs: all assertions passed");
