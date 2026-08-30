@@ -2022,22 +2022,25 @@
 
 /* Open questions: a muted surface box per question ("incoming") with a
    faint left accent. Collapsed by default to the head row (title + Q-id/
-   date + "answered" pill); clicking anywhere on the question expands it to
-   reveal the body (CONTEXT + YOUR ANSWER). The whole question is the click
-   target (cursor: pointer here, not just on the head), which is why the
-   answer textarea, Save button, and the Q-id link each stopPropagation in
-   main.ts -- otherwise interacting with them would also toggle collapse.
-   The gap BETWEEN question entries (margin-bottom here) is deliberately
-   larger than the gap between a question's head and its own body
-   (.aios-coord-question-body's margin-top), so each Q+A pair reads as one
-   unit and separate questions read as separate units. */
+   date + "answered" pill); clicking the HEAD expands it to reveal the body
+   (CONTEXT + YOUR ANSWER) below. Only the head is the click target (cursor:
+   pointer lives there, not on the whole question box) -- Reviewer finding
+   2026-08-30: with the toggle on the whole box, clicking or selecting text
+   in CONTEXT or in the answer block's padding collapsed the question out
+   from under Jaymo. The Q-id link (a head descendant) still needs its own
+   stopPropagation in main.ts so it opens the file instead of toggling; the
+   answer textarea and Save button no longer need one, since they live in
+   the body, a sibling of head, and a click there never reaches head's
+   listener. The gap BETWEEN question entries (margin-bottom here) is
+   deliberately larger than the gap between a question's head and its own
+   body (.aios-coord-question-body's margin-top), so each Q+A pair reads as
+   one unit and separate questions read as separate units. */
 .aios-dashboard-root .aios-coord-question {
   background: var(--aios-surface-2);
   border: 1px solid var(--aios-border);
   border-left: 2px solid var(--aios-border-hi);
   padding: 10px 12px;
   margin-bottom: 16px;
-  cursor: pointer;
 }
 .aios-dashboard-root .aios-coord-question:last-child {
   margin-bottom: 0;
@@ -2047,6 +2050,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
+  cursor: pointer;
 }
 .aios-dashboard-root .aios-coord-question-title {
   color: var(--aios-text);

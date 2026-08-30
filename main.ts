@@ -3401,9 +3401,12 @@ function autoGrowCoordinationTextarea(el: HTMLTextAreaElement) {
 }
 
 // One question, collapsed by default to a compact row (title + answered
-// pill + faint id/date), clicking the row expands it to reveal, top to
+// pill + faint id/date), clicking the head expands it to reveal, top to
 // bottom: the title (unchanged, already visible in the collapsed row), a
-// CONTEXT block, then the YOUR ANSWER block. Owner feedback 2026-08-30:
+// CONTEXT block, then the YOUR ANSWER block. Collapsed, the head IS
+// effectively the whole visible row (the body is display:none), so the hit
+// target does not shrink; it only stops covering the body once expanded.
+// Owner feedback 2026-08-30:
 // "clicking on a question should open the main question, context should be
 // below it and the answer field below that." Per-question expand state is
 // keyed "<slug>::<id>" in viewState.expanded, the exact same shape as the
@@ -3428,14 +3431,22 @@ function renderCoordinationQuestion(
   if (viewState.expanded.has(qExpandKey)) row.addClass("aios-expanded");
 
   // Head: the compact collapsed row, and still the always-visible top of
-  // the expanded layout. The row (not just the head) carries the toggle
-  // click listener -- see the stopPropagation calls below on the Q-id link,
-  // the answer textarea, and the Save button, which are descendants of the
-  // row once expanded and must not also fire this toggle.
+  // the expanded layout. The HEAD (not the whole row) carries the toggle
+  // click listener: the body (CONTEXT text, the answer textarea, the
+  // answer block's padding) is a SIBLING of head, not a descendant, so a
+  // click anywhere in the body never bubbles into this listener at all --
+  // no stopPropagation needed there. Reviewer finding 2026-08-30: with the
+  // listener on the whole row, clicking (or finishing a text selection)
+  // anywhere in CONTEXT or in the answer block's padding collapsed the
+  // question out from under Jaymo, e.g. the moment he tried to copy a
+  // wiki-link name out of a context line. metaEl's own stopPropagation
+  // below still matters: it IS a head descendant, so without it, clicking
+  // the Q-id/date link would also toggle collapse instead of opening the
+  // file.
   const head = row.createDiv({ cls: "aios-coord-question-head" });
   head.createSpan({ cls: "aios-coord-question-title", text: q.title });
   // The Q-id + date is now the open-the-file affordance (title itself no
-  // longer opens questions.md -- clicking the row toggles expansion
+  // longer opens questions.md -- clicking the head toggles expansion
   // instead, so the click target had to move).
   const metaEl = head.createSpan({
     cls: "aios-coord-question-meta",
@@ -3448,9 +3459,23 @@ function renderCoordinationQuestion(
   if (q.answer.trim().length > 0) {
     head.createSpan({ cls: "aios-pill aios-coord-answered-pill", text: "answered" });
   }
+  head.addEventListener("click", () => {
+    const nowOpen = row.classList.toggle("aios-expanded");
+    if (nowOpen) viewState.expanded.add(qExpandKey);
+    else viewState.expanded.delete(qExpandKey);
+    // Re-measure this question's own answer textarea now that its body is
+    // actually visible (see the zero-height comment above autoGrow()).
+    // Queried from row, not head: the textarea lives in body, a sibling of
+    // head, so head itself has nothing to find.
+    if (nowOpen) {
+      row.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
+        autoGrowCoordinationTextarea(el);
+      });
+    }
+  });
 
-  // Body: CONTEXT (when present) then YOUR ANSWER, hidden until the row
-  // expands.
+  // Body: CONTEXT (when present) then YOUR ANSWER, hidden until the head
+  // toggles this question open.
   const body = row.createDiv({ cls: "aios-coord-question-body" });
 
   // Context: background info, not a second question -- small, muted type,
@@ -3478,7 +3503,6 @@ function renderCoordinationQuestion(
   input.value = viewState.coordinationDrafts.has(draftKey)
     ? (viewState.coordinationDrafts.get(draftKey) as string)
     : q.answer;
-  input.addEventListener("click", (ev) => ev.stopPropagation());
 
   // Auto-grow: starts at ~1-2 rows, grows with content up to the CSS
   // max-height (styles.css), then scrolls. 13 of 18 real answers in the
@@ -3518,29 +3542,13 @@ function renderCoordinationQuestion(
     refresh();
   };
 
-  saveBtn.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    void save();
-  });
+  saveBtn.addEventListener("click", () => void save());
   input.addEventListener("keydown", (ev) => {
     // Enter saves; Shift+Enter inserts a newline. Newlines are collapsed to
     // a single line on write by spliceAnswer (model.mjs), unchanged.
     if (ev.key === "Enter" && !ev.shiftKey) {
       ev.preventDefault();
       void save();
-    }
-  });
-
-  row.addEventListener("click", () => {
-    const nowOpen = row.classList.toggle("aios-expanded");
-    if (nowOpen) viewState.expanded.add(qExpandKey);
-    else viewState.expanded.delete(qExpandKey);
-    // Re-measure this question's own answer textarea now that its body is
-    // actually visible (see the zero-height comment above autoGrow()).
-    if (nowOpen) {
-      row.querySelectorAll<HTMLTextAreaElement>(".aios-coord-answer-input").forEach((el) => {
-        autoGrowCoordinationTextarea(el);
-      });
     }
   });
 }
