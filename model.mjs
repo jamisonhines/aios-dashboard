@@ -21,6 +21,32 @@ import {
   spliceAnswer,
 } from "../../AIOS/Operations/scripts/lib/coordination-parse.mjs";
 
+// tsk-2026-09-03-002 step 5: the untrustworthy-parse accounting layer, same
+// import-path convention as coordination-parse.mjs above (vault-canonical,
+// bundled straight into the plugin, no local copy). checkActiveSessionsAccounting
+// and findStrayClaimRows are the two independent oracles over
+// parseActiveSessions's output (a span-count control, blind by construction
+// to an intruding heading whose own title is a landmark; and a whole-file
+// stray-claim-row scan, which is NOT blind to that shape); describeActiveSessionsWarnings
+// formats all seven loud channels (the six on parsed itself, plus stray
+// rows) and the accounting control into one {untrustworthy, lines} verdict,
+// the EXACT function coordination-report.mjs and aios-health.mjs already
+// call, so the panel can never disagree with either of those about what
+// counts as untrustworthy or how it reads. staleClearSuspensionNotice is
+// the same human-readable "why the stale badge just disappeared" line
+// report.mjs prints via printBoth when untrustworthy -- reused verbatim
+// here rather than re-worded, so the panel and the CLI report say the same
+// thing about the same ledger. overlapLowerBoundNotice is deliberately NOT
+// imported: it exists for --writeset overlap checks, and this plugin has no
+// overlap-check affordance at all (grep confirms no findOverlaps/writeSet
+// call site anywhere in main.ts or model.mjs).
+import {
+  checkActiveSessionsAccounting,
+  findStrayClaimRows,
+  describeActiveSessionsWarnings,
+  staleClearSuspensionNotice,
+} from "../../AIOS/Operations/scripts/lib/coordination-accounting.mjs";
+
 export { spliceAnswer };
 
 // ---------------------------------------------------------------------------
@@ -2345,19 +2371,61 @@ export function taskStatusActionLabel(verb, title) {
 // `status === "active"` (the pre-restructure field) returns ZERO rows
 // against the migrated live ledger, whose Status cells now read prose like
 // "**active.** Notes: [[#name]]"; `state` is the machine-read replacement.
-// This view does NOT yet surface the six loud channels (orphans,
-// invalidRows, invalidStates, headingTruncations, stateColumnMissing,
-// headingInFence) or the accounting control that coordination-report.mjs and
-// aios-health.mjs now do -- out of scope for this fix (narrower brief: make
-// the panel read State instead of Status without throwing), left as a
-// follow-up if the dashboard should also refuse to show a stale-clear-style
-// affordance on an untrustworthy ledger parse.
+//
+// tsk-2026-09-03-002 step 5: this view now ALSO surfaces the untrustworthy-
+// parse verdict, wiring in the seven loud channels (parseActiveSessions's
+// own six -- orphans, invalidRows, invalidStates, headingTruncations,
+// stateColumnMissing, headingInFence -- plus findStrayClaimRows, the
+// Reviewer's Critical-1 seventh channel) and the accounting control, which
+// carries a THIRD state beyond ok/not-ok: `ran: false` means the control
+// could not even run (no landmark heading found after "## Active
+// sessions"), and describeActiveSessionsWarnings treats that as loud, not a
+// silent pass -- see coordination-accounting.mjs's own header comment. Step
+// 3 landed this view reading `state` correctly but reading NONE of these
+// channels, so a malformed ledger (an intruding heading silently truncating
+// the table, a stray claim row sitting outside the recognized span, a
+// broken accounting span) rendered a normal-looking stale badge anyway --
+// exactly the affordance Reviewer flagged as a landmine: a human under
+// pressure clicks a badge, on a ledger coordination-report.mjs and
+// aios-health.mjs would BOTH already refuse to advise on.
+//
+// The behavioral contract, matching report.mjs's own untrustworthy branch
+// exactly (see its `if (untrustworthy) { ... } else { compute stale ... }`):
+//
+//   1. Sessions are ALWAYS returned, complete and correctly filtered/mapped,
+//      regardless of untrustworthy. Refuse the ACTION (trusting a stale
+//      badge, clearing a claim), never the ANSWER (the session list itself,
+//      which is correct in the false-alarm case and is exactly what an
+//      overlap check or a human eyeballing the table needs).
+//   2. `stale` is suppressed AT THE MODEL LAYER, not merely hidden by the
+//      renderer: when a ledger is untrustworthy, `hoursSince` is still
+//      computed (harmless, pure) but `stale` is hard-set to `false` for
+//      every session in that ledger, mirroring report.mjs's structure,
+//      which never even evaluates its `stale` filter inside the
+//      `untrustworthy` branch. main.ts ALSO independently guards on
+//      `view.untrustworthy` before rendering the badge (see
+//      renderCoordinationPills/renderCoordinationBody) -- two independent
+//      enforcements of the same rule, not one relying on the other, the
+//      same complementary-channel philosophy coordination-accounting.mjs
+//      itself uses for its span control vs. its stray-row scan.
+//   3. `warnings` (string[]) carries every human-readable line
+//      describeActiveSessionsWarnings produced, PLUS staleClearSuspensionNotice
+//      when untrustworthy (report.mjs prints that exact notice via
+//      printBoth right where it would otherwise have printed "STALE
+//      claims:" -- reused verbatim here so the panel and the CLI report
+//      never say different things about the same ledger). `untrustworthy`
+//      is `describeActiveSessionsWarnings`'s own verdict, true iff any of
+//      the seven channels or the control fired.
+//
+// fileLabel matches coordination-report.mjs's own convention
+// (`Projects/<slug>/work-ledger.md`) so a warning line reads the same way
+// in the panel as it does in a terminal running that script by hand.
 // ---------------------------------------------------------------------------
 
 /**
  * @typedef {{ session: string, branch: string, lastUpdate: string, stale: boolean }} CoordinationActiveSession
  * @typedef {{ id: string, date: string, title: string, context: string, answer: string }} CoordinationQuestion
- * @typedef {{ slug: string, activeSessions: CoordinationActiveSession[], unlanded: number, questions: CoordinationQuestion[] }} CoordinationProjectView
+ * @typedef {{ slug: string, activeSessions: CoordinationActiveSession[], unlanded: number, questions: CoordinationQuestion[], untrustworthy: boolean, warnings: string[] }} CoordinationProjectView
  * @typedef {"unanswered" | "answered" | "all"} CoordinationQuestionFilter
  */
 
@@ -2369,18 +2437,30 @@ export function taskStatusActionLabel(verb, title) {
 export function computeCoordinationView(inputs, now) {
   const list = Array.isArray(inputs) ? inputs : [];
   return list.map((input) => {
+    const slug = input?.slug;
     const ledgerContent = typeof input?.ledgerContent === "string" ? input.ledgerContent : "";
     const questionsContent = typeof input?.questionsContent === "string" ? input.questionsContent : "";
+    const fileLabel = `Projects/${slug ?? "?"}/work-ledger.md`;
 
-    const activeSessions = parseActiveSessions(ledgerContent)
-      .sessions.filter((s) => s.state === "active")
+    const parsed = parseActiveSessions(ledgerContent);
+    const control = checkActiveSessionsAccounting(ledgerContent, parsed);
+    const strayRows = findStrayClaimRows(ledgerContent, parsed);
+    const { untrustworthy, lines: warnings } = describeActiveSessionsWarnings(fileLabel, parsed, control, strayRows);
+    if (untrustworthy) warnings.push(staleClearSuspensionNotice(fileLabel));
+
+    const activeSessions = parsed.sessions
+      .filter((s) => s.state === "active")
       .map((s) => {
         const h = hoursSince(s.lastUpdate, now);
         return {
           session: s.session,
           branch: s.branch,
           lastUpdate: s.lastUpdate,
-          stale: h !== null && h > 24,
+          // Model-layer suppression (see the block comment above): never
+          // `true` for an untrustworthy ledger, no matter what hoursSince
+          // says, matching report.mjs's own "STALE claims:" line never
+          // being computed at all inside its `untrustworthy` branch.
+          stale: !untrustworthy && h !== null && h > 24,
         };
       });
 
@@ -2394,7 +2474,7 @@ export function computeCoordinationView(inputs, now) {
       answer: q.answer,
     }));
 
-    return { slug: input?.slug, activeSessions, unlanded, questions };
+    return { slug, activeSessions, unlanded, questions, untrustworthy, warnings };
   });
 }
 

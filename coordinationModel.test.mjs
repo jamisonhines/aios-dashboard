@@ -130,6 +130,15 @@ function questions(entries) {
     { id: "Q-2026-08-28-01", date: "2026-08-28", title: "Answered but unfiled question", context: "c", answer: "yes go ahead" },
     { id: "Q-2026-08-28-02", date: "2026-08-28", title: "Still blank", context: "c", answer: "" },
   ]);
+
+  // tsk-2026-09-03-002 step 5: this is the reference CLEAN ledger for the whole suite -- a
+  // full State-column table with no orphans, no invalid rows/states, no intruding headings,
+  // and a "## Merge queue" landmark right after it so the accounting control both runs and
+  // balances. On a ledger this clean, `untrustworthy` must be false and `warnings` empty, and
+  // (critically) the genuinely-48.5h-stale `old-session` row above keeps its `stale: true` --
+  // the badge is NOT globally suppressed, only on a ledger that actually earns the suppression.
+  assert.equal(v.untrustworthy, false, "no loud channel and a balanced accounting control -> trustworthy");
+  assert.deepEqual(v.warnings, [], "a clean ledger produces zero warning lines");
 }
 
 // --- context passthrough: distinct per-question values, so a wiring bug
@@ -267,5 +276,402 @@ assert.deepEqual(
   { unanswered: 0, answered: 0, all: 0 },
   "empty input -> zeroed counts, no throw"
 );
+
+// =====================================================================
+// tsk-2026-09-03-002 step 5: the untrustworthy-parse verdict
+// (computeCoordinationView wiring coordination-accounting.mjs's
+// checkActiveSessionsAccounting / findStrayClaimRows / describeActiveSessionsWarnings /
+// staleClearSuspensionNotice). Fixtures and assertion text below deliberately mirror
+// ~/AIOS/Operations/scripts/tests/coordination-report.test.mjs's own isolated-channel
+// fixtures (H8/S8/ROW pattern, customLedger/makeCustomVault shape) so a warning line
+// reads identically whether it came from the CLI report or this panel -- the whole point
+// of both consumers sharing describeActiveSessionsWarnings. Per the task brief: inline
+// fixtures only, never the live vault ledger; the frozen snapshot fixture is a separate,
+// older 9-column shape and is not used here on purpose (these fixtures use the CURRENT
+// 8-column, State-only shape, Status dropped).
+// =====================================================================
+
+const H8 = "| Session | Session id | State | Branch | Worktree | Write-set | Started | Last update |";
+const S8 = "|---|---|---|---|---|---|---|---|";
+// lastUpdate defaults to 0.5h before NOW (fresh); pass an explicit ISO string to control
+// staleness. Started is fixed and irrelevant to every assertion below.
+const ROW8 = (n, st, lastUpdate = "2026-08-29T09:00:00Z") =>
+  `| ${n} | id-${n} | ${st} | feat/${n} | ~/Projects/proj-a | src/${n}.ts | 2026-08-27T08:00:00Z | ${lastUpdate} |`;
+
+// activeSessionsLines: the raw lines directly under "## Active sessions" (header,
+// separator, rows, and any glued-in prose/headings under test), mirroring
+// coordination-report.test.mjs's makeCustomVault exactly, minus the filesystem/git
+// scaffolding this pure-model suite does not need. landmarkHeading: which landmark
+// closes the span for the accounting control (default "## Session notes", present in
+// every isolated-channel fixture below unless the test is exercising landmark behavior
+// itself); pass null to omit it entirely (the ran:false / accounting-mismatch fixtures
+// build their own ledger by hand instead, same as the vault suite does).
+function customLedger(slug, activeSessionsLines, { landmarkHeading = "## Session notes" } = {}) {
+  const lines = [
+    "---",
+    `project: ${slug}`,
+    "convention: session-coordination v1",
+    `repo: ~/Projects/${slug}`,
+    "updated: 2026-08-29",
+    "---",
+    "",
+    "# Work Ledger",
+    "",
+    "## Active sessions",
+    "",
+    ...activeSessionsLines,
+    "",
+  ];
+  if (landmarkHeading) lines.push(landmarkHeading, "", "### x", "", "prose", "");
+  lines.push("## Merge queue", "", "<!-- AUTO:BEGIN branch-inventory -->", "(none)", "<!-- AUTO:END -->", "");
+  return lines.join("\n");
+}
+
+function soleView(slug, ledgerContent) {
+  return computeCoordinationView([{ slug, ledgerContent, questionsContent: null }], NOW)[0];
+}
+
+// --- channel 1/7: orphans -- prose glued directly under the heading means the header row
+// is never found at all; every subsequent "|" line (header, separator, and the one data
+// row) is reported as an orphan instead of being parsed or silently dropped. ---
+{
+  const LEDGER = customLedger("proj-a", [
+    "prose glued directly under the heading, no real header row reachable here",
+    "",
+    H8,
+    S8,
+    ROW8("s1", "active"),
+  ]);
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true, "orphans channel fires -> untrustworthy");
+  assert.equal(
+    v.warnings.length,
+    2,
+    "isolated: the orphans line plus the stale-clear suspension notice, nothing else (no table was recognized at all, so stateColumnMissing correctly stays clear, and the control balances against the same 3 orphaned '|' lines)"
+  );
+  assert.match(
+    v.warnings[0],
+    /^3 unparsed table row\(s\) in Active sessions \(Projects\/proj-a\/work-ledger\.md, lines \d+, \d+, \d+\), fix the ledger$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+  assert.equal(v.activeSessions.length, 0, "nothing was recognized as a session row -- everything fell through to orphans");
+}
+
+// --- channel 2/7: invalidRows -- a wrong cell count, isolated from the row that parses fine. ---
+{
+  const LEDGER = customLedger("proj-a", [
+    H8,
+    S8,
+    ROW8("s1", "active"),
+    "| s2 | id-s2 | active | feat/s2 | wt | ws | 2026-08-29T08:00:00Z |", // 7 cells, not 8: missing Last update
+  ]);
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true);
+  assert.equal(v.warnings.length, 2, "isolated: the invalidRows line plus the suspension notice, no other channel");
+  assert.match(
+    v.warnings[0],
+    /^1 malformed table row\(s\) in Active sessions \(Projects\/proj-a\/work-ledger\.md\): line \d+ \(expected 8 cells, found 7\)$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+  assert.deepEqual(v.activeSessions.map((s) => s.session), ["s1"], "the malformed row never becomes a session; the well-formed one still does");
+}
+
+// --- channel 3/7: invalidStates -- a State cell outside the closed set {active,done,blocked}. ---
+{
+  const LEDGER = customLedger("proj-a", [H8, S8, ROW8("s1", "pending"), ROW8("s2", "active")]);
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true);
+  assert.equal(v.warnings.length, 2, "isolated: the invalidStates line plus the suspension notice, no other channel");
+  assert.match(
+    v.warnings[0],
+    /^1 row\(s\) with an invalid State value in Active sessions \(Projects\/proj-a\/work-ledger\.md\): line \d+ \(session "s1", State="pending"\)$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+  assert.deepEqual(v.activeSessions.map((s) => s.session), ["s2"], "s1's invalid state excludes it from 'active'; it is not silently dropped (still counted for the accounting control), just not active");
+}
+
+// --- channel 4/7: headingTruncations -- a deeper heading glued mid-table, walked past and
+// named. Doubles as the "sessions still returned and correct when untrustworthy" proof: s1
+// sits BEFORE the intruding heading, is unaffected by it, and is a genuinely 48.5h-stale
+// active row whose `stale` flag must still read false once the ledger is untrustworthy. ---
+{
+  const LEDGER = customLedger("proj-a", [
+    H8,
+    S8,
+    ROW8("s1", "active", "2026-08-27T09:00:00Z"), // 48.5h before NOW -- would read stale if trustworthy
+    "",
+    "### an intruding sub-heading",
+    "",
+  ]);
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true);
+  assert.equal(
+    v.warnings.length,
+    2,
+    "isolated: the headingTruncations line plus the suspension notice (nothing trails the intruding heading in this fixture, so orphans stays empty, and the parser correctly walks past a deeper heading, so the control still balances)"
+  );
+  assert.match(
+    v.warnings[0],
+    /^1 heading\(s\) found inside what should be one contiguous Active sessions table \(Projects\/proj-a\/work-ledger\.md\): line \d+ \("### an intruding sub-heading"\) -- the block was truncated, fix the ledger$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+
+  assert.equal(v.activeSessions.length, 1, "the ANSWER (session list) is still correct even though the ACTION (trusting the stale badge) is refused");
+  assert.deepEqual(
+    v.activeSessions[0],
+    { session: "s1", branch: "feat/s1", lastUpdate: "2026-08-27T09:00:00Z", stale: false },
+    "session/branch/lastUpdate are all correct, but stale is suppressed to false despite 48.5h since last update -- an untrustworthy ledger never presents the stale badge as actionable"
+  );
+}
+
+// --- channel 5/7: stateColumnMissing -- a recognized table with neither State nor Status. ---
+{
+  const H_NO_STATE = "| Session | Session id | Branch | Worktree | Write-set | Started | Last update |";
+  const S_NO_STATE = "|---|---|---|---|---|---|---|";
+  const LEDGER = customLedger("proj-a", [
+    H_NO_STATE,
+    S_NO_STATE,
+    "| s1 | id-s1 | feat/s1 | wt | ws | 2026-08-27T08:00:00Z | 2026-08-29T09:00:00Z |",
+  ]);
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true);
+  assert.equal(v.warnings.length, 2, "isolated: the stateColumnMissing line plus the suspension notice, no other channel");
+  assert.match(
+    v.warnings[0],
+    /^Active sessions table \(Projects\/proj-a\/work-ledger\.md\) has neither a State nor a Status column -- no machine-readable liveness signal exists for any row$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+  assert.equal(v.activeSessions.length, 0, "with no State and no Status column, nothing can read as active");
+}
+
+// --- channel 6/7: headingInFence -- the '## Active sessions' heading itself lands somewhere
+// an unclosed-then-closed code fence makes ambiguous. Hand-built (not customLedger): the
+// fence must open BEFORE the heading and close right after the one data row, isolated from
+// the landmark search which happens after the fence closes again. ---
+{
+  const LEDGER = [
+    "---",
+    "project: proj-a",
+    "convention: session-coordination v1",
+    "repo: ~/Projects/proj-a",
+    "updated: 2026-08-29",
+    "---",
+    "",
+    "# Work Ledger",
+    "",
+    "```",
+    "oops never closed here, above the heading",
+    "## Active sessions",
+    "",
+    H8,
+    S8,
+    ROW8("s1", "active"),
+    "```",
+    "",
+    "## Session notes",
+    "",
+    "### x",
+    "",
+    "prose",
+    "",
+    "## Merge queue",
+    "",
+    "<!-- AUTO:BEGIN branch-inventory -->",
+    "(none)",
+    "<!-- AUTO:END -->",
+    "",
+  ].join("\n");
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true);
+  assert.equal(
+    v.warnings.length,
+    2,
+    "isolated: the headingInFence line plus the suspension notice (the fence closes again before the landmark, so the table under the fenced heading is still read normally and the control still balances)"
+  );
+  assert.match(
+    v.warnings[0],
+    /^the '## Active sessions' heading \(Projects\/proj-a\/work-ledger\.md\) was matched somewhere an unclosed code fence makes ambiguous -- verify by hand$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+  assert.equal(v.activeSessions.length, 1, "the row under the fenced heading is still read normally -- fence-gating only affects the heading match, not the row parse");
+}
+
+// --- channel 7/7: findStrayClaimRows -- the Reviewer's Critical-1 shape: a claim row
+// appended ONE LINE below a landmark heading is invisible to the parser AND to the span
+// control (both stop at the same line, both agree, both wrong) -- the stray-row scan is
+// the ONLY channel that catches it. ---
+{
+  const LEDGER = [
+    "---",
+    "project: proj-a",
+    "convention: session-coordination v1",
+    "repo: ~/Projects/proj-a",
+    "updated: 2026-08-29",
+    "---",
+    "",
+    "# Work Ledger",
+    "",
+    "## Active sessions",
+    "",
+    H8,
+    S8,
+    ROW8("live-one", "active"),
+    "",
+    "## Session notes",
+    ROW8("newclaim", "active"), // off-by-one: glued immediately below the landmark, no blank line
+    "",
+    "### live-one",
+    "",
+    "prose",
+    "",
+    "## Merge queue",
+    "",
+    "<!-- AUTO:BEGIN branch-inventory -->",
+    "(none)",
+    "<!-- AUTO:END -->",
+    "",
+  ].join("\n");
+  const v = soleView("proj-a", LEDGER);
+  assert.deepEqual(v.activeSessions.map((s) => s.session), ["live-one"], "the parser itself still only sees live-one -- newclaim is genuinely invisible to it");
+  assert.equal(v.untrustworthy, true, "the stray-row scan is the ONLY thing that catches this shape");
+  assert.equal(
+    v.warnings.length,
+    2,
+    "isolated: the stray-row line plus the suspension notice (the span control alone is blind here BY CONSTRUCTION -- its own landmark search and the parser's sectionEnd land on the same line and agree, wrongly -- must not ALSO fire as a mismatch or a could-not-run)"
+  );
+  assert.match(
+    v.warnings[0],
+    /^1 stray claim-shaped row\(s\) found OUTSIDE the recognized Active sessions table \(Projects\/proj-a\/work-ledger\.md, lines \d+\) -- a landmark-titled heading may be masking real claim rows, fix the ledger$/
+  );
+  assert.match(v.warnings[1], /^STALE-CLEAR SUSPENDED \(Projects\/proj-a\/work-ledger\.md\):/);
+}
+
+// --- the accounting control's THIRD state: ran:false (no landmark heading anywhere in the
+// file at all) is a LOUD finding, not a silent pass. Sessions still print unconditionally. ---
+{
+  const LEDGER = [
+    "---",
+    "project: proj-a",
+    "convention: session-coordination v1",
+    "repo: ~/Projects/proj-a",
+    "updated: 2026-08-29",
+    "---",
+    "",
+    "# Work Ledger",
+    "",
+    "## Active sessions",
+    "",
+    H8,
+    S8,
+    ROW8("s1", "active"),
+    "",
+    "## Something else entirely",
+    "",
+    "no landmark heading anywhere in this file",
+    "",
+  ].join("\n");
+  const v = soleView("proj-a", LEDGER);
+  assert.equal(v.untrustworthy, true, "the control could not run at all -- treated as untrustworthy, not as a silent ok");
+  assert.ok(
+    v.warnings.some((l) => /^ACCOUNTING CONTROL COULD NOT RUN \(Projects\/proj-a\/work-ledger\.md\): no landmark heading/.test(l)),
+    "the ran:false reason is surfaced as its own loud warning line"
+  );
+  assert.equal(v.activeSessions.length, 1, "sessions still print unconditionally even when the control cannot run at all");
+  assert.equal(v.activeSessions[0].stale, false, "stale suppressed under untrustworthy, same as every other loud channel");
+}
+
+// --- the accounting control's ok:false (MISMATCH) state: the "accepted parser gap" -- a
+// same-level heading intruding mid-table silently ends the parser's own span with every
+// parser-side channel clean, and only the control's independent count catches the loss. ---
+{
+  const LEDGER = [
+    "---",
+    "project: proj-a",
+    "convention: session-coordination v1",
+    "repo: ~/Projects/proj-a",
+    "updated: 2026-08-29",
+    "---",
+    "",
+    "# Work Ledger",
+    "",
+    "## Active sessions",
+    "",
+    H8,
+    S8,
+    ROW8("live-1", "active"),
+    ROW8("live-2", "active"),
+    "",
+    "## an intruding same-level heading",
+    "",
+    ROW8("live-3", "active"),
+    ROW8("live-4", "active"),
+    "",
+    "## Merge queue",
+    "",
+    "<!-- AUTO:BEGIN branch-inventory -->",
+    "(none)",
+    "<!-- AUTO:END -->",
+    "",
+    "### Landing order",
+    "",
+    "1. (ordered)",
+    "",
+    "## WIP rules",
+    "",
+    "- Max 3.",
+    "",
+  ].join("\n");
+  const v = soleView("proj-a", LEDGER);
+  assert.deepEqual(
+    v.activeSessions.map((s) => s.session),
+    ["live-1", "live-2"],
+    "the parser itself silently drops live-3 and live-4 -- the accepted gap, reproduced"
+  );
+  assert.equal(v.untrustworthy, true, "the accounting control's independent count disagrees with the parser's reduced total -- caught");
+  assert.ok(
+    v.warnings.some((l) =>
+      /^ACCOUNTING MISMATCH \(Projects\/proj-a\/work-ledger\.md\): parser accounted for 4 '\|' line\(s\), the control independently counted 6/.test(l)
+    ),
+    "CAUGHT: control counted 6 '|' lines (header+sep+4 rows) between the heading and '## Merge queue', the parser only accounted for 4 (header+sep+2 rows it actually recognized)"
+  );
+}
+
+// --- per-ledger scoping: one dirty ledger and one clean ledger in the SAME
+// computeCoordinationView call. The dirty ledger's suppression must not leak into the clean
+// one, and vice versa -- each ledger's untrustworthy/warnings/stale-suppression is computed
+// independently, in the same pass. ---
+{
+  const DIRTY = customLedger("dirty-proj", [
+    H8,
+    S8,
+    ROW8("dirty-stale", "active", "2026-08-27T09:00:00Z"), // 48.5h before NOW
+    "",
+    "### an intruding sub-heading",
+    "",
+  ]);
+  const CLEAN = customLedger("clean-proj", [
+    H8,
+    S8,
+    ROW8("clean-stale", "active", "2026-08-27T09:00:00Z"), // also 48.5h before NOW, genuinely stale
+  ]);
+  const views = computeCoordinationView(
+    [
+      { slug: "dirty-proj", ledgerContent: DIRTY, questionsContent: null },
+      { slug: "clean-proj", ledgerContent: CLEAN, questionsContent: null },
+    ],
+    NOW
+  );
+  const dirty = views.find((v) => v.slug === "dirty-proj");
+  const clean = views.find((v) => v.slug === "clean-proj");
+
+  assert.equal(dirty.untrustworthy, true);
+  assert.deepEqual(dirty.activeSessions.map((s) => s.session), ["dirty-stale"]);
+  assert.equal(dirty.activeSessions[0].stale, false, "dirty ledger: stale badge suppressed");
+
+  assert.equal(clean.untrustworthy, false, "the dirty ledger's warnings must not leak into the clean one processed in the same call");
+  assert.deepEqual(clean.warnings, []);
+  assert.deepEqual(clean.activeSessions.map((s) => s.session), ["clean-stale"]);
+  assert.equal(clean.activeSessions[0].stale, true, "clean ledger in the SAME call keeps its stale badge -- suppression is scoped per-ledger, not global");
+}
 
 console.log("coordinationModel.test.mjs: all assertions passed");

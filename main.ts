@@ -3520,6 +3520,15 @@ interface CoordinationProjectView {
   activeSessions: CoordinationActiveSession[];
   unlanded: number;
   questions: CoordinationQuestion[];
+  // tsk-2026-09-03-002 step 5: mirrors model.mjs's computeCoordinationView --
+  // true iff any of the seven GL-011 loud channels or the accounting
+  // control fired for this ledger this run. `warnings` is the matching
+  // human-readable line set (describeActiveSessionsWarnings's output plus
+  // staleClearSuspensionNotice when untrustworthy). See renderCoordinationPills
+  // and renderCoordinationBody below for how both are rendered and how the
+  // stale badge is suppressed.
+  untrustworthy: boolean;
+  warnings: string[];
 }
 
 // What (if anything) was focused inside the coordination section right
@@ -3757,8 +3766,23 @@ function renderCoordinationPills(container: HTMLElement, view: CoordinationProje
   container.createSpan({ cls: "aios-pill", text: `${view.activeSessions.length} active` });
   container.createSpan({ cls: "aios-pill", text: `${view.unlanded} unlanded` });
   container.createSpan({ cls: "aios-pill", text: `${view.questions.length} questions` });
-  if (view.activeSessions.some((s) => s.stale)) {
+  // Model-layer suppression (computeCoordinationView) already guarantees no
+  // session in view.activeSessions carries stale:true when view.untrustworthy
+  // is true -- the `!view.untrustworthy` guard here is a SECOND, independent
+  // enforcement of the same rule at the render layer (this code does not
+  // just trust the model's invariant), matching coordination-accounting.mjs's
+  // own complementary-channel philosophy (a span control and a stray-row
+  // scan, neither a substitute for the other).
+  if (!view.untrustworthy && view.activeSessions.some((s) => s.stale)) {
     container.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale claim" });
+  }
+  // The one new affordance this step adds: a visible signal that this
+  // ledger's Active sessions parse is not fully trustworthy this run, so a
+  // still-collapsed card does not read as clean. Full warning text lives in
+  // the body (renderCoordinationBody), rendered only once the card is
+  // expanded; this pill is what tells a human to expand it.
+  if (view.untrustworthy) {
+    container.createSpan({ cls: "aios-pill aios-coord-warning-pill", text: "parse warning" });
   }
 }
 
@@ -3777,17 +3801,37 @@ function renderCoordinationBody(
 ) {
   container.empty();
 
+  // PARSE WARNING group: rendered FIRST, above ACTIVE SESSIONS, so it is the
+  // first thing visible once a card expands rather than sitting below a
+  // session list that itself looks perfectly normal (per step-5 contract:
+  // the warning text must be visible in the panel, not just present in the
+  // model). One line per describeActiveSessionsWarnings entry, plus
+  // staleClearSuspensionNotice when applicable -- see computeCoordinationView
+  // in model.mjs for exactly which channels can produce these lines.
+  if (view.untrustworthy) {
+    const group = container.createDiv({ cls: "aios-coord-group aios-coord-group-warning" });
+    group.createDiv({ cls: "aios-coord-group-label", text: "PARSE WARNING" });
+    for (const line of view.warnings) {
+      group.createDiv({ cls: "aios-coord-warning-line", text: line });
+    }
+  }
+
   if (view.activeSessions.length > 0) {
     const group = container.createDiv({ cls: "aios-coord-group" });
     group.createDiv({ cls: "aios-coord-group-label", text: "ACTIVE SESSIONS" });
     for (const s of view.activeSessions) {
+      // Second, independent enforcement of "no stale badge on an untrustworthy
+      // ledger" -- see renderCoordinationPills above for why this guard is
+      // here even though model.mjs already never sets s.stale true in this
+      // case.
+      const stale = !view.untrustworthy && s.stale;
       const row = group.createDiv({
-        cls: "aios-coord-session-row" + (s.stale ? " aios-coord-session-stale" : ""),
+        cls: "aios-coord-session-row" + (stale ? " aios-coord-session-stale" : ""),
       });
       row.createSpan({ cls: "aios-coord-session-name", text: s.session });
       row.createSpan({ cls: "aios-coord-session-branch", text: s.branch });
       row.createSpan({ cls: "aios-coord-session-updated", text: "updated " + s.lastUpdate });
-      if (s.stale) row.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale" });
+      if (stale) row.createSpan({ cls: "aios-pill aios-coord-stale-pill", text: "stale" });
     }
   }
 

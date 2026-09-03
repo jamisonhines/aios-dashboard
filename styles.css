@@ -1992,6 +1992,30 @@
   color: var(--aios-p1);
   background: rgba(249, 112, 102, 0.14);
 }
+/* tsk-2026-09-03-002 step 5: untrustworthy-ledger-parse affordances. Same
+   semantic color as the stale pill / health-tile-warn (--aios-p1), on
+   purpose -- this is the same "something needs a human's attention" meaning,
+   not a new color language. */
+.aios-dashboard-root .aios-coord-warning-pill {
+  color: var(--aios-p1);
+  background: rgba(249, 112, 102, 0.14);
+}
+.aios-dashboard-root .aios-coord-group-warning {
+  border-left: 2px solid var(--aios-p1);
+  padding-left: 8px;
+}
+.aios-dashboard-root .aios-coord-group-warning .aios-coord-group-label {
+  color: var(--aios-p1);
+}
+.aios-dashboard-root .aios-coord-warning-line {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--aios-p1);
+  margin-bottom: 4px;
+}
+.aios-dashboard-root .aios-coord-warning-line:last-child {
+  margin-bottom: 0;
+}
 .aios-dashboard-root .aios-coord-group {
   margin-bottom: 14px;
 }
