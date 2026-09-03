@@ -2332,10 +2332,26 @@ export function taskStatusActionLabel(verb, title) {
 // project (any Projects/<slug>/ with a work-ledger.md -- decided by the
 // impure gather half in main.ts, not here). Mirrors the EXACT definitions in
 // Operations/scripts/coordination-report.mjs so the panel and the
-// session-start report can never disagree: active = a row's status,
-// lowercased, equals "active"; stale = active AND hoursSince(lastUpdate) >
-// 24; merge queue size ("unlanded") = parseLandingOrder items where landed
-// is false.
+// session-start report can never disagree: active = a row's `state` (the
+// closed-set State column, exact match after coordination-parse.mjs's own
+// emphasis/punctuation normalization -- see parseActiveSessions's
+// normalizeState), NOT a Status-prose prefix match; stale = active AND
+// hoursSince(lastUpdate) > 24; merge queue size ("unlanded") =
+// parseLandingOrder items where landed is false.
+//
+// tsk-2026-09-03-002 step 3: parseActiveSessions now returns an OBJECT
+// ({sessions, orphans, invalidRows, invalidStates, ...}), not a bare array --
+// read `.sessions` off it, not the return value directly. Filtering on
+// `status === "active"` (the pre-restructure field) returns ZERO rows
+// against the migrated live ledger, whose Status cells now read prose like
+// "**active.** Notes: [[#name]]"; `state` is the machine-read replacement.
+// This view does NOT yet surface the six loud channels (orphans,
+// invalidRows, invalidStates, headingTruncations, stateColumnMissing,
+// headingInFence) or the accounting control that coordination-report.mjs and
+// aios-health.mjs now do -- out of scope for this fix (narrower brief: make
+// the panel read State instead of Status without throwing), left as a
+// follow-up if the dashboard should also refuse to show a stale-clear-style
+// affordance on an untrustworthy ledger parse.
 // ---------------------------------------------------------------------------
 
 /**
@@ -2357,7 +2373,7 @@ export function computeCoordinationView(inputs, now) {
     const questionsContent = typeof input?.questionsContent === "string" ? input.questionsContent : "";
 
     const activeSessions = parseActiveSessions(ledgerContent)
-      .filter((s) => (s.status || "").toLowerCase() === "active")
+      .sessions.filter((s) => s.state === "active")
       .map((s) => {
         const h = hoursSince(s.lastUpdate, now);
         return {

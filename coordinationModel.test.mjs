@@ -1,8 +1,18 @@
 // Tests for the Coordination-panel data model: computeCoordinationView (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Mirrors the exact
 // definitions in Operations/scripts/coordination-report.mjs: active = row
-// status lowercased equals "active"; stale = active AND hoursSince(lastUpdate)
-// > 24; merge queue size = parseLandingOrder items where landed is false.
+// `state` (the closed-set State column, exact match after
+// coordination-parse.mjs's own lowercase/emphasis/punctuation normalization,
+// NOT a Status-prose prefix match); stale = active AND
+// hoursSince(lastUpdate) > 24; merge queue size = parseLandingOrder items
+// where landed is false.
+//
+// tsk-2026-09-03-002 step 3: the ledger() fixture builder below produces the
+// MIGRATED shape (Session id + State + ... + Status columns, matching the
+// live Projects/vagabond-ops-app/work-ledger.md post step 1), not the
+// pre-restructure Status-only shape. Status is still present (transition-
+// window convention -- 25 project folders have not migrated yet, per
+// tsk-2026-09-03-001) but is no longer machine-read by this view.
 // Run: node coordinationModel.test.mjs
 import assert from "node:assert";
 import {
@@ -27,8 +37,8 @@ function ledger(rows, landingLines) {
     "",
     "## Active sessions",
     "",
-    "| Session | Branch | Worktree | Write-set | Started | Last update | Status |",
-    "|---|---|---|---|---|---|---|",
+    "| Session | Session id | State | Branch | Worktree | Write-set | Started | Last update | Status |",
+    "|---|---|---|---|---|---|---|---|---|",
     ...rows,
     "",
     "## Merge queue",
@@ -68,9 +78,9 @@ function questions(entries) {
 {
   const LEDGER = ledger(
     [
-      "| coder-build | feat/x | ~/Projects/proj-a | src/foo.ts | 2026-08-29T08:00:00Z | 2026-08-29T09:00:00Z | active |",
-      "| old-session | feat/y | ~/Projects/proj-a | src/bar.ts | 2026-08-27T08:00:00Z | 2026-08-27T09:00:00Z | Active |",
-      "| finished-session | feat/z | ~/Projects/proj-a | src/baz.ts | 2026-08-26T08:00:00Z | 2026-08-29T08:30:00Z | done |",
+      "| coder-build | id-1 | active | feat/x | ~/Projects/proj-a | src/foo.ts | 2026-08-29T08:00:00Z | 2026-08-29T09:00:00Z | **active.** Notes: [[#coder-build]] |",
+      "| old-session | id-2 | **Active** | feat/y | ~/Projects/proj-a | src/bar.ts | 2026-08-27T08:00:00Z | 2026-08-27T09:00:00Z | **active.** Notes: [[#old-session]] |",
+      "| finished-session | id-3 | done | feat/z | ~/Projects/proj-a | src/baz.ts | 2026-08-26T08:00:00Z | 2026-08-29T08:30:00Z | **done.** Notes: [[#finished-session]] |",
     ],
     ["1. feat/x - landed", "2. feat/y - ready", "3. feat/z - ready"]
   );
@@ -95,11 +105,11 @@ function questions(entries) {
   const v = views[0];
   assert.equal(v.slug, "proj-a");
 
-  assert.equal(v.activeSessions.length, 2, "'done' status row excluded; both 'active'/'Active' rows included");
+  assert.equal(v.activeSessions.length, 2, "'done' State row excluded; both 'active'/'**Active**' State rows included");
   assert.deepEqual(
     v.activeSessions.map((s) => s.session),
     ["coder-build", "old-session"],
-    "status match is case-insensitive, source order preserved"
+    "State match tolerates case AND markdown emphasis (normalizeState lowercases and strips */_/`), source order preserved"
   );
   assert.deepEqual(v.activeSessions[0], {
     session: "coder-build",
@@ -152,7 +162,7 @@ function questions(entries) {
 // --- stale boundary: exactly 24h is NOT stale (matches coordination-report.mjs's strict `> 24`) ---
 {
   const LEDGER = ledger(
-    ["| s1 | feat/x | wt | file.ts | 2026-08-28T09:30:00Z | 2026-08-28T09:30:00Z | active |"],
+    ["| s1 | id-1 | active | feat/x | wt | file.ts | 2026-08-28T09:30:00Z | 2026-08-28T09:30:00Z | **active.** |"],
     ["1. feat/x - ready"]
   );
   const views = computeCoordinationView([{ slug: "p", ledgerContent: LEDGER, questionsContent: null }], NOW);
@@ -160,7 +170,7 @@ function questions(entries) {
 }
 {
   const LEDGER = ledger(
-    ["| s1 | feat/x | wt | file.ts | 2026-08-28T09:29:59Z | 2026-08-28T09:29:59Z | active |"],
+    ["| s1 | id-1 | active | feat/x | wt | file.ts | 2026-08-28T09:29:59Z | 2026-08-28T09:29:59Z | **active.** |"],
     ["1. feat/x - ready"]
   );
   const views = computeCoordinationView([{ slug: "p", ledgerContent: LEDGER, questionsContent: null }], NOW);
