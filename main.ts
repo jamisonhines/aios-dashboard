@@ -429,23 +429,54 @@ function participatingProjectSlugs(app: App, projectsRoot: string): string[] {
 // model.mjs). questions.md missing or unreadable degrades to null content
 // (the model turns that into zero questions), never an error -- same
 // optional-data pattern as automation-health.json/usage-stats.json.
+//
+// `ledgerReadFailed` (step-5 follow-up, Reviewer's Minor on 969cfa8): true
+// when work-ledger.md does not exist as a TFile at all, OR exists but
+// cachedRead threw -- i.e. nothing was actually READ. Both currently
+// degrade ledgerContent to "" the same way a genuinely-read, genuinely-
+// heading-less ledger would, and computeCoordinationView's control.reason
+// for empty content is "no '## Active sessions' heading found in this file
+// at all" (coordination-accounting.mjs's checkActiveSessionsAccounting) --
+// true and useful for a file that was read and really has no such heading
+// yet (a freshly-adopted ledger transiently in that shape, e.g. during the
+// 24-project GL-011 rollout), but FALSE for a file gatherCoordinationInputs
+// never got to read: nothing was inspected, so "no heading found" is not a
+// finding, it's a guess dressed as one. Kept as a flag here rather than
+// fixed by rewording describeActiveSessionsWarnings itself, which is the
+// same function coordination-report.mjs and aios-health.mjs call verbatim
+// -- editing it would risk the panel and those CLI consumers disagreeing
+// about ledgers they DID manage to parse, which is a worse failure than a
+// wrong sentence on ledgers this gather step never reached. The render call
+// site (participatingProjectSlugs's caller, below) turns this flag into an
+// accurate line instead.
 async function gatherCoordinationInputs(
   app: App,
   projectsRoot: string,
   slugs: string[]
-): Promise<{ slug: string; ledgerContent: string; questionsContent: string | null }[]> {
-  const out: { slug: string; ledgerContent: string; questionsContent: string | null }[] = [];
+): Promise<
+  { slug: string; ledgerContent: string; ledgerReadFailed: boolean; questionsContent: string | null }[]
+> {
+  const out: {
+    slug: string;
+    ledgerContent: string;
+    ledgerReadFailed: boolean;
+    questionsContent: string | null;
+  }[] = [];
   for (const slug of slugs) {
     const ledgerFile = app.vault.getAbstractFileByPath(
       normalizePath(`${projectsRoot}/${slug}/work-ledger.md`)
     );
     let ledgerContent = "";
+    let ledgerReadFailed = false;
     if (ledgerFile instanceof TFile) {
       try {
         ledgerContent = await app.vault.cachedRead(ledgerFile);
       } catch {
         ledgerContent = "";
+        ledgerReadFailed = true;
       }
+    } else {
+      ledgerReadFailed = true;
     }
     const questionsFile = app.vault.getAbstractFileByPath(
       normalizePath(`${projectsRoot}/${slug}/questions.md`)
@@ -458,9 +489,34 @@ async function gatherCoordinationInputs(
         questionsContent = null;
       }
     }
-    out.push({ slug, ledgerContent, questionsContent });
+    out.push({ slug, ledgerContent, ledgerReadFailed, questionsContent });
   }
   return out;
+}
+
+// Turns gatherCoordinationInputs's ledgerReadFailed flag into an accurate
+// warning line. computeCoordinationView has no way to see ledgerReadFailed
+// (it only ever receives the already-degraded "" string, indistinguishable
+// there from a genuinely-read, genuinely-heading-less ledger), so this runs
+// as a post-processing step over its output, in main.ts, rather than as a
+// change to describeActiveSessionsWarnings (see gatherCoordinationInputs's
+// comment for why that function stays untouched). Only the one misleading
+// line is swapped; `untrustworthy` (still true, correctly: an unreadable
+// ledger is not trustworthy either), `activeSessions` (empty either way --
+// there is nothing to have read), and staleClearSuspensionNotice's own line
+// are left exactly as computeCoordinationView produced them.
+function applyLedgerReadFailureNotice(
+  view: CoordinationProjectView,
+  fileLabel: string
+): CoordinationProjectView {
+  const misleading =
+    `ACCOUNTING CONTROL COULD NOT RUN (${fileLabel}): no '## Active sessions' ` +
+    `heading found in this file at all`;
+  const accurate = `could not read ${fileLabel} (missing, or the read itself failed)`;
+  return {
+    ...view,
+    warnings: view.warnings.map((line) => (line === misleading ? accurate : line)),
+  };
 }
 
 // Write-back for one question's answer: read-mutate-write, exactly the
@@ -2008,7 +2064,14 @@ function renderProjectsTab(
   if (coordHosts.size > 0) {
     const slugs = Array.from(coordHosts.keys());
     gatherCoordinationInputs(app, settings.projectsRoot, slugs).then((inputs) => {
-      const views: CoordinationProjectView[] = computeCoordinationView(inputs, new Date());
+      const readFailedSlugs = new Set(
+        inputs.filter((i) => i.ledgerReadFailed).map((i) => i.slug)
+      );
+      const views: CoordinationProjectView[] = computeCoordinationView(inputs, new Date()).map((v) =>
+        readFailedSlugs.has(v.slug)
+          ? applyLedgerReadFailureNotice(v, `Projects/${v.slug}/work-ledger.md`)
+          : v
+      );
       for (const v of views) {
         const hosts = coordHosts.get(v.slug);
         if (!hosts) continue;
