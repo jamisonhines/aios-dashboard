@@ -533,16 +533,25 @@ function makeBarrierAdapter(root) {
 }
 
 // --- claimNextTaskIdFs: path traversal in tasksRootRel is rejected (M-9) --------------------
+// escapedName is session-unique and cleaned up in `finally`: if the guard under test is
+// broken, this test itself would otherwise create a real directory one level above a
+// mkdtemp'd root and (measured: this happened once while developing this test) leave it
+// behind for a later, correctly-guarded run to trip over as a false failure.
 {
   const tasksRoot = await makeTasksRoot();
-  await assert.rejects(
-    () => claimNextTaskIdFs({ fsp: fs, basePath: tasksRoot, tasksRootRel: "../escaped", day: "2026-09-17", diskMax: 0 }),
-    /refusing a tasksRoot containing/i,
-    "a tasksRootRel containing .. must be rejected before any real fs call"
-  );
-  // Prove no directory was created anywhere outside (or inside) the temp root as a side effect.
-  const escapedDir = path.join(path.dirname(tasksRoot), "escaped");
-  assert.ok(!existsSync(escapedDir), "the rejected traversal must not have created anything outside the intended root");
+  const escapedName = `taskIdClaim-escaped-${process.pid}-${Date.now()}`;
+  const escapedDir = path.join(path.dirname(tasksRoot), escapedName);
+  try {
+    await assert.rejects(
+      () => claimNextTaskIdFs({ fsp: fs, basePath: tasksRoot, tasksRootRel: `../${escapedName}`, day: "2026-09-17", diskMax: 0 }),
+      /refusing a tasksRoot containing/i,
+      "a tasksRootRel containing .. must be rejected before any real fs call"
+    );
+    // Prove no directory was created anywhere outside (or inside) the temp root as a side effect.
+    assert.ok(!existsSync(escapedDir), "the rejected traversal must not have created anything outside the intended root");
+  } finally {
+    await fs.rm(escapedDir, { recursive: true, force: true });
+  }
 }
 
 {
