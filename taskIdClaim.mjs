@@ -11,10 +11,10 @@
 // 1. claimNextTaskIdFs -- desktop, Node fs available. Same primitive as mint-task-id.mjs's
 //    claimTaskIds: a non-recursive fs.mkdir on the leaf claim folder is atomic at the
 //    filesystem level (EEXIST means someone else holds that NNN, try the next one). Node's
-//    `fs` module is already used at runtime from main.ts today (agent-models-write.mjs is
-//    imported there and calls node:fs directly, confirming the plugin already relies on Node
-//    fs being present when it's imported this way), so this is the normal path, not a
-//    best-effort one.
+//    `fs` module is already relied on at runtime from main.ts today via the same dynamic
+//    `require("fs")` pattern `runLaunchCommand` already uses for `require("child_process")`;
+//    the committed, esbuild-bundled main.js keeps that require call intact (verified from the
+//    built artifact, not inferred), so this is the normal path, not a best-effort one.
 //
 // 2. claimNextTaskIdAdapter -- fs unavailable (or the fs path throws). Obsidian's own
 //    FileSystemAdapter.mkdir is NOT a substitute atomic primitive: extracting
@@ -132,4 +132,79 @@ export async function claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskM
     // collision here (see header: it is recursive and silently no-ops on EEXIST)
   }
   return `tsk-${day}-${candidate}`;
+}
+
+// UTC calendar day, YYYY-MM-DD, matching mint-task-id.mjs's todayUTC() exactly (both use
+// getUTC* accessors, never local-time getters). `now` is injectable so tests can pin an
+// instant instead of racing the real clock; main.ts always calls this with no argument.
+// The plugin and the CLI MUST agree on what day it is: if one read local time and the other
+// UTC, quick-add and an agent's mint-task-id.mjs call would file claims for different days for
+// part of every day (four hours a day at UTC+4, tsk-2026-09-17-021 Minor M-4) with nothing to
+// signal the split -- two claim spaces, duplicate ids return, no error anywhere.
+export function todayUTCDay(now = new Date()) {
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
+}
+
+// Full selection between the atomic fs path and the best-effort adapter path, with every
+// environment probe injected so the whole decision -- not just the two claim primitives --
+// is unit-testable (tsk-2026-09-17-021 Important-1: previously nothing exercised the claim
+// root string, the getBasePath probe, or the fs-vs-adapter branch itself; a wrong root or a
+// broken selection left the test suite green).
+//
+// adapter: the Obsidian vault adapter (passed straight through to claimNextTaskIdAdapter).
+// tasksRootRel: the caller's OWN tasks-root setting, never hardcoded (Important-3: a claim
+// root that diverges from where createQuickTask actually writes the file silently splits the
+// claim space against both the CLI and any future write-path change).
+// day / diskMax: as the two claim primitives.
+// getBasePath: () => string | null | undefined, may throw. Absence (mobile, or any adapter
+// without a resolvable filesystem base path) is EXPECTED and stays quiet -- there is nothing
+// to alert on, the adapter path is simply correct here.
+// requireFs: () => an object shaped like node's `fs` module (i.e. exposes `.promises`), may
+// throw. Thrown here means "no Node fs in this environment despite a resolved base path": an
+// unusual but still non-atomic-by-necessity situation, treated the same as "no fs" -- quiet.
+// notice: (message: string) => void, called ONLY when the environment looked capable of the
+// atomic path (basePath resolved AND fs required successfully) and the claim itself then threw
+// -- e.g. EACCES/EPERM on the claim directory, or MAX_RETRIES_PER_ID exhausted under
+// pathological contention. That is the case Important-2 named: silently reopening the exact
+// defect this task closes must not be silent. May be omitted (tests that don't care about the
+// Notice text can leave it undefined; the fallback still runs).
+export async function resolveNextTaskId({
+  adapter,
+  tasksRootRel,
+  day,
+  diskMax,
+  getBasePath,
+  requireFs,
+  notice,
+}) {
+  let basePath;
+  try {
+    basePath = getBasePath ? getBasePath() : undefined;
+  } catch {
+    basePath = undefined; // no usable base path; quiet, expected (e.g. mobile)
+  }
+  if (typeof basePath === "string" && basePath) {
+    let fsp = null;
+    try {
+      const fsModule = requireFs ? requireFs() : null;
+      fsp = fsModule ? fsModule.promises : null;
+    } catch {
+      fsp = null; // no Node fs despite a resolved base path; quiet, treated as "no fs here"
+    }
+    if (fsp) {
+      try {
+        return await claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, diskMax });
+      } catch (err) {
+        if (notice) {
+          notice(
+            `AIOS: could not claim a task id atomically (${err && err.message ? err.message : err}). ` +
+              `Falling back to a non-atomic claim; if this repeats, check the tasks folder is writable.`
+          );
+        }
+        // fall through to the adapter path deliberately: task creation must not block on this
+      }
+    }
+  }
+  return await claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax });
 }

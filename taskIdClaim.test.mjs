@@ -15,6 +15,8 @@ import {
   maxOnDiskFromBasenames,
   claimNextTaskIdFs,
   claimNextTaskIdAdapter,
+  resolveNextTaskId,
+  todayUTCDay,
 } from "./taskIdClaim.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -140,7 +142,14 @@ function makeRecordingFsp(preExisting = []) {
   assert.ok(existsSync(path.join(claimsDayDir, "006")), "the claim folder for the returned id must actually exist on disk");
 }
 
-// --- Differential race: 15+ real CLI processes interleaved with 15+ plugin-path calls -----
+// --- Differential race: 15+ real CLI processes and 15+ plugin-path calls, same tasks root --
+// NOTE (Reviewer M-1, measured): execFileSync is synchronous and blocks this loop, so the CLI
+// processes are NOT actually interleaved in wall-clock time with the plugin-path calls -- all
+// 15 CLI calls complete before the first plugin claim starts (CLI ids come back 001-015 in
+// order, plugin ids 016-030 out of order). What this DOES prove, and what matters: the CLI
+// writes claims only (never a task file) in the SAME directory the plugin claims into, and the
+// plugin honours every one of those 15 claimed-but-unwritten numbers by starting at 016. Real
+// plugin-vs-plugin contention (the out-of-order 016-030 run) is also exercised for free.
 {
   const tasksRoot = await makeTasksRoot();
   const day = "2026-09-17";
@@ -268,6 +277,135 @@ function makeBarrierAdapter(root) {
     b,
     "residual: two concurrent no-fs adapter-path claims on the same snapshot collide (adapter.mkdir cannot report EEXIST)"
   );
+}
+
+// --- todayUTCDay: proves UTC, not local time (Reviewer M-4) -----------------------------
+{
+  // Fixed instant deliberately close to a UTC-day boundary: 2026-09-17T23:30:00Z. Force the
+  // PROCESS's local timezone to something far from UTC (Node re-reads process.env.TZ for
+  // local Date getters -- measured empirically before writing this test) so a regression from
+  // getUTC* to local getters is guaranteed to be caught regardless of the runner's own TZ.
+  const originalTZ = process.env.TZ;
+  process.env.TZ = "Pacific/Kiritimati"; // UTC+14
+  try {
+    const fixed = new Date("2026-09-17T23:30:00.000Z");
+    const gotUTC = todayUTCDay(fixed);
+    assert.equal(gotUTC, "2026-09-17", "todayUTCDay must read the UTC calendar day");
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const localStyleDay = `${fixed.getFullYear()}-${pad2(fixed.getMonth() + 1)}-${pad2(fixed.getDate())}`;
+    assert.notEqual(
+      localStyleDay,
+      gotUTC,
+      "sanity: at UTC+14 this instant really is a different LOCAL calendar day, so a local-time " +
+        "regression in todayUTCDay would have produced localStyleDay here instead of gotUTC"
+    );
+  } finally {
+    if (originalTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTZ;
+  }
+}
+
+// --- resolveNextTaskId: the fs-vs-adapter selection itself (Reviewer I-1) ---------------
+// Direct, fast, isolated coverage of the dispatcher with every dependency faked. The
+// heavier proof that main.ts's own nextTaskId() calls this correctly (right tasksRootRel,
+// right getBasePath, a real Notice on a real failure) lives in nextTaskIdWiring.test.mjs,
+// which bundles the actual main.ts source rather than a hand description of it.
+{
+  // Happy path: basePath resolves, requireFs succeeds -> atomic fs path, no Notice.
+  const tasksRoot = await makeTasksRoot();
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: { getBasePath: () => tasksRoot },
+    tasksRootRel: "",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => tasksRoot,
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 0, "the happy fs path must not raise a Notice");
+  assert.ok(existsSync(path.join(tasksRoot, ".id-claims/2026-09-17/001")), "the atomic path must actually claim on disk");
+}
+
+{
+  // No base path (mobile, or any adapter without one): quiet fallback to the adapter path,
+  // no Notice -- this is EXPECTED, not a failure.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 3,
+    getBasePath: () => undefined,
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+  });
+  assert.equal(id, "tsk-2026-09-17-004");
+  assert.equal(notices.length, 0, "no base path is an expected condition (e.g. mobile), must stay quiet");
+}
+
+{
+  // requireFs throws even though a base path resolved: still treated as "no fs here", quiet.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => "/some/vault",
+    requireFs: () => {
+      throw new Error("no fs module in this environment");
+    },
+    notice: (msg) => notices.push(msg),
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 0, "fs genuinely unavailable is treated the same as no base path, must stay quiet");
+}
+
+{
+  // Base path AND fs both look available, but the atomic claim itself throws (simulated
+  // EACCES-shaped failure): this must be LOUD (Reviewer I-2) and must still fall back so task
+  // creation is not blocked.
+  const notices = [];
+  const failingFsp = {
+    async mkdir() {
+      const err = new Error("EACCES: permission denied, mkdir '/vault/Operations/tasks/.id-claims'");
+      err.code = "EACCES";
+      throw err;
+    },
+    async readdir() {
+      return [];
+    },
+  };
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 2,
+    getBasePath: () => "/vault",
+    requireFs: () => ({ promises: failingFsp }),
+    notice: (msg) => notices.push(msg),
+  });
+  assert.equal(id, "tsk-2026-09-17-003", "must still hand back an id via the adapter fallback, task creation is never blocked");
+  assert.equal(notices.length, 1, "an fs claim failure with fs genuinely present must raise exactly one Notice");
+  assert.match(notices[0], /could not claim a task id atomically/i, "the Notice must name what failed, not a generic message");
+  assert.match(notices[0], /EACCES/, "the Notice must surface the underlying error so a permissions problem is diagnosable");
 }
 
 console.log("taskIdClaim: all assertions passed");
