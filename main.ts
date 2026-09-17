@@ -309,9 +309,13 @@ function nowIso(): string {
   );
 }
 
+// tsk-2026-09-17-021 Minor M-6: this used to duplicate todayUTCDay()'s own UTC-day logic
+// (harmlessly, since both used getUTC* -- but only todayUTCDay() was pinned by a test, so a
+// future drift in EITHER one would silently put the two day facts this plugin computes out of
+// sync with each other, e.g. the "## Updates" line in a new task file vs. the id it's named
+// after). One implementation now, reused here.
 function isoDate(): string {
-  const d = new Date();
-  return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
+  return todayUTCDay();
 }
 
 function yearMonth(): { y: string; m: string } {
@@ -1246,6 +1250,11 @@ async function nextTaskId(app: App, tasksRoot: string, day: string): Promise<str
       }
     },
     notice: (msg: string) => new Notice(msg),
+    // Platform.isDesktop, not base-path presence, is the real "should the atomic path have
+    // worked" signal (tsk-2026-09-17-021 round 2, Important-4): a resolved base path is what
+    // the atomic path NEEDS, but its absence on desktop is an anomaly worth a Notice, while
+    // its absence on mobile is simply how mobile is.
+    isDesktop: Platform.isDesktop,
   });
 }
 

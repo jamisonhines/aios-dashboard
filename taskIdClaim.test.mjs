@@ -408,4 +408,167 @@ function makeBarrierAdapter(root) {
   assert.match(notices[0], /EACCES/, "the Notice must surface the underlying error so a permissions problem is diagnosable");
 }
 
+// --- resolveNextTaskId: Platform.isDesktop-aware probe-failure loudness (round 2 I-4) -------
+{
+  // Desktop, but getBasePath() itself returns nothing: this is an ANOMALY on desktop, must be
+  // loud, distinct from the fs-claim-throws case (I-2) which has its own message text.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => undefined,
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+    isDesktop: true,
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 1, "desktop with no resolvable base path must raise exactly one Notice");
+  assert.match(notices[0], /expected an atomic task-id claim on desktop/i, "the Notice must name the desktop-specific anomaly");
+}
+
+{
+  // Same probe failure, but isDesktop: false (mobile) -- must stay quiet, this is expected.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => undefined,
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+    isDesktop: false,
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 0, "the identical probe failure on mobile (isDesktop: false) must stay quiet");
+}
+
+{
+  // Desktop, base path resolves, but requireFs itself throws (fs unavailable despite a base
+  // path): also an anomaly on desktop, also loud, with a message distinguishing it from the
+  // no-base-path case.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => "/vault",
+    requireFs: () => {
+      throw new Error("no fs module in this environment");
+    },
+    notice: (msg) => notices.push(msg),
+    isDesktop: true,
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 1, "desktop with fs unavailable despite a resolved base path must raise exactly one Notice");
+  assert.match(notices[0], /fs module was unavailable/i, "the Notice must name the fs-unavailable anomaly, not the no-base-path one");
+}
+
+// --- claimNextTaskIdAdapter: a real mkdir throw is loud regardless of platform (M-3) --------
+{
+  const notices = [];
+  const throwingAdapter = {
+    async list() {
+      return { files: [], folders: [] };
+    },
+    async mkdir() {
+      throw new Error("EPERM: operation not permitted");
+    },
+  };
+  const id = await claimNextTaskIdAdapter({
+    adapter: throwingAdapter,
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    notice: (msg) => notices.push(msg),
+  });
+  assert.equal(id, "tsk-2026-09-17-001", "must still hand back an id, task creation is never blocked");
+  assert.equal(notices.length, 1, "an adapter mkdir throw must raise exactly one Notice (no claim folder was recorded at all)");
+  assert.match(notices[0], /could not record a task-id claim/i, "the Notice must say a claim was NOT recorded, distinct from the documented recursive-mkdir residual");
+  assert.match(notices[0], /EPERM/, "the Notice must surface the underlying error");
+}
+
+{
+  // Same failure through the full resolveNextTaskId dispatch, mobile-shaped (isDesktop
+  // false/omitted): M-3's notice must still fire even though I-4's desktop-only notice does not.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {
+        throw new Error("mobile storage denied the write");
+      },
+    },
+    tasksRootRel: "Operations/tasks",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => undefined,
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+    isDesktop: false,
+  });
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(notices.length, 1, "M-3's notice must fire on mobile too, even though I-4's probe-failure notice does not");
+  assert.match(notices[0], /could not record a task-id claim/i);
+}
+
+// --- claimNextTaskIdFs: path traversal in tasksRootRel is rejected (M-9) --------------------
+{
+  const tasksRoot = await makeTasksRoot();
+  await assert.rejects(
+    () => claimNextTaskIdFs({ fsp: fs, basePath: tasksRoot, tasksRootRel: "../escaped", day: "2026-09-17", diskMax: 0 }),
+    /refusing a tasksRoot containing/i,
+    "a tasksRootRel containing .. must be rejected before any real fs call"
+  );
+  // Prove no directory was created anywhere outside (or inside) the temp root as a side effect.
+  const escapedDir = path.join(path.dirname(tasksRoot), "escaped");
+  assert.ok(!existsSync(escapedDir), "the rejected traversal must not have created anything outside the intended root");
+}
+
+{
+  // Through the full dispatcher: a traversal attempt on the fs path falls back to the
+  // (vault-API-confined) adapter path rather than escaping, and is loud on desktop.
+  const notices = [];
+  const id = await resolveNextTaskId({
+    adapter: {
+      async list() {
+        return { files: [], folders: [] };
+      },
+      async mkdir() {},
+    },
+    tasksRootRel: "../escaped",
+    day: "2026-09-17",
+    diskMax: 0,
+    getBasePath: () => "/vault",
+    requireFs: () => ({ promises: fs }),
+    notice: (msg) => notices.push(msg),
+    isDesktop: true,
+  });
+  assert.equal(id, "tsk-2026-09-17-001", "must still resolve an id via the confined adapter path");
+  assert.ok(
+    notices.some((m) => /could not claim a task id atomically/i.test(m) && /refusing a tasksRoot containing/i.test(m)),
+    `a rejected traversal on the atomic path must be reported via Notice, got: ${JSON.stringify(notices)}`
+  );
+}
+
 console.log("taskIdClaim: all assertions passed");

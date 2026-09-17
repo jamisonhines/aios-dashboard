@@ -28,6 +28,15 @@
 // section for the risk note.
 //
 // Never releases a claim (matches mint-task-id.mjs) and never prunes (the CLI owns pruning).
+//
+// tsk-2026-09-17-021 Minor M-5 (documentation only, no code change): task ids are a
+// vault-GLOBAL namespace (tsk-<day>-NNN), but since Important-3 the claim directory is
+// per-tasksRoot-setting. The plugin's `tasksRoot` setting and the CLI's `--tasks-root`
+// default MUST resolve to the same folder, or the two claim spaces split silently: the
+// plugin claims under one root, an agent running mint-task-id.mjs claims under the other,
+// and duplicate ids can return with no error anywhere. At the shipped default
+// ("Operations/tasks" on both sides) they agree. If `tasksRoot` is ever changed in the
+// plugin's settings, `--tasks-root` must be changed to match everywhere the CLI is invoked.
 
 // No static "node:path" (or "node:fs") import here: this module is bundled by esbuild into
 // main.ts (platform "browser", not "node"), which fails to resolve node built-ins that are
@@ -46,6 +55,17 @@ const MAX_RETRIES_PER_ID = 50;
 
 export function pad3(n) {
   return String(n).padStart(3, "0");
+}
+
+// tsk-2026-09-17-021 Minor M-9: tasksRootRel became user-supplied once Important-3 threaded
+// the caller's own `tasksRoot` setting through instead of a hardcoded literal. A setting of
+// e.g. "../claims" would otherwise make the fs path mkdir OUTSIDE the vault (joinPath only
+// strips slashes, not ".."), while the adapter path stays confined by Obsidian's own vault
+// API. Reject any ".." path segment before it ever reaches a real fs call.
+export function hasPathTraversal(rel) {
+  return String(rel)
+    .split("/")
+    .some((seg) => seg === "..");
 }
 
 // Mirrors the exact scan nextTaskId() used to do inline: MAX(NNN) across every markdown
@@ -85,6 +105,11 @@ async function maxClaimedFs(fsp, claimsDayDir) {
 // tasks root, e.g. "Operations/tasks". diskMax: the day's highest on-disk NNN, supplied by
 // the caller (main.ts already has the vault file listing; this module never re-walks it).
 export async function claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, diskMax }) {
+  if (hasPathTraversal(tasksRootRel)) {
+    throw new Error(
+      `taskIdClaim: refusing a tasksRoot containing ".." (would escape the vault): ${JSON.stringify(tasksRootRel)}`
+    );
+  }
   const tasksRoot = joinPath(basePath, tasksRootRel);
   const claimsDayDir = joinPath(tasksRoot, ".id-claims", day);
   await fsp.mkdir(claimsDayDir, { recursive: true });
@@ -110,7 +135,14 @@ export async function claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, disk
 // Obsidian-vault-adapter-shaped object exposing list(path) -> {files, folders} and
 // mkdir(path). tasksRootRel + day + diskMax as above. Does not retry on collision: this path
 // cannot detect a collision (see header), it can only avoid reissuing a NNN it can see.
-export async function claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax }) {
+//
+// notice (optional): tsk-2026-09-17-021 Minor M-3. adapter.mkdir THROWING is a materially
+// different, more severe failure than the documented residual (adapter.mkdir succeeding but
+// being unable to detect a collision because it is recursive under the hood): a throw means NO
+// claim folder was recorded at all, so a later CLI mint sees nothing reserved and reissues that
+// exact number. That deserves its own signal regardless of desktop/mobile -- unlike the fs-probe
+// quiet/loud split in resolveNextTaskId, this fires whenever it happens, on any platform.
+export async function claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax, notice }) {
   const claimsDayDir = `${tasksRootRel}/.id-claims/${day}`;
   let claimMax = 0;
   try {
@@ -127,9 +159,16 @@ export async function claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskM
   const candidate = pad3(cursor);
   try {
     await adapter.mkdir(`${claimsDayDir}/${candidate}`);
-  } catch {
-    // best-effort only; still return the id since adapter.mkdir cannot report a real
-    // collision here (see header: it is recursive and silently no-ops on EEXIST)
+  } catch (err) {
+    // No claim folder was recorded for this id at all (distinct from the documented
+    // recursive-mkdir-can't-detect-EEXIST residual, see header above). Still return the id
+    // since task creation must not block on this, but say so.
+    if (notice) {
+      notice(
+        `AIOS: could not record a task-id claim (${err && err.message ? err.message : err}). ` +
+          `The id was still assigned; a later collision is possible.`
+      );
+    }
   }
   return `tsk-${day}-${candidate}`;
 }
@@ -163,12 +202,24 @@ export function todayUTCDay(now = new Date()) {
 // requireFs: () => an object shaped like node's `fs` module (i.e. exposes `.promises`), may
 // throw. Thrown here means "no Node fs in this environment despite a resolved base path": an
 // unusual but still non-atomic-by-necessity situation, treated the same as "no fs" -- quiet.
-// notice: (message: string) => void, called ONLY when the environment looked capable of the
-// atomic path (basePath resolved AND fs required successfully) and the claim itself then threw
-// -- e.g. EACCES/EPERM on the claim directory, or MAX_RETRIES_PER_ID exhausted under
-// pathological contention. That is the case Important-2 named: silently reopening the exact
-// defect this task closes must not be silent. May be omitted (tests that don't care about the
-// Notice text can leave it undefined; the fallback still runs).
+// notice: (message: string) => void, called:
+//   - when the environment looked fully capable of the atomic path (basePath resolved AND fs
+//     required successfully) and the claim itself then threw -- e.g. EACCES/EPERM on the
+//     claim directory, or MAX_RETRIES_PER_ID exhausted under pathological contention. That is
+//     the case Important-2 named: silently reopening the exact defect this task closes must
+//     not be silent.
+//   - (tsk-2026-09-17-021 round 2, Important-4) when isDesktop is true and EITHER probe itself
+//     failed (no/empty/throwing getBasePath, or a throwing requireFs). On desktop that is an
+//     ANOMALY, not an expected platform limitation -- genuine mobile (isDesktop: false) stays
+//     quiet for the exact same probe failures, since there getBasePath/require are simply
+//     absent by design and there is nothing to alert on.
+// May be omitted (tests that don't care about the Notice text can leave it undefined; the
+// fallback still runs).
+//
+// isDesktop: boolean, the caller's own Platform.isDesktop (Obsidian's `Platform` global).
+// Using base-path PRESENCE as a proxy for "is this mobile" (the pre-round-2 shape) conflates
+// "expected to be absent" with "failed to resolve"; Platform.isDesktop is the real signal and
+// costs nothing to plumb through, since main.ts already imports `Platform`.
 export async function resolveNextTaskId({
   adapter,
   tasksRootRel,
@@ -177,34 +228,57 @@ export async function resolveNextTaskId({
   getBasePath,
   requireFs,
   notice,
+  isDesktop,
 }) {
   let basePath;
+  let basePathError = null;
   try {
     basePath = getBasePath ? getBasePath() : undefined;
-  } catch {
-    basePath = undefined; // no usable base path; quiet, expected (e.g. mobile)
+  } catch (err) {
+    basePath = undefined;
+    basePathError = err;
   }
-  if (typeof basePath === "string" && basePath) {
-    let fsp = null;
+  const hasBasePath = typeof basePath === "string" && basePath.length > 0;
+
+  let fsp = null;
+  let fsError = null;
+  if (hasBasePath) {
     try {
       const fsModule = requireFs ? requireFs() : null;
       fsp = fsModule ? fsModule.promises : null;
-    } catch {
-      fsp = null; // no Node fs despite a resolved base path; quiet, treated as "no fs here"
-    }
-    if (fsp) {
-      try {
-        return await claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, diskMax });
-      } catch (err) {
-        if (notice) {
-          notice(
-            `AIOS: could not claim a task id atomically (${err && err.message ? err.message : err}). ` +
-              `Falling back to a non-atomic claim; if this repeats, check the tasks folder is writable.`
-          );
-        }
-        // fall through to the adapter path deliberately: task creation must not block on this
-      }
+      if (!fsp) fsError = new Error("requireFs() returned no usable fs module");
+    } catch (err) {
+      fsError = err;
     }
   }
-  return await claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax });
+
+  if (hasBasePath && fsp) {
+    try {
+      return await claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, diskMax });
+    } catch (err) {
+      if (notice) {
+        notice(
+          `AIOS: could not claim a task id atomically (${err && err.message ? err.message : err}). ` +
+            `Falling back to a non-atomic claim; if this repeats, check the tasks folder is writable.`
+        );
+      }
+      // fall through to the adapter path deliberately: task creation must not block on this
+      return await claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax, notice });
+    }
+  }
+
+  // Never reached the atomic path at all: the probe itself failed (no base path, or fs
+  // unavailable despite one). On desktop that should not happen and is worth a Notice; on
+  // mobile (or an unknown/unspecified platform) it is the expected, silent shape.
+  if (isDesktop && notice) {
+    const reason = !hasBasePath
+      ? basePathError
+        ? `resolving the vault's filesystem path threw (${basePathError.message || basePathError})`
+        : "could not resolve the vault's filesystem path"
+      : `Node's fs module was unavailable (${(fsError && fsError.message) || fsError || "unknown reason"})`;
+    notice(
+      `AIOS: expected an atomic task-id claim on desktop but ${reason}; falling back to a non-atomic claim.`
+    );
+  }
+  return await claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax, notice });
 }

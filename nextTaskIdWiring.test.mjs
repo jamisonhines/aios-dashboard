@@ -32,7 +32,9 @@ const OBSIDIAN_STUB_SOURCE = [
   "export class Notice { constructor(msg) { __noticeLog.push(msg); } }",
   "export function __getNoticeLog() { return __noticeLog; }",
   "export function __clearNoticeLog() { __noticeLog = []; }",
-  "export const Platform = { isMobile: false };",
+  // Mutable so tests can flip desktop/mobile (round 2 Important-4) without rebuilding.
+  "export const Platform = { isMobile: false, isDesktop: true };",
+  "export function __setIsDesktop(v) { Platform.isDesktop = v; }",
   "export class Plugin {}",
   "export class PluginSettingTab {}",
   "export class Scope {}",
@@ -48,7 +50,11 @@ const OBSIDIAN_STUB_SOURCE = [
 // Appended verbatim to a disposable copy of main.ts's own source. nextTaskId is the exact
 // private function main.ts declares; nothing here changes what it does.
 const EXPORT_APPEND =
-  "\nexport {\n" + "  nextTaskId as __nextTaskId,\n" + "};\n" + 'export { __getNoticeLog, __clearNoticeLog } from "obsidian";\n';
+  "\nexport {\n" +
+  "  nextTaskId as __nextTaskId,\n" +
+  "  createQuickTask as __createQuickTask,\n" +
+  "};\n" +
+  'export { __getNoticeLog, __clearNoticeLog, __setIsDesktop } from "obsidian";\n';
 
 function buildWiringBundle() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aios-dashboard-nexttaskid-wiring-"));
@@ -115,10 +121,35 @@ function makeFakeApp(basePath) {
 }
 
 const mod = loadWiringModule();
-const { __nextTaskId: nextTaskId, __getNoticeLog: getNoticeLog, __clearNoticeLog: clearNoticeLog } = mod;
+const {
+  __nextTaskId: nextTaskId,
+  __createQuickTask: createQuickTask,
+  __getNoticeLog: getNoticeLog,
+  __clearNoticeLog: clearNoticeLog,
+  __setIsDesktop: setIsDesktop,
+} = mod;
 
 async function makeVaultDir() {
   return fs.promises.mkdtemp(path.join(os.tmpdir(), "nextTaskIdWiring-vault-"));
+}
+
+function makeFakeAppForQuickTask(vaultDir) {
+  const created = [];
+  return {
+    _created: created,
+    vault: {
+      getMarkdownFiles: () => [],
+      adapter: {
+        getBasePath: () => vaultDir,
+        exists: async () => true, // pretend every ensureFolder segment already exists
+      },
+      createFolder: async () => {},
+      create: async (p, content) => {
+        created.push({ path: p, content });
+        return { path: p };
+      },
+    },
+  };
 }
 
 // --- The caller's tasksRoot argument is actually used as the claim root, not a hardcoded one -
@@ -154,6 +185,7 @@ async function makeVaultDir() {
 // --- getBasePath() resolving to nothing (mobile-shaped adapter) still returns an id, quietly -
 {
   clearNoticeLog();
+  setIsDesktop(false); // genuinely mobile-shaped for this test; restored below
   const id = await nextTaskId(
     {
       vault: {
@@ -172,6 +204,7 @@ async function makeVaultDir() {
   );
   assert.equal(id, "tsk-2026-09-17-001");
   assert.equal(getNoticeLog().length, 0, "no base path is expected (mobile), must stay quiet");
+  setIsDesktop(true); // restore default for the tests below
 }
 
 // --- A real fs failure on the atomic path raises a real Notice via main.ts's own wiring -----
@@ -203,6 +236,88 @@ async function makeVaultDir() {
   assert.equal(notices.length, 1, "a real fs failure with fs genuinely present must raise exactly one Notice");
   assert.match(notices[0], /could not claim a task id atomically/i, "the Notice must name what failed");
   assert.match(notices[0], /ENOTDIR|ENOENT|EEXIST|not a directory/i, "the Notice must surface the underlying fs error");
+}
+
+// --- Platform.isDesktop wiring: main.ts's own nextTaskId reads Platform.isDesktop (I-4) -----
+{
+  clearNoticeLog();
+  setIsDesktop(true);
+  const id = await nextTaskId(
+    {
+      vault: {
+        getMarkdownFiles: () => [],
+        adapter: {
+          getBasePath: () => undefined,
+          async list() {
+            return { files: [], folders: [] };
+          },
+          async mkdir() {},
+        },
+      },
+    },
+    "Operations/tasks",
+    "2026-09-17"
+  );
+  assert.equal(id, "tsk-2026-09-17-001");
+  const notices = getNoticeLog();
+  assert.equal(notices.length, 1, "main.ts must pass Platform.isDesktop=true through: a desktop probe failure must be loud");
+  assert.match(notices[0], /expected an atomic task-id claim on desktop/i);
+  setIsDesktop(true); // restore default for later tests in this file
+}
+
+{
+  clearNoticeLog();
+  setIsDesktop(false);
+  const id = await nextTaskId(
+    {
+      vault: {
+        getMarkdownFiles: () => [],
+        adapter: {
+          getBasePath: () => undefined,
+          async list() {
+            return { files: [], folders: [] };
+          },
+          async mkdir() {},
+        },
+      },
+    },
+    "Operations/tasks",
+    "2026-09-17"
+  );
+  assert.equal(id, "tsk-2026-09-17-001");
+  assert.equal(getNoticeLog().length, 0, "main.ts must pass Platform.isDesktop=false through: the same probe failure on mobile stays quiet");
+  setIsDesktop(true); // restore default
+}
+
+// --- createQuickTask: claim root and write root are the SAME setting (round 2 Important-5) --
+// Round 1 proved the module (resolveNextTaskId) never diverges when given the right root.
+// Round 2 Reviewer's point: nothing proved main.ts:1270-1272 (createQuickTask's own call to
+// nextTaskId, and its own `${tasksRoot}/open` write) actually pass the SAME root to both.
+// Reviewer's own reproduction: hardcoding nextTaskId's second argument to "Operations/tasks"
+// there while the write path kept using the real `tasksRoot` parameter left `npm test` green.
+{
+  clearNoticeLog();
+  const vault = await makeVaultDir();
+  const app = makeFakeAppForQuickTask(vault);
+  const today = new Date().toISOString().slice(0, 10); // createQuickTask uses the real clock
+  const result = await createQuickTask(app, "Custom/Root", {
+    title: "Wiring test task",
+    project: null,
+    phase: null,
+    keyElement: null,
+  });
+  assert.ok(result, "createQuickTask must succeed against a fake vault.create");
+  assert.equal(app._created.length, 1, "exactly one file must be created");
+  const writtenPath = app._created[0].path;
+  assert.match(writtenPath, /^Custom\/Root\/open\/tsk-\d{4}-\d{2}-\d{2}-\d{3}-wiring-test-task\.md$/, "sanity: written under the caller's own tasksRoot");
+  assert.ok(
+    fs.existsSync(path.join(vault, "Custom/Root/.id-claims", today, "001")),
+    "the claim must be filed under the SAME root the file was written under (Custom/Root), not a hardcoded one"
+  );
+  assert.ok(
+    !fs.existsSync(path.join(vault, "Operations/tasks")),
+    "must not also (or instead) claim under Operations/tasks when the real tasksRoot setting is different"
+  );
 }
 
 console.log("nextTaskIdWiring: all assertions passed");
