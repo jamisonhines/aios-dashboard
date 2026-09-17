@@ -129,7 +129,7 @@ function buildRenderContractBundle() {
       // code path at all. Marking them external means esbuild leaves the
       // reference alone rather than failing to resolve a package this
       // sandbox has no reason to install.
-      external: ["electron", "child_process", "@codemirror/*", "@lezer/*"],
+      external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"],
       alias: { obsidian: stubPath },
       logLevel: "warning",
     });

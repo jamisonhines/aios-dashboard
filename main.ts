@@ -49,6 +49,7 @@ import {
   computeWorkflowSpikes,
   computeSpendSparkline,
   usageFamilyBreakdown,
+  usageModelLabel,
   computeUsageRangeTiles,
   computeWorkflowsViewForRange,
   computeSkillsViewForRange,
@@ -73,7 +74,14 @@ import {
   filterCoordinationQuestions,
   coordinationQuestionFilterCounts,
   spliceAnswer,
+  catalogCandidates,
+  modelPickerOptions,
+  orderedFallbackModels,
+  validateAgentSelection,
+  safeFallbackCandidates,
+  agentModelPickerState,
 } from "./model.mjs";
+import { readProjectAgentSettings, writeProjectAgentOverride } from "./agent-models-write.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -129,6 +137,8 @@ interface AiosDashboardSettings {
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
+  agentModelsPath: string; // vault-relative path to the Pi model snapshot exporter output
+  enabledModelProviders: string[]; // owner-confirmed UI policy, non-secret plugin data
   dailyBudgetUsd: number; // spend guardrail; 0 = off
   // Manual project drag order (owner feedback 2026-08-30: "I would like to
   // be able to drag projects up and down"). One global array of slugs,
@@ -164,6 +174,8 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   usageStatsPath: "Operations/usage/usage-stats.json",
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
+  agentModelsPath: "Operations/agent-models.json",
+  enabledModelProviders: [],
   dailyBudgetUsd: 0,
   projectOrder: [],
 };
@@ -742,6 +754,10 @@ interface UsageSkillStat {
 
 interface UsageStats {
   generatedAt: string;
+  scanStartedAt?: string;
+  dayTimeZone?: string;
+  rejectedUsage?: { rejectedRecords: number; reasons: Record<string, number> };
+  unpricedOpenAiModels?: string[];
   windowDays: number;
   days: UsageDay[];
   projects: UsageProjectStat[];
@@ -758,12 +774,28 @@ interface UsageStats {
   // against ops-map.json's agent node ids. Same byDay shape as skills, for
   // the same future range-toggle reason.
   agents?: UsageSkillStat[];
+  // Additive exporter metadata; absent from historical usage-stats.json files.
+  costSemantics?: {
+    claude: string;
+    openai: string;
+    openaiCodex: string;
+    openaiRateCard: string;
+    openaiRateCardProvenance: string;
+    openaiCodexTier: string;
+    openaiCodexTierThresholdTokens: number;
+    unknownOpenAi: string;
+  };
   totals: { last7DaysCostUsd: number; last30DaysCostUsd: number; todayCostUsd: number };
 }
 
 interface UsageChartSegment {
+  model: string;
   family: string;
   costUsd: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
   heightFraction: number;
 }
 
@@ -794,12 +826,14 @@ interface UsageLegendItem {
 }
 
 interface UsageTableRow {
+  model: string;
   family: string;
   label: string;
   messages: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
   sharePercent: number;
 }
@@ -2587,17 +2621,28 @@ function renderAutomationSection(app: App, root: HTMLElement, settings: AiosDash
 // Reads and defensively parses usage-stats.json off the vault adapter. Returns
 // null on any failure (missing file, malformed JSON, unexpected shape) so the
 // caller can fall back to the "no usage data yet" hint instead of throwing.
+const usageLastGood = new Map<string, UsageStats>();
+let usageRefreshInFlight: Promise<void> | null = null;
 async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats | null> {
   try {
-    const exists = await app.vault.adapter.exists(statsPath);
-    if (!exists) return null;
-    const raw = await app.vault.adapter.read(statsPath);
-    const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.days) || !Array.isArray(parsed.projects)) return null;
+    if (!(await app.vault.adapter.exists(statsPath))) return usageLastGood.get(statsPath) || null;
+    const parsed = JSON.parse(await app.vault.adapter.read(statsPath));
+    if (!parsed || !Array.isArray(parsed.days) || !Array.isArray(parsed.projects)) throw new Error("invalid usage snapshot");
+    usageLastGood.set(statsPath, parsed as UsageStats);
     return parsed as UsageStats;
-  } catch {
-    return null;
-  }
+  } catch { return usageLastGood.get(statsPath) || null; }
+}
+function refreshUsageSnapshot(app: App): Promise<void> {
+  if (usageRefreshInFlight) return usageRefreshInFlight;
+  usageRefreshInFlight = new Promise<void>((resolve, reject) => {
+    try {
+      const basePath = (app.vault.adapter as any).basePath;
+      if (typeof basePath !== "string") throw new Error("vault path unavailable");
+      const child = require("child_process").spawn(process.execPath, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: "ignore" });
+      child.once("error", reject); child.once("exit", (code: number) => code === 0 ? resolve() : reject(new Error(`exporter exited ${code}`)));
+    } catch (error) { reject(error); }
+  }).finally(() => { usageRefreshInFlight = null; });
+  return usageRefreshInFlight;
 }
 
 // Two tiles, both scoped to the selected range (Phase 1 System-browser range
@@ -2611,7 +2656,7 @@ function renderUsageTiles(container: HTMLElement, tiles: UsageRangeTiles) {
     tile.createSpan({ cls: "aios-health-tile-label", text: label });
     tile.createSpan({ cls: "aios-health-tile-count", text: value });
   };
-  mk("Spend (" + tiles.rangeLabel + ")", formatUsd(tiles.costUsd));
+  mk("API-equivalent estimate (" + tiles.rangeLabel + ")", formatUsd(tiles.costUsd));
   mk("Output tokens (" + tiles.rangeLabel + ")", tiles.outputTokensCompact);
 }
 
@@ -2626,9 +2671,17 @@ function svgEl<K extends keyof SVGElementTagNameMap>(
   return el;
 }
 
-// "YYYY-MM-DD: $X.XX (fable $a, opus $b, ...)" tooltip text for a chart bar.
+// Token labels are intentionally explicit: bars remain cost geometry, while
+// their tooltips disclose the normalized transcript buckets behind each model.
+function formatUsageTokenBreakdown(bucket: Pick<UsageFamilyBucket, "inputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "outputTokens">): string {
+  return `Input ${formatCompactNumber(bucket.inputTokens)} · Cache read ${formatCompactNumber(bucket.cacheReadTokens)} · Cache write ${formatCompactNumber(bucket.cacheWriteTokens)} · Output ${formatCompactNumber(bucket.outputTokens)}`;
+}
+
+// "YYYY-MM-DD: $X.XX (Opus $a · Input ..., ...)" tooltip text for a chart bar.
 function usageDayTooltip(day: UsageChartDay): string {
-  const parts = day.segments.map((s) => `${s.family} $${s.costUsd.toFixed(2)}`).join(", ");
+  const parts = day.segments
+    .map((s) => `${usageModelLabel(s.model || s.family)} ${formatUsd(s.costUsd)} · ${formatUsageTokenBreakdown(s)}`)
+    .join("; ");
   return `${day.date}: ${formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
 }
 
@@ -2739,7 +2792,7 @@ function renderUsageDayChart(
   container: HTMLElement,
   dayBars: {
     date: string;
-    bars: { family: string; label: string; costUsd: number; fraction: number }[];
+    bars: { family: string; label: string; costUsd: number; inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; outputTokens: number; fraction: number }[];
     gridlines: { fraction: number; label: string }[];
   },
   pixelWidth: number
@@ -2755,7 +2808,7 @@ function renderUsageDayChart(
 
   const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "180" });
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `API-equivalent cost by model family on ${dayBars.date}`);
+  svg.setAttribute("aria-label", `API-equivalent estimated cost by model on ${dayBars.date}`);
   svg.classList.add("aios-usage-svg");
 
   for (const g of dayBars.gridlines) {
@@ -2786,7 +2839,7 @@ function renderUsageDayChart(
     const x = marginLeft + i * slot + (slot - barWidth) / 2;
     const g = svgEl("g", { class: "aios-usage-bar-group" });
     const title = svgEl("title", {});
-    title.textContent = `${bar.label}: ${formatUsd(bar.costUsd)}`;
+    title.textContent = `${bar.label}: ${formatUsd(bar.costUsd)} · ${formatUsageTokenBreakdown(bar)}`;
     g.appendChild(title);
     const barHeight = Math.max(1, bar.fraction * plotHeight);
     g.appendChild(
@@ -2916,7 +2969,7 @@ function renderUsageChartHost(
       chartHost,
       usageChartFromWindow(win.days),
       width,
-      `Daily API-equivalent cost, ${win.label}, stacked by model family`
+      `Daily API-equivalent estimated cost, ${win.label}, stacked by model family`
     );
   }
 }
@@ -2940,21 +2993,25 @@ function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
 // comment). Follows the selected range like every other section on this
 // tab: `table` is already range-scoped by the caller (usageFamilyBreakdown
 // over the selected window's days).
-function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[]) {
+function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], unpriced: string[] = []) {
   if (table.length === 0) {
     renderEmptyState(container, "No model usage in this period.");
     return;
   }
   renderUsageBreakdownTable(
     container,
-    ["Model", "Cost", "Share", "Output tokens", "Msgs"],
+    ["Model", "Input", "Cache read", "Cache write", "Output", "Cost", "Share", "Msgs"],
     table.map((row) => ({
       nameText: " " + row.label,
+      nameTitle: row.label,
       nameDotClass: "aios-usage-dot-" + row.family,
       cells: [
-        formatUsd(row.costUsd),
-        Math.round(row.sharePercent) + "%",
+        formatCompactNumber(row.inputTokens),
+        formatCompactNumber(row.cacheReadTokens),
+        formatCompactNumber(row.cacheWriteTokens),
         formatCompactNumber(row.outputTokens),
+        unpriced.includes(row.model) ? "Unpriced" : formatUsd(row.costUsd),
+        Math.round(row.sharePercent) + "%",
         String(row.messages),
       ],
     }))
@@ -3022,15 +3079,16 @@ function renderUsageWorkflowShareBar(container: HTMLElement, shareBar: UsageWork
 // (headers.length is padded up to `totalColumns` with blank trailing
 // columns), so every table's per-position CSS width in styles.css is
 // literally the same declaration applying to the same column count, and
-// they can never diverge. `totalColumns` is currently 6 (the skills table's
-// column count, the largest breakdown table today); a workflow row with
-// only 5 real columns gets one blank trailing cell.
-const USAGE_BREAKDOWN_TOTAL_COLUMNS = 6;
+// they can never diverge. `totalColumns` is currently 9: the Models table
+// uses eight real columns (four normalized token buckets plus spend context)
+// and one trailing alignment cell; shorter workflow/skill tables pad the
+// remaining positions rather than shifting their values under new headers.
+const USAGE_BREAKDOWN_TOTAL_COLUMNS = 9;
 
 function renderUsageBreakdownTable(
   container: HTMLElement,
   headers: string[],
-  rows: { nameText: string; nameDotClass?: string; nameSuffix?: string; cells: string[] }[]
+  rows: { nameText: string; nameTitle?: string; nameDotClass?: string; nameSuffix?: string; cells: string[] }[]
 ) {
   const paddedHeaders = headers.slice();
   while (paddedHeaders.length < USAGE_BREAKDOWN_TOTAL_COLUMNS) paddedHeaders.push("");
@@ -3048,7 +3106,7 @@ function renderUsageBreakdownTable(
     nameCell.createSpan({
       cls: "aios-usage-table-name-text",
       text: row.nameText,
-      attr: { title: row.nameText.trim() },
+      attr: { title: row.nameTitle || row.nameText.trim() },
     });
     if (row.nameSuffix) {
       nameCell.createSpan({ cls: "aios-usage-table-name-suffix", text: row.nameSuffix });
@@ -3287,13 +3345,20 @@ function renderUsageTab(
     // range the user is browsing) and the all-time project table (projects
     // have no per-day breakdown to scope by range -- see computeUsageView's
     // note).
-    const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date());
+    const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date(), stats.dayTimeZone);
     const todayCostUsd = todayWin.days[0]?.totalCostUsd || 0;
     const projects = computeUsageView(stats, new Date()).projects;
     const spikeAlerts = computeWorkflowSpikes(stats, new Date());
 
     const periodbar = periodbarHost.createDiv({ cls: "aios-usage-periodbar" });
     const body = wrap.createDiv({ cls: "aios-usage-body" });
+    const generated = Date.parse(stats.generatedAt || "");
+    const stale = !Number.isFinite(generated) || Date.now() - generated > 15 * 60 * 1000;
+    const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: Number.isFinite(generated) ? `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}` : "Snapshot generation time unavailable" });
+    const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
+    const doRefresh = () => { refresh.disabled = true; refreshStatus.setText("Refreshing usage snapshot..."); refreshUsageSnapshot(app).then(() => loadUsageStats(app, settings.usageStatsPath)).then((fresh) => { if (!fresh) throw new Error("no valid snapshot after refresh"); stats = fresh; refreshStatus.setText(`Generated ${new Date(stats.generatedAt).toLocaleString()}`); draw(); }).catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot.")).finally(() => { refresh.disabled = false; }); };
+    refresh.addEventListener("click", doRefresh);
+    if (stale) void doRefresh();
 
     const draw = () => {
       // Scroll-position fix (defect 3, 2026-08, still applies under the new
@@ -3315,7 +3380,7 @@ function renderUsageTab(
       periodbar.empty();
       body.empty();
 
-      const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date());
+      const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date(), stats.dayTimeZone);
       renderUsagePeriodBar(periodbar, win, viewState, draw);
       // M4 (Reviewer, 2026-08-04): every subhead/tile below uses the SAME
       // offset-aware label the period bar just showed, so a paged-back
@@ -3330,7 +3395,10 @@ function renderUsageTab(
       const breakdown = usageFamilyBreakdown(win.days);
       renderUsageLegend(body, breakdown.legend);
       body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
-      renderUsageModelsTable(body, breakdown.table);
+      renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || []);
+      const excluded = stats.rejectedUsage?.rejectedRecords || 0;
+      if (excluded) body.createDiv({ cls: "aios-usage-quality", text: `${excluded} usage record(s) excluded for schema or temporal validation.` });
+      if ((stats.unpricedOpenAiModels || []).length) body.createDiv({ cls: "aios-usage-quality", text: `Unpriced models: ${(stats.unpricedOpenAiModels || []).join(", ")}.` });
 
       const workflowsView = computeWorkflowsViewForRange(stats, win.days, viewState.usageRange);
       renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, scopedLabel);
@@ -3340,7 +3408,7 @@ function renderUsageTab(
       renderUsageProjectsTable(body, projects);
       body.createDiv({
         cls: "aios-foot",
-        text: "API-equivalent value at standard rates; subscription billing differs.",
+        text: "Claude and known OpenAI values are API-equivalent estimates from input, cache-read, cache-write, and output tokens; they are not subscription billing, allowance, quota, or entitlement. Known OpenAI Codex estimates deliberately use base rates because transcript fields cannot reliably identify requests above the 272K tier. Unknown OpenAI models remain labeled but unpriced until their rate card is reviewed. Cache-write zero is a normalized numeric value and does not prove the original API field was absent. Rate assurance is incomplete: the local historical v1 card is retained, while current official-source comparisons conflict for GPT-5.6 Sol and GPT-5.5 cache writes; no effective date is inferred.",
       });
 
       if (scrollEl) {
@@ -4028,6 +4096,37 @@ async function loadOpsMap(app: App, mapPath: string): Promise<OpsMapManifest | n
   }
 }
 
+interface AgentModelCatalogProvider { id: string; access: "catalog-only" | "configured" | "connected" | "unknown"; availability?: "active" | "inactive" | "unknown"; models: string[]; sources?: string[]; fallbackSafe?: boolean; }
+interface AgentModelSnapshotAgent {
+  name: string;
+  requested?: { model?: string | null; fallbackModels?: string[] };
+  effective: { model?: string | null; source: string; fallbackModels?: string[] };
+  runtimeOnly?: boolean;
+  supported?: boolean;
+  unsupportedReason?: string;
+  writePrecondition?: { digest: string };
+  overrides?: { source: string; model?: string | null; fallbackModels?: string[] }[];
+}
+interface AgentModelsSnapshot {
+  schemaVersion: number;
+  catalog: { source: string; freshness: string; providers: AgentModelCatalogProvider[]; error?: string };
+  agents: AgentModelSnapshotAgent[];
+  errors?: string[];
+}
+
+// This deliberately consumes only the manual export artifact. It does not
+// invoke Pi, BB, auth, provider, or catalog refresh routes from Obsidian.
+async function loadAgentModels(app: App, modelsPath: string): Promise<AgentModelsSnapshot | null> {
+  try {
+    if (!(await app.vault.adapter.exists(modelsPath))) return null;
+    const parsed = JSON.parse(await app.vault.adapter.read(modelsPath));
+    if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed?.catalog?.providers) || !Array.isArray(parsed?.agents)) return null;
+    return parsed as AgentModelsSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 const OPS_MAP_TYPE_LABEL: Record<string, string> = {
   agent: "Agent",
   workflow: "Workflow",
@@ -4542,53 +4641,123 @@ function flattenAgentWiredTo(wiredTo: SystemAgentWiredTo): SystemSkillUsedByRow[
   return [...wiredTo.workflows, ...wiredTo.sops, ...wiredTo.skills];
 }
 
-function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[]) {
-  const headers = ["Agent", "Cost", "Runs", "Description", "Wired to", "Avg/run"];
+function modelProvider(model: string): string { return model.includes("/") ? model.split("/", 1)[0] : "Unknown provider"; }
+function modelShortLabel(model: string): string {
+  const raw = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+  return raw.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
-  const wrap = container.createDiv({ cls: "aios-usage-table-wrap" });
-  const el = wrap.createEl("table", {
-    cls: "aios-usage-table aios-usage-breakdown-table aios-system-skills-table aios-system-agents-table",
-  });
-  const thead = el.createEl("thead");
-  const headRow = thead.createEl("tr");
-  for (const h of headers) headRow.createEl("th", { text: h });
-
-  const tbody = el.createEl("tbody");
-  for (const row of rows) {
-    const tr = tbody.createEl("tr");
-
-    const nameCell = tr.createEl("td", { cls: "aios-usage-table-name" });
-    if (row.path) {
-      const link = nameCell.createEl("a", {
-        text: row.label,
-        cls: "aios-system-skill-usedby-link aios-system-agent-name-link aios-usage-table-name-text",
-        href: "#",
-        attr: { title: row.label },
-      });
-      link.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        app.workspace.openLinkText(row.path as string, "", false);
-      });
-    } else {
-      nameCell.createSpan({
-        cls: "aios-system-agent-name aios-usage-table-name-text",
-        text: row.label,
-        attr: { title: row.label },
-      });
-    }
-    nameCell.createSpan({
-      cls: "aios-system-skill-origin-badge aios-system-agent-model-badge",
-      text: row.model || "no model set",
+function renderAgentModelControls(app: App, container: HTMLElement, agent: AgentModelSnapshotAgent | undefined, snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings) {
+  const controls = container.createDiv({ cls: "aios-agent-model-controls" });
+  if (!snapshot || !agent) {
+    controls.createSpan({ cls: "aios-agent-model-readonly", text: "Model assignment unavailable: no matching active Pi agent snapshot." });
+    return;
+  }
+  const assigned = agent.effective.model || "";
+  const pickerOptions = modelPickerOptions(snapshot.catalog, settings.enabledModelProviders);
+  const primary = controls.createEl("select", { cls: "aios-agent-model-primary", attr: { "aria-label": `Primary model for ${agent.name}` } });
+  primary.createEl("option", { text: assigned ? "Select model" : "Inherited parent model", value: "" });
+  for (const option of pickerOptions) {
+    const el = primary.createEl("option", { text: `${modelShortLabel(option.model)} · ${modelProvider(option.model)}`, value: option.model, attr: { title: `${option.model}. ${option.label}` } });
+    el.disabled = !option.selectable;
+  }
+  if (assigned && !pickerOptions.some((option) => option.model === assigned)) {
+    const preserved = primary.createEl("option", { text: `${modelShortLabel(assigned)} · current assignment unavailable`, value: assigned, attr: { title: assigned } });
+    preserved.disabled = true;
+  }
+  primary.value = assigned;
+  const primaryMeta = controls.createDiv({ cls: "aios-agent-model-primary-meta", text: assigned ? `${modelProvider(assigned)} · primary` : "Inherited parent model" });
+  const visibleState = controls.createDiv({ cls: "aios-agent-model-state", text: "Checking configuration..." });
+  const chain = controls.createDiv({ cls: "aios-agent-model-chain" });
+  chain.createSpan({ cls: "aios-agent-model-chain-label", text: "Fallback chain" });
+  const fallbackList = chain.createDiv({ cls: "aios-agent-model-fallbacks" });
+  const fallbackPicker = chain.createEl("select", { cls: "aios-agent-model-fallback-picker", attr: { "aria-label": `Add fallback for ${agent.name}` } });
+  const save = controls.createEl("button", { cls: "aios-agent-model-save", text: "Save" });
+  const details = controls.createEl("details", { cls: "aios-agent-model-details" });
+  details.createEl("summary", { text: "Details & provenance" });
+  const technical = details.createDiv({ cls: "aios-agent-model-technical" });
+  technical.createDiv({ cls: "aios-agent-model-provenance", text: `Effective: ${assigned || "parent session model"} (${agent.effective.source}). Requested: ${agent.requested?.model || "inherit parent model"}.` });
+  if (agent.runtimeOnly) technical.createDiv({ cls: "aios-agent-models-warning", text: "Provider-scoped runtime override may take precedence at launch. This row is not a complete runtime resolution." });
+  const state = visibleState;
+  const warning = technical.createDiv({ cls: "aios-agent-models-warning" });
+  const providerFor = (model: string) => snapshot.catalog.providers.find((provider) => model.startsWith(provider.id + "/"))?.id || null;
+  let fallbacks = orderedFallbackModels(primary.value, agent.effective.fallbackModels || []);
+  let initialPrimary = primary.value;
+  let initialFallbacks = [...fallbacks];
+  let diskCurrent = false;
+  let savePending = false;
+  const isDirty = () => primary.value !== initialPrimary || fallbacks.length !== initialFallbacks.length || fallbacks.some((model, index) => model !== initialFallbacks[index]);
+  const basePath = (app.vault.adapter as any).getBasePath?.();
+  const renderFallbacks = (focus?: string) => {
+    fallbackList.empty();
+    if (focus === "add") fallbackPicker.focus?.();
+    const primaryProvider = providerFor(primary.value);
+    warning.setText(fallbacks.some((model) => providerFor(model) && providerFor(model) !== primaryProvider) ? "Cross-provider fallback may use separate billing." : "");
+    fallbacks.forEach((model, index) => {
+      const row = fallbackList.createDiv({ cls: "aios-agent-model-fallback-row" });
+      if (index) row.createSpan({ cls: "aios-agent-model-fallback-arrow", text: "→", attr: { "aria-hidden": "true" } });
+      row.createSpan({ cls: "aios-agent-model-fallback-step", text: `${index + 1}. ${modelShortLabel(model)}`, attr: { title: model } });
+      const up = row.createEl("button", { cls: "aios-agent-model-step-action", text: "↑", attr: { "aria-label": `Move fallback ${index + 1} up`, title: "Move up" } });
+      const down = row.createEl("button", { cls: "aios-agent-model-step-action", text: "↓", attr: { "aria-label": `Move fallback ${index + 1} down`, title: "Move down" } });
+      const remove = row.createEl("button", { cls: "aios-agent-model-step-action is-remove", text: "×", attr: { "aria-label": `Remove fallback ${index + 1}`, title: "Remove fallback" } });
+      up.disabled = index === 0; down.disabled = index === fallbacks.length - 1;
+      if (focus === `up:${index}` && !up.disabled) up.focus?.(); if (focus === `down:${index}` && !down.disabled) down.focus?.(); if (focus === `remove:${index}`) remove.focus?.();
+      up.onclick = () => { [fallbacks[index - 1], fallbacks[index]] = [fallbacks[index], fallbacks[index - 1]]; renderFallbacks(`down:${index - 1}`); refreshSave(); };
+      down.onclick = () => { [fallbacks[index + 1], fallbacks[index]] = [fallbacks[index], fallbacks[index + 1]]; renderFallbacks(`up:${index + 1}`); refreshSave(); };
+      remove.onclick = () => { fallbacks.splice(index, 1); renderFallbacks(fallbacks.length ? `remove:${Math.min(index, fallbacks.length - 1)}` : "add"); refreshSave(); };
     });
+  };
+  const renderFallbackPicker = () => {
+    fallbackPicker.empty(); fallbackPicker.createEl("option", { text: "+ Add fallback", value: "" });
+    const candidates = safeFallbackCandidates(snapshot.catalog, primary.value, settings.enabledModelProviders);
+    for (const model of candidates) fallbackPicker.createEl("option", { text: `${modelShortLabel(model)} · ${modelProvider(model)}`, value: model, attr: { title: model } });
+    fallbackPicker.disabled = candidates.length === 0;
+  };
+  const refreshSave = () => {
+    primaryMeta.setText(primary.value ? `${modelProvider(primary.value)} · primary` : "Inherited parent model");
+    if (!Platform.isDesktop || !basePath) { save.disabled = true; state.setText("Saving is desktop-only."); return; }
+    if (agent.supported === false) { save.disabled = true; state.setText(agent.unsupportedReason || "This active Pi agent is read-only."); return; }
+    if (savePending) { save.disabled = true; state.setText("Saving..."); return; }
+    const picker = agentModelPickerState(snapshot.catalog, primary.value, fallbacks, diskCurrent, settings.enabledModelProviders);
+    if (picker.disabled) { save.disabled = true; state.setText(picker.reason || "Configuration changed on disk, refresh and retry."); return; }
+    if (!isDirty()) { save.disabled = true; state.setText("No changes"); return; }
+    save.disabled = false; state.setText(agent.runtimeOnly ? "Ready to save · runtime override may apply" : "Ready to save");
+  };
+  primary.onchange = () => { fallbacks = orderedFallbackModels(primary.value, fallbacks); renderFallbackPicker(); renderFallbacks(); refreshSave(); };
+  fallbackPicker.onchange = () => { if (fallbackPicker.value && !fallbacks.includes(fallbackPicker.value) && fallbackPicker.value !== primary.value) fallbacks.push(fallbackPicker.value); fallbackPicker.value = ""; renderFallbacks(); refreshSave(); };
+  if (!Platform.isDesktop || !basePath) { state.setText("Saving is desktop-only."); save.disabled = true; }
+  else if (agent.supported === false) { state.setText(agent.unsupportedReason || "This active Pi agent is read-only."); save.disabled = true; }
+  else if (agent.writePrecondition) {
+    readProjectAgentSettings(basePath).then((current: any) => { diskCurrent = current.digest === agent.writePrecondition!.digest; state.setText(diskCurrent ? "Configuration matches this snapshot." : "Configuration changed on disk, refresh and retry."); refreshSave(); }).catch((error: Error) => { state.setText(error.message); save.disabled = true; });
+  }
+  save.onclick = async () => {
+    const selection = validateAgentSelection(snapshot.catalog, primary.value, fallbacks, settings.enabledModelProviders);
+    if (savePending || !basePath || !diskCurrent || !selection.valid || !agent.writePrecondition) return;
+    savePending = true; refreshSave();
+    try { const result = await writeProjectAgentOverride(basePath, agent.name, primary.value, fallbacks, agent.writePrecondition.digest); new Notice(result.status === "no-op" ? "No configuration change to save." : "Model assignment saved. Pi reload/restart is required, then run the manual exporter and refresh."); diskCurrent = false; }
+    catch (error) { state.setText(error instanceof Error ? error.message : String(error)); new Notice("Model assignment was not saved."); }
+    finally { savePending = false; refreshSave(); }
+  };
+  renderFallbackPicker(); renderFallbacks(); refreshSave();
+}
 
-    tr.createEl("td", { text: row.costUsd == null ? "–" : formatUsd(row.costUsd) });
-    tr.createEl("td", { text: row.runs == null ? "–" : formatCompactNumber(row.runs) });
-    tr.createEl("td", { cls: "aios-system-skills-desc", text: row.description });
-
-    const wiredCell = tr.createEl("td", { cls: "aios-system-skills-usedby" });
-    renderSystemSkillUsedByCell(app, wiredCell, flattenAgentWiredTo(row.wiredTo));
-
-    tr.createEl("td", { text: row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd) });
+function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[], snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings) {
+  const snapshotsByName = new Map((snapshot?.agents || []).map((agent) => [agent.name, agent]));
+  const roster = container.createDiv({ cls: "aios-agent-roster" });
+  for (const row of rows) {
+    const card = roster.createDiv({ cls: "aios-agent-card" });
+    const identity = card.createDiv({ cls: "aios-agent-identity" });
+    if (row.path) { const link = identity.createEl("a", { text: row.label, cls: "aios-system-agent-name-link", href: "#", attr: { title: `Open ${row.label} contract` } }); link.addEventListener("click", (ev) => { ev.preventDefault(); app.workspace.openLinkText(row.path as string, "", false); }); }
+    else identity.createSpan({ cls: "aios-system-agent-name", text: row.label });
+    identity.createDiv({ cls: "aios-agent-role", text: row.description, attr: { title: row.description } });
+    const modelArea = card.createDiv({ cls: "aios-agent-model-area" });
+    renderAgentModelControls(app, modelArea, snapshotsByName.get(row.id), snapshot, settings);
+    const usage = card.createDiv({ cls: "aios-agent-usage", attr: { "aria-label": `${row.label} usage` } });
+    for (const [label, value] of [["Cost", row.costUsd == null ? "–" : formatUsd(row.costUsd)], ["Runs", row.runs == null ? "–" : formatCompactNumber(row.runs)], ["Avg/run", row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd)]]) { const stat = usage.createDiv({ cls: "aios-agent-usage-stat" }); stat.createSpan({ text: label }); stat.createEl("strong", { text: value }); }
+    const linked = flattenAgentWiredTo(row.wiredTo);
+    const details = card.createEl("details", { cls: "aios-agent-links" });
+    details.createEl("summary", { text: linked.length ? `${linked.length} linked workflow${linked.length === 1 ? "" : "s"}, SOP${linked.length === 1 ? "" : "s"} or skill${linked.length === 1 ? "" : "s"}` : "No linked workflows, SOPs or skills" });
+    const links = details.createDiv({ cls: "aios-agent-links-list" }); renderSystemSkillUsedByCell(app, links, linked);
   }
 }
 
@@ -4643,11 +4812,44 @@ function renderSystemAvailableHires(app: App, container: HTMLElement, manifest: 
   }
 }
 
+function renderAgentModelsInventory(container: HTMLElement, snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings, savePolicy: () => Promise<void>, redraw: () => void) {
+  const section = container.createDiv({ cls: "aios-system-section aios-agent-model-inventory" });
+  section.createDiv({ cls: "aios-section-eyebrow", text: "Configured model sources" });
+  section.createDiv({ cls: "aios-agent-models-note", text: "Local policy only · future launches only · access and quota unverified." });
+  const policyDetails = section.createEl("details", { cls: "aios-agent-model-policy" });
+  policyDetails.createEl("summary", { text: "Model behavior" });
+  policyDetails.createDiv({ cls: "aios-agent-models-note", text: "Active sessions do not change. Fallback is native Pi behavior for early provider/model failures. It does not replay completed mutations or switch paid providers automatically." });
+  if (!snapshot) { renderEmptyState(section, "No parseable agent-models.json snapshot. Run: node Operations/scripts/export-agent-models.mjs"); return; }
+  if (snapshot.catalog.error || snapshot.errors?.length) section.createDiv({ cls: "aios-agent-models-error", text: [snapshot.catalog.error, ...(snapshot.errors || [])].filter(Boolean).join(". ") });
+  if (!snapshot.catalog.providers.length) section.createDiv({ cls: "aios-agent-models-error", text: "No assignable Pi model source was discovered. Register a provider or local model in Pi configuration, run the exporter, then refresh." });
+  for (const provider of snapshot.catalog.providers) {
+    const enabled = settings.enabledModelProviders.includes(provider.id); const row = section.createDiv({ cls: "aios-agent-provider-inventory" });
+    const state = provider.availability === "inactive" ? "inactive" : enabled ? "active" : "disabled";
+    row.createSpan({ cls: `aios-agent-provider-state is-${state}`, attr: { "aria-label": `${provider.id} ${state}` } });
+    const info = row.createDiv({ cls: "aios-agent-provider-info" });
+    info.createSpan({ cls: "aios-agent-provider-name", text: provider.id });
+    const origin = provider.sources?.join(" + ") || provider.access;
+    const status = provider.availability === "inactive" ? `${origin} · inactive · ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}` : `${origin} · ${enabled ? "enabled by you" : "disabled by you"} · ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}`;
+    info.createSpan({ cls: "aios-agent-provider-status", text: status });
+    const models = row.createEl("details", { cls: "aios-agent-provider-models" });
+    models.createEl("summary", { text: `View ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}` });
+    const list = models.createDiv({ cls: "aios-agent-provider-model-list" });
+    for (const option of modelPickerOptions({ providers: [provider] }, settings.enabledModelProviders)) list.createSpan({ cls: `aios-agent-provider-model${option.selectable ? "" : " is-disabled"}`, text: modelShortLabel(option.model), attr: { title: `${option.model}. ${option.label}` } });
+    const toggle = row.createEl("button", { cls: "aios-add", text: enabled ? "Disable" : "Enable", attr: { "aria-pressed": String(enabled), "aria-label": `${enabled ? "Disable" : "Enable"} ${provider.id}` } });
+    toggle.addEventListener("click", () => { settings.enabledModelProviders = enabled ? settings.enabledModelProviders.filter((id) => id !== provider.id) : [...new Set([...settings.enabledModelProviders, provider.id])]; void savePolicy().then(redraw); });
+  }
+  if (snapshot.catalog.providers.length === 1) section.createDiv({ cls: "aios-agent-models-note", text: "No additional assignable Pi provider or local model source was discovered. Register it in Pi configuration, run the exporter, then refresh." });
+}
+
 function renderSystemAgentsSection(
   app: App,
   container: HTMLElement,
   manifest: OpsMapManifest,
-  stats: UsageStats | null
+  stats: UsageStats | null,
+  agentModels: AgentModelsSnapshot | null,
+  settings: AiosDashboardSettings,
+  savePolicy: () => Promise<void>,
+  redraw: () => void
 ) {
   const section = container.createDiv({ cls: "aios-system-section" });
   const headRow = section.createDiv({ cls: "aios-system-section-head" });
@@ -4672,7 +4874,7 @@ function renderSystemAgentsSection(
       cls: "aios-system-skills-count",
       text: `${view.totalCount} hired agent${view.totalCount === 1 ? "" : "s"}`,
     });
-    renderSystemAgentsTable(app, section, view.rows);
+    renderSystemAgentsTable(app, section, view.rows, agentModels, settings);
   }
 
   // "Generic subagents" (Dispatch escalation, 2026-08-05): non-roster
@@ -4793,18 +4995,24 @@ function renderSystemTab(
   app: App,
   container: HTMLElement,
   settings: AiosDashboardSettings,
-  viewState: ViewState
+  viewState: ViewState,
+  plugin: AiosDashboardPlugin
 ) {
   const wrap = container.createDiv({ cls: "aios-system-tab" });
   wrap.createDiv({ cls: "aios-empty", text: "Loading system map..." });
-  Promise.all([loadOpsMap(app, settings.opsMapPath), loadUsageStats(app, settings.usageStatsPath)]).then(
-    ([manifest, stats]) => {
+  Promise.all([
+    loadOpsMap(app, settings.opsMapPath),
+    loadUsageStats(app, settings.usageStatsPath),
+    loadAgentModels(app, settings.agentModelsPath),
+  ]).then(
+    ([manifest, stats, agentModels]) => {
       wrap.empty();
       if (!manifest) {
         renderEmptyState(
           wrap,
-          "No system data yet. The exporter runs at session start, or run: node Operations/scripts/export-ops-map.mjs"
+          "No system map yet. Run: node Operations/scripts/export-ops-map.mjs"
         );
+        renderAgentModelsInventory(wrap, agentModels, settings, () => plugin.saveSettings(), () => { container.empty(); renderSystemTab(app, container, settings, viewState, plugin); });
         return;
       }
 
@@ -4832,9 +5040,8 @@ function renderSystemTab(
         } else if (viewState.systemActiveSubTab === "workflows") {
           renderSystemWorkflowsSopsSection(app, sectionsHost, manifest);
         } else {
-          // Agents section (Phase 3, 2026-08-05): roster cards + usage +
-          // wired-to, plus the "Available hires" subsection.
-          renderSystemAgentsSection(app, sectionsHost, manifest, stats);
+          renderAgentModelsInventory(sectionsHost, agentModels, settings, () => plugin.saveSettings(), redraw);
+          renderSystemAgentsSection(app, sectionsHost, manifest, stats, agentModels, settings, () => plugin.saveSettings(), redraw);
         }
       }
 
@@ -5073,7 +5280,7 @@ function renderDashboard(
   } else if (viewState.activeTab === "usage") {
     renderUsageTab(app, body, usagePeriodbarHost as HTMLElement, settings, viewState);
   } else if (viewState.activeTab === "system") {
-    renderSystemTab(app, body, settings, viewState);
+    renderSystemTab(app, body, settings, viewState, plugin);
   } else if (viewState.activeTab === "opsmap") {
     renderOpsMapTab(app, body, settings);
   } else {
@@ -5403,6 +5610,19 @@ class AiosDashboardSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.opsMapPath)
           .onChange(async (v) => {
             this.plugin.settings.opsMapPath = v.trim() || DEFAULT_SETTINGS.opsMapPath;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Agent models snapshot path")
+      .setDesc("Vault-relative output from the manually run Pi model exporter. The dashboard never refreshes Pi/provider catalogs.")
+      .addText((t) =>
+        t
+          .setPlaceholder(DEFAULT_SETTINGS.agentModelsPath)
+          .setValue(this.plugin.settings.agentModelsPath)
+          .onChange(async (v) => {
+            this.plugin.settings.agentModelsPath = v.trim() || DEFAULT_SETTINGS.agentModelsPath;
             await save();
           })
       );

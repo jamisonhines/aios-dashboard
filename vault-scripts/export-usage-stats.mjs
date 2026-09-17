@@ -11,10 +11,10 @@
 // the script body only runs on direct execution (see the guard at the bottom).
 import { promises as fs } from "node:fs";
 import { createReadStream } from "node:fs";
-import readline from "node:readline";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 // Kept as a fixed constant, not a CLI parameter, on purpose (Phase 1
 // System-browser range toggle, 2026-08-04): the Usage tab's "All" range
@@ -26,6 +26,7 @@ import { pathToFileURL } from "node:url";
 // genuinely unbounded history view is wanted later, it should be a separate
 // opt-in export path, not the hook-triggered default.
 const WINDOW_DAYS = 35;
+export const USAGE_DAY_TIME_ZONE = "Asia/Tbilisi";
 
 // Per-Mtok rates: { in, out }. Cache read bills at 0.1x input rate, cache write at 1.25x input rate.
 export const RATES = {
@@ -60,6 +61,37 @@ export function resolveSonnetRate(dayKey) {
   return SONNET_STANDARD_RATE;
 }
 
+// Pi records model changes separately from usage messages. A thinking level is
+// execution configuration, not a model identity, so it never splits a model
+// bucket. Keep provider/model otherwise intact.
+export function stripThinkingSuffix(model) {
+  return typeof model === "string" ? model.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/i, "") : model;
+}
+
+export function isOpenAiModel(model) {
+  return typeof model === "string" && /^(?:openai|openai-codex)\//.test(model);
+}
+
+// Versioned API-equivalent rates in USD per million tokens. See the local,
+// versioned source record at docs/openai-codex-api-equivalent-v1.md: it names
+// the exact catalog paths, retrieval date, cache-write semantics, rate tiers,
+// and why this exporter deliberately uses the base tier for every entry.
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE = "docs/openai-codex-api-equivalent-v1.md";
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1 = {
+  "gpt-5.5": { input: 5, cacheRead: 0.5, cacheWrite: 0, output: 30 },
+  "gpt-5.6-luna": { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
+  "gpt-5.6-sol": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 30 },
+  "gpt-5.6-terra": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },
+  "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
+};
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_VERSION = "openai-codex-api-equivalent-v1";
+
+export function openAiApiEquivalentRate(model) {
+  if (!isOpenAiModel(model)) return undefined;
+  const modelId = model.replace(/^(?:openai|openai-codex)\//, "");
+  return OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1[modelId];
+}
+
 export function modelFamily(model) {
   const m = model.toLowerCase();
   if (m.includes("fable")) return "fable";
@@ -75,19 +107,31 @@ export function modelFamily(model) {
  * standard/current rate). All real callers in this file pass the usage
  * entry's own timestamp.
  */
-export function estimateCost(family, usage, timestamp) {
-  const rate =
-    family === "sonnet" ? resolveSonnetRate(timestamp ? localDay(timestamp) : undefined) : RATES[family] || RATES.other;
+export function estimateCost(family, usage, timestamp, model) {
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
   const cacheWrite = usage.cache_creation_input_tokens || 0;
-  const cost =
+  const openAiRate = openAiApiEquivalentRate(model);
+  // Unknown OpenAI models retain their own bucket but get no made-up Claude
+  // `other` charge until a reviewed rate-card entry is added.
+  if (isOpenAiModel(model)) {
+    if (!openAiRate) return 0;
+    return (
+      input * openAiRate.input +
+      output * openAiRate.output +
+      cacheRead * openAiRate.cacheRead +
+      cacheWrite * openAiRate.cacheWrite
+    ) / 1e6;
+  }
+  const rate =
+    family === "sonnet" ? resolveSonnetRate(timestamp ? localDay(timestamp) : undefined) : RATES[family] || RATES.other;
+  return (
     input * rate.in +
     output * rate.out +
     cacheRead * 0.1 * rate.in +
-    cacheWrite * 1.25 * rate.in;
-  return cost / 1e6;
+    cacheWrite * 1.25 * rate.in
+  ) / 1e6;
 }
 
 export function prettifyProject(folderName) {
@@ -96,12 +140,12 @@ export function prettifyProject(folderName) {
   return folderName.startsWith(prefix) ? folderName.slice(prefix.length) : folderName;
 }
 
-export function localDay(timestamp) {
+export function localDay(timestamp, timeZone = USAGE_DAY_TIME_ZONE) {
   const d = new Date(timestamp);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  if (Number.isNaN(d.getTime())) return undefined;
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 // Recursively collects every .jsonl path under `dir` (depth-unbounded).
@@ -168,10 +212,138 @@ export async function findTranscripts(root, cutoffMs) {
       const relParts = path.relative(projectPath, filePath).split(path.sep);
       const isTopLevel = relParts.length === 1;
       const sessionId = isTopLevel ? path.basename(relParts[0], ".jsonl") : relParts[0];
-      files.push({ filePath, project: entry.name, sessionId, isTopLevel });
+      files.push({
+        filePath,
+        project: entry.name,
+        sessionId,
+        sourceSessionId: rootNamespacedSourceId("claude", root, filePath),
+        isTopLevel,
+      });
     }
   }
   return files;
+}
+
+// Pi's canonical parent session files are directly under a project folder.
+// Its canonical child sessions sit beneath the matching parent-session
+// directory as <parent>/<run-uuid>/run-N/session.jsonl. `subagent-artifacts`
+// are handoff copies, not new model usage. BB's canonical records are its
+// thread JSONLs and run-N/session.jsonl files. Scoping both roots this way
+// avoids charging copied artifacts a second time.
+export function rootNamespacedSourceId(namespace, root, filePath) {
+  const relativePath = path.relative(root, filePath);
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) return null;
+  return `${namespace}:${relativePath.split(path.sep).join("/")}`;
+}
+
+function isContainedWithin(canonicalPath, canonicalRoot) {
+  const relativePath = path.relative(canonicalRoot, canonicalPath);
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
+}
+
+async function isCanonicalDirectoryWithin(directoryPath, expectedRoot) {
+  try {
+    // lstat prevents readdir() from following a same-named parent-session
+    // symlink. The resolved directory must also remain under its real Pi
+    // project root, not merely match the expected lexical prefix.
+    const stat = await fs.lstat(directoryPath);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    return isContainedWithin(await fs.realpath(directoryPath), await fs.realpath(expectedRoot));
+  } catch {
+    return false;
+  }
+}
+
+async function isCanonicalRegularFileWithin(filePath, expectedRoot) {
+  try {
+    // lstat, rather than stat, rejects a symlink before its target can be
+    // accepted. realpath then proves the resolved regular file remains in the
+    // real Pi project root rather than only inside a lexical run directory.
+    const stat = await fs.lstat(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    return isContainedWithin(await fs.realpath(filePath), await fs.realpath(expectedRoot));
+  } catch {
+    return false;
+  }
+}
+
+export async function findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs) {
+  const files = [];
+  let projects = [];
+  try { projects = await fs.readdir(piRoot, { withFileTypes: true }); } catch {}
+  for (const project of projects) {
+    if (!project.isDirectory()) continue;
+    const projectPath = path.join(piRoot, project.name);
+    let entries = [];
+    try { entries = await fs.readdir(projectPath, { withFileTypes: true }); } catch {}
+    const parentSessionIds = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const filePath = path.join(projectPath, entry.name);
+      const sessionId = path.basename(entry.name, ".jsonl");
+      parentSessionIds.push(sessionId);
+      try {
+        if ((await fs.stat(filePath)).mtimeMs >= cutoffMs) {
+          files.push({
+            filePath,
+            project: prettifyProject(project.name),
+            sessionId,
+            sourceSessionId: rootNamespacedSourceId("pi", piRoot, filePath),
+            isTopLevel: true,
+          });
+        }
+      } catch {}
+    }
+
+    // Only inspect directories named for an actual direct parent session.
+    // This intentionally cannot wander into Pi's subagent-artifacts tree.
+    for (const parentSessionId of parentSessionIds) {
+      const parentSessionPath = path.join(projectPath, parentSessionId);
+      if (!(await isCanonicalDirectoryWithin(parentSessionPath, projectPath))) continue;
+      let runDirs = [];
+      try { runDirs = await fs.readdir(parentSessionPath, { withFileTypes: true }); } catch {}
+      for (const runDir of runDirs) {
+        if (!runDir.isDirectory() || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(runDir.name)) continue;
+        let runs = [];
+        try { runs = await fs.readdir(path.join(projectPath, parentSessionId, runDir.name), { withFileTypes: true }); } catch {}
+        for (const run of runs) {
+          if (!run.isDirectory() || !/^run-\d+$/.test(run.name)) continue;
+          const filePath = path.join(projectPath, parentSessionId, runDir.name, run.name, "session.jsonl");
+          try {
+            // A lexical match is not enough: reject a child transcript that
+            // is symlinked or whose canonical target escapes its exact run.
+            if (await isCanonicalRegularFileWithin(filePath, projectPath) && (await fs.stat(filePath)).mtimeMs >= cutoffMs) {
+              // Each transcript path, not the workflow/run session ID, is the
+              // fallback-dedupe source. sessionId remains attribution only.
+              files.push({
+                filePath,
+                project: prettifyProject(project.name),
+                sessionId: runDir.name,
+                sourceSessionId: rootNamespacedSourceId("pi", piRoot, filePath),
+                isTopLevel: true,
+              });
+            }
+          } catch {}
+        }
+      }
+    }
+  }
+  const bbPaths = await walkJsonlFiles(bbRoot);
+  for (const filePath of bbPaths) {
+    const rel = path.relative(bbRoot, filePath).split(path.sep);
+    const isThreadTranscript = rel.length === 1 && /^thr_.+\.jsonl$/.test(rel[0]);
+    const isRunTranscript = path.basename(filePath) === "session.jsonl" && rel.some((part) => /^run-\d+$/.test(part));
+    if (rel.includes("subagent-artifacts") || rel.includes("forks") || (!isThreadTranscript && !isRunTranscript)) continue;
+    try {
+      if ((await fs.stat(filePath)).mtimeMs >= cutoffMs) {
+        const sessionId = isThreadTranscript ? path.basename(filePath, ".jsonl") : rel.find((part) => /^run-\d+$/.test(part)) || path.basename(path.dirname(filePath));
+        files.push({ filePath, project: "pi-bridge", sessionId, sourceSessionId: rootNamespacedSourceId("bb", bbRoot, filePath), isTopLevel: true });
+      }
+    } catch {}
+  }
+  // The roots can overlap in local setups. Canonical BB paths must remain a
+  // single transcript even when reached through more than one root.
+  return [...new Map(files.map((file) => [path.resolve(file.filePath), file])).values()];
 }
 
 // Content may be a plain string or an array of content blocks; join the
@@ -300,8 +472,8 @@ export function createSkillSegmenter() {
     },
     // Call for every assistant message that carries usage, sidechain included.
     usage(family, entry) {
-      if (!active) return;
-      const cost = estimateCost(family, entry, entry.timestamp);
+      if (!active) return undefined;
+      const cost = estimateCost(family, entry, entry.timestamp, entry.model);
       active.costUsd += cost;
       active.outputTokens += entry.output_tokens || 0;
       active.messages += 1;
@@ -310,7 +482,7 @@ export function createSkillSegmenter() {
       // parseTranscript's main loop). Guarded defensively anyway so a caller
       // missing one (e.g. a test double) degrades to "no day attribution"
       // instead of polluting byDay with an Invalid Date key.
-      if (!entry.timestamp) return;
+      if (!entry.timestamp) return active;
       const dayKey = localDay(entry.timestamp);
       if (!active.byDay.has(dayKey)) {
         active.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0 });
@@ -319,11 +491,133 @@ export function createSkillSegmenter() {
       d.costUsd += cost;
       d.outputTokens += entry.output_tokens || 0;
       d.messages += 1;
+      return active;
     },
     // Transcripts often end mid-run (session still open); keep that run.
     finish() {
       closeActive();
       return runs;
+    },
+  };
+}
+
+// A usage record's provider/response ID is its strongest identity. Older or
+// partial transcript formats may lack that ID, so their fallback is purposely
+// conservative: root-namespaced transcript source + message identity/time/model/token
+// buckets + normalized assistant prose. The source keeps two otherwise-identical
+// responses from separate transcripts distinct; workflow sessionId is attribution only.
+export function usageRecordKey(entry) {
+  if (entry.responseId) return `response:${entry.provider || ""}\u0000${entry.responseId}`;
+  return [
+    "fingerprint",
+    entry.sourceSessionId || "",
+    entry.messageId || "",
+    entry.timestamp || "",
+    entry.model || "",
+    entry.input_tokens,
+    entry.output_tokens,
+    entry.cache_creation_input_tokens,
+    entry.cache_read_input_tokens,
+    entry.assistantContent || "",
+  ].join("\u0000");
+}
+
+// Claude emits streamed updates without response IDs. Within one canonical
+// physical transcript, message.id identifies that response. Keep the update
+// with the greatest timestamp; equal timestamps resolve to the later JSONL
+// line. Missing IDs intentionally retain the older conservative fingerprint.
+// This runs after the per-entry window filter: an unfinished stream is billed
+// at its final observed in-window fragment, and invalid timestamps are already
+// excluded before this policy is reached.
+export function retainFinalClaudeFragments(entries) {
+  const finalByResponse = new Map();
+  entries.forEach((entry, fileOrder) => {
+    const isClaude = !entry.responseId && entry.claudeMessageId && /claude/i.test(entry.model || "");
+    if (!isClaude) return;
+    const key = `${entry.sourceSessionId || ""}\u0000${entry.claudeMessageId}`;
+    const previous = finalByResponse.get(key);
+    const timestampMs = new Date(entry.timestamp).getTime();
+    if (!previous || timestampMs >= previous.timestampMs) {
+      // `attribution` is intentionally present even when undefined. A
+      // response that began outside a skill must stay unassigned rather than
+      // inherit the skill active when its final streamed fragment arrives.
+      finalByResponse.set(key, {
+        entry,
+        timestampMs,
+        fileOrder,
+        attribution: previous ? previous.attribution : entry.skillRun,
+        // Replay the retained response where it began, even when its final
+        // buckets were observed after later command boundaries.
+        firstReplayOrder: previous ? previous.firstReplayOrder : entry.replayOrder,
+      });
+    }
+  });
+  if (finalByResponse.size === 0) return entries;
+  const retained = new Set();
+  for (const { entry, attribution, firstReplayOrder } of finalByResponse.values()) {
+    // The response began under this run. A final streaming flush may arrive
+    // after a later command boundary, but it must not move the charge.
+    entry.skillRun = attribution;
+    entry.replayOrder = firstReplayOrder;
+    retained.add(entry);
+  }
+  return entries.filter((entry) => !(!entry.responseId && entry.claudeMessageId && /claude/i.test(entry.model || "")) || retained.has(entry));
+}
+
+function rebuildSkillRuns(skillRuns, entries) {
+  for (const run of skillRuns) {
+    run.costUsd = 0;
+    run.outputTokens = 0;
+    run.messages = 0;
+    run.byDay = new Map();
+  }
+  for (const entry of entries) {
+    const run = entry.skillRun;
+    if (!run) continue;
+    const cost = estimateCost(modelFamily(entry.model), entry, entry.timestamp, entry.model);
+    run.costUsd += cost;
+    run.outputTokens += entry.output_tokens || 0;
+    run.messages += 1;
+    const dayKey = localDay(entry.timestamp);
+    if (!run.byDay.has(dayKey)) run.byDay.set(dayKey, { costUsd: 0, outputTokens: 0, messages: 0 });
+    const day = run.byDay.get(dayKey);
+    day.costUsd += cost;
+    day.outputTokens += entry.output_tokens || 0;
+    day.messages += 1;
+  }
+  return skillRuns.filter((run) => run.messages > 0);
+}
+
+function redactedSourceRef(sourcePath) {
+  return `source-sha256:${createHash("sha256").update(sourcePath).digest("hex").slice(0, 16)}`;
+}
+
+export function createUsageRecordDedupe() {
+  const seen = new Map();
+  const collisions = [];
+  return {
+    collisions,
+    accept(entry) {
+      const key = usageRecordKey(entry);
+      const kept = seen.get(key);
+      if (!kept) {
+        seen.set(key, entry);
+        return true;
+      }
+      const collision = {
+        kind: entry.responseId ? "responseId" : "fingerprint",
+        identity: entry.responseId || entry.messageId || "fingerprint",
+        // Diagnostics are persisted to usage-stats.json. Never put a local
+        // absolute path there: use the root-relative source ID when supplied,
+        // otherwise a stable non-reversible hash.
+        keptSource: kept.sourceRef || redactedSourceRef(kept.sourcePath || "unknown"),
+        skippedSource: entry.sourceRef || redactedSourceRef(entry.sourcePath || "unknown"),
+      };
+      collisions.push(collision);
+      console.warn(
+        `usage-stats: skipped duplicate ${collision.kind} usage record from ${collision.skippedSource}; already counted from ${collision.keptSource}`
+      );
+      return false;
     },
   };
 }
@@ -339,7 +633,46 @@ export function createSkillSegmenter() {
 // choke point: entries[] and skillRuns (fed by the segmenter) both flow from
 // this loop, so days/projects/workflows/skills all become consistently
 // windowed from one change.
-export async function parseTranscript(filePath, cutoffMs) {
+export function createRejectedUsageDiagnostics() {
+  const reasons = new Map();
+  const rejectedRecords = new Set();
+  return {
+    record(reason, recordId) { reasons.set(reason, (reasons.get(reason) || 0) + 1); if (recordId) rejectedRecords.add(recordId); },
+    serialize() { return { rejectedRecords: rejectedRecords.size, reasons: Object.fromEntries([...reasons.entries()].sort()) }; },
+  };
+}
+// JSONL is delimited by LF only. Do not use readline: it splits valid U+2028/U+2029
+// inside JSON strings. This incremental decoder retains chunked UTF-8 and partial tails.
+async function* jsonlLines(filePath) {
+  const stream = createReadStream(filePath);
+  let pending = Buffer.alloc(0);
+  for await (const chunk of stream) {
+    pending = Buffer.concat([pending, Buffer.from(chunk)]);
+    let newline;
+    while ((newline = pending.indexOf(0x0a)) !== -1) {
+      let line = pending.subarray(0, newline);
+      pending = pending.subarray(newline + 1);
+      if (line.length && line[line.length - 1] === 0x0d) line = line.subarray(0, -1);
+      yield line.toString("utf8");
+    }
+  }
+  if (pending.length) { if (pending[pending.length - 1] === 0x0d) pending = pending.subarray(0, -1); yield pending.toString("utf8"); }
+}
+function usageNumber(raw, aliases, required, rejected) {
+  const found = aliases.find((key) => Object.prototype.hasOwnProperty.call(raw, key));
+  if (!found) { if (required) rejected.record(`missing-${aliases[0]}`); return required ? undefined : { value: 0, present: false }; }
+  const value = raw[found];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) { rejected.record(`invalid-${aliases[0]}`); return undefined; }
+  return { value, present: true };
+}
+export function validateUsage(raw, rejected) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) { rejected.record("unsupported-usage"); return undefined; }
+  const input = usageNumber(raw, ["input_tokens", "input"], true, rejected), output = usageNumber(raw, ["output_tokens", "output"], true, rejected);
+  const cacheWrite = usageNumber(raw, ["cache_creation_input_tokens", "cacheWrite"], false, rejected), cacheRead = usageNumber(raw, ["cache_read_input_tokens", "cacheRead"], false, rejected);
+  if (!input || !output || !cacheWrite || !cacheRead) return undefined;
+  return { input_tokens: input.value, output_tokens: output.value, cache_creation_input_tokens: cacheWrite.value, cache_read_input_tokens: cacheRead.value, usagePresence: { cacheWrite: cacheWrite.present, cacheRead: cacheRead.present } };
+}
+export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infinity, sourceSessionId = path.resolve(filePath), sourceRef, usageDedupe, rejectedUsage = createRejectedUsageDiagnostics() } = {}) {
   const entries = [];
   let firstUserContent;
   // System-browser Agents section (Phase 3, 2026-08-05): a dispatched
@@ -350,12 +683,15 @@ export async function parseTranscript(filePath, cutoffMs) {
   // file that happens to lead with a line lacking the field still resolves
   // it from a later one.
   let attributionAgent;
-  const segmenter = createSkillSegmenter();
-  const rl = readline.createInterface({
-    input: createReadStream(filePath, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const line of rl) {
+  let currentProvider;
+  // Preserve transcript event order but do not mutate skill state until the
+  // retained ledger is known. A rejected duplicate must be invisible to both
+  // totals and command-body injection state.
+  const events = [];
+  let replayOrder = 0;
+  let sourceLine = 0;
+  for await (const line of jsonlLines(filePath)) {
+    sourceLine += 1;
     if (!line.trim()) continue;
     let obj;
     try {
@@ -366,6 +702,9 @@ export async function parseTranscript(filePath, cutoffMs) {
     if (attributionAgent === undefined && typeof obj?.attributionAgent === "string" && obj.attributionAgent) {
       attributionAgent = obj.attributionAgent;
     }
+    if (obj?.type === "model_change" && typeof obj.provider === "string" && typeof obj.modelId === "string") {
+      currentProvider = obj.provider;
+    }
     if (obj?.type === "user") {
       const content = obj.message?.content;
       if (firstUserContent === undefined) {
@@ -373,32 +712,69 @@ export async function parseTranscript(filePath, cutoffMs) {
       }
       // Skill-run boundary: human turns only.
       if (obj.isSidechain !== true && !isToolResultContent(content)) {
-        segmenter.boundary(extractTextContent(content).slice(0, 500));
+        events.push({ type: "boundary", replayOrder: replayOrder++, text: extractTextContent(content).slice(0, 500) });
       }
     }
-    const usage = obj?.message?.usage;
-    if (!usage) continue;
-    const model = obj.message?.model;
-    if (!model || model === "<synthetic>") continue;
+    const rawModel = obj?.message?.model;
+    // Ordinary user/system/model-change envelopes are not usage candidates.
+    if (!obj?.message || !rawModel || rawModel === "<synthetic>") continue;
+    const candidateId = `${sourceSessionId}:${sourceLine}`;
+    const usage = obj.message.usage;
+    if (usage === undefined) continue;
+    const normalizedUsage = validateUsage(usage, { record: (reason) => rejectedUsage.record(reason, candidateId) });
+    if (!normalizedUsage) continue;
+    // Pi's selection records a provider separately. The usage message still
+    // owns its model identity: qualify a bare message model with its own
+    // provider first, then the most recent selection provider, never the
+    // selection's modelId.
+    const messageProvider = obj.message?.provider || currentProvider;
+    const model = stripThinkingSuffix(!rawModel.includes("/") && messageProvider ? `${messageProvider}/${rawModel}` : rawModel);
     const timestamp = obj.timestamp;
-    if (!timestamp) continue;
+    if (!timestamp) { rejectedUsage.record("missing-timestamp", candidateId); continue; }
     const entryMs = new Date(timestamp).getTime();
-    if (Number.isNaN(entryMs) || entryMs < cutoffMs) continue;
-    const entry = {
-      timestamp,
-      model,
-      input_tokens: usage.input_tokens || 0,
-      output_tokens: usage.output_tokens || 0,
-      cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
-      cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+    if (Number.isNaN(entryMs)) { rejectedUsage.record("invalid-timestamp", candidateId); continue; }
+    if (entryMs < cutoffMs || entryMs > upperBoundMs) { rejectedUsage.record("outside-temporal-window", candidateId); continue; }
+    const entry = { timestamp, model, ...normalizedUsage,
+      provider: typeof messageProvider === "string" ? messageProvider : "",
+      responseId: typeof obj.message?.responseId === "string" ? obj.message.responseId : typeof obj.responseId === "string" ? obj.responseId : "",
+      sourceSessionId,
+      // Keep the legacy envelope-first identity for non-Claude fallback
+      // dedupe, but Claude stream grouping must use message.id specifically.
+      messageId: typeof obj.id === "string" ? obj.id : typeof obj.message?.id === "string" ? obj.message.id : "",
+      claudeMessageId: typeof obj.message?.id === "string" ? obj.message.id : "",
+      assistantContent: (obj.type === "assistant" || obj.message?.role === "assistant")
+        ? extractTextContent(obj.message?.content).replace(/\s+/g, " ").trim()
+        : "",
+      sourcePath: filePath,
+      sourceRef,
+      replayOrder: replayOrder++,
     };
     entries.push(entry);
-    if (obj.type === "assistant") segmenter.usage(modelFamily(model), entry);
+    if (obj.type === "assistant") events.push({ type: "usage", replayOrder: entry.replayOrder, entry });
   }
+  const rawEntries = entries;
+  const finalEntries = retainFinalClaudeFragments(rawEntries);
+  // Semantic dedupe is the retained ledger boundary for every downstream
+  // aggregate, including skills. Rebuild only after it rejects duplicates.
+  const retainedEntries = usageDedupe ? finalEntries.filter((entry) => usageDedupe.accept(entry)) : finalEntries;
+  // Replay only retained usage. Claude final fragments replay at their first
+  // response event, retaining original attribution while charging final
+  // buckets. This also keeps a new skill's initial command body available
+  // after a duplicate or prior-response flush is rejected from the ledger.
+  const retainedByReplayOrder = new Map(retainedEntries.map((entry) => [entry.replayOrder, entry]));
+  const segmenter = createSkillSegmenter();
+  for (const event of events) {
+    if (event.type === "boundary") segmenter.boundary(event.text);
+    else if (retainedByReplayOrder.has(event.replayOrder)) {
+      const entry = retainedByReplayOrder.get(event.replayOrder);
+      entry.skillRun = segmenter.usage(modelFamily(entry.model), entry);
+    }
+  }
+  const skillRuns = rebuildSkillRuns(segmenter.finish(), retainedEntries);
   if (firstUserContent === undefined) firstUserContent = "";
   const firstCommandMatch = FIRST_COMMAND_RE.exec(firstUserContent);
   const firstCommand = firstCommandMatch ? firstCommandMatch[1] : undefined;
-  return { entries, firstUserContent, firstCommand, skillRuns: segmenter.finish(), attributionAgent };
+  return { entries: retainedEntries, rawEntries, firstUserContent, firstCommand, skillRuns, attributionAgent, rejectedUsage };
 }
 
 // Falls back to this bucket when a subagent transcript carries in-window
@@ -462,7 +838,7 @@ export function applyAgentTranscript(agents, agentType, entries) {
 
   for (const e of entries) {
     const family = modelFamily(e.model);
-    const cost = estimateCost(family, e, e.timestamp);
+    const cost = estimateCost(family, e, e.timestamp, e.model);
     const dayKey = localDay(e.timestamp);
     a.costUsd += cost;
     a.outputTokens += e.output_tokens || 0;
@@ -710,13 +1086,14 @@ export function applyTranscriptToAggregates({
 
   for (const e of entries) {
     const family = modelFamily(e.model);
-    const cost = estimateCost(family, e, e.timestamp);
+    const modelKey = isOpenAiModel(e.model) ? e.model : family;
+    const cost = estimateCost(family, e, e.timestamp, e.model);
     const dayKey = localDay(e.timestamp);
 
     if (!days.has(dayKey)) days.set(dayKey, {});
     const dayModels = days.get(dayKey);
-    if (!dayModels[family]) {
-      dayModels[family] = {
+    if (!dayModels[modelKey]) {
+      dayModels[modelKey] = {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -725,7 +1102,7 @@ export function applyTranscriptToAggregates({
         costUsd: 0,
       };
     }
-    const bucket = dayModels[family];
+    const bucket = dayModels[modelKey];
     bucket.inputTokens += e.input_tokens;
     bucket.outputTokens += e.output_tokens;
     bucket.cacheReadTokens += e.cache_read_input_tokens;
@@ -745,16 +1122,58 @@ export function applyTranscriptToAggregates({
   }
 }
 
-async function main() {
-  const vaultRoot = process.argv[2] || process.cwd();
+function createResponseDiagnostics() {
+  const byProviderModel = new Map();
+  const record = (entry, retained) => {
+    const provider = /claude/i.test(entry.model || "") ? "claude" : isOpenAiModel(entry.model) ? "openai" : "other";
+    const key = `${provider}\u0000${entry.model}`;
+    if (!byProviderModel.has(key)) byProviderModel.set(key, { provider, model: entry.model, rawUsageRecords: 0, retainedResponses: 0, rawTokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, retainedTokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, rawCostUsd: 0, retainedCostUsd: 0 });
+    const row = byProviderModel.get(key);
+    const tokens = { input: entry.input_tokens, cacheRead: entry.cache_read_input_tokens, cacheWrite: entry.cache_creation_input_tokens, output: entry.output_tokens };
+    const cost = estimateCost(modelFamily(entry.model), entry, entry.timestamp, entry.model);
+    row.rawUsageRecords += retained === undefined ? 1 : 0;
+    if (retained) row.retainedResponses += 1;
+    for (const [bucket, value] of Object.entries(tokens)) {
+      if (retained === undefined) row.rawTokens[bucket] += value;
+      if (retained) row.retainedTokens[bucket] += value;
+    }
+    if (retained === undefined) row.rawCostUsd += cost;
+    if (retained) row.retainedCostUsd += cost;
+  };
+  return {
+    recordRaw: (entries) => entries.forEach((entry) => record(entry)),
+    recordRetained: (entries) => entries.forEach((entry) => record(entry, true)),
+    serialize() {
+      const rows = [...byProviderModel.values()].sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+      return { rawUsageRecords: rows.reduce((sum, row) => sum + row.rawUsageRecords, 0), retainedResponses: rows.reduce((sum, row) => sum + row.retainedResponses, 0), byProviderModel: rows };
+    },
+  };
+}
+
+export async function main({
+  vaultRoot = process.argv[2] || process.cwd(),
+  projectsRoot = path.join(os.homedir(), ".claude", "projects"),
+  piRoot = path.join(os.homedir(), ".pi", "agent", "sessions"),
+  bbRoot = path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
+  now = new Date(),
+  lockWaitMs = 1000,
+} = {}) {
   const outDir = path.join(vaultRoot, "Operations", "usage");
   const outFile = path.join(outDir, "usage-stats.json");
-  const projectsRoot = path.join(os.homedir(), ".claude", "projects");
-
-  const now = new Date();
+  const scanStartedAt = now.toISOString();
   const cutoffMs = now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
-
-  const transcripts = await findTranscripts(projectsRoot, cutoffMs);
+  const upperBoundMs = now.getTime();
+  const lockFile = `${outFile}.lock`;
+  await fs.mkdir(outDir, { recursive: true });
+  let lock;
+  const deadline = Date.now() + lockWaitMs;
+  while (!lock) { try { lock = await fs.open(lockFile, "wx"); } catch (error) { if (error?.code !== "EEXIST" || Date.now() >= deadline) { const busy = new Error("usage export busy; existing writer retained"); busy.code = "USAGE_EXPORT_BUSY"; throw busy; } await new Promise((resolve) => setTimeout(resolve, 25)); } }
+  try {
+  const transcripts = [
+    ...(await findTranscripts(projectsRoot, cutoffMs)),
+    ...(await findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs)),
+  ];
+  const canonicalTranscripts = [...new Map(transcripts.map((t) => [path.resolve(t.filePath), t])).values()];
   const bridgeSessionIds = await loadBridgeSessionIds();
   const workflowRules = buildWorkflowRules(bridgeSessionIds);
 
@@ -770,6 +1189,12 @@ async function main() {
   // Agents section, Phase 3, 2026-08-05). Populated only from nested subagent
   // transcripts (a top-level session is never itself "an agent run").
   const agents = new Map();
+  // One exporter run can discover the same response through separate
+  // canonical paths. Apply the semantic record guard while parsing so every
+  // aggregate (including skill runs) sees only the kept record.
+  const usageDedupe = createUsageRecordDedupe();
+  const responseDiagnostics = createResponseDiagnostics();
+  const rejectedUsage = createRejectedUsageDiagnostics();
 
   // Top-level session files must be classified BEFORE any nested subagent
   // file, because a subagent's cost rolls up to its PARENT session's
@@ -779,16 +1204,22 @@ async function main() {
   // of `agent-<hash>` "session ids". Directory-walk order is not guaranteed
   // to visit a session's own file before its subagents/ subtree, so split
   // and process top-level first regardless of discovery order.
-  const topLevel = transcripts.filter((t) => t.isTopLevel);
-  const nested = transcripts.filter((t) => !t.isTopLevel);
+  const topLevel = canonicalTranscripts.filter((t) => t.isTopLevel);
+  const nested = canonicalTranscripts.filter((t) => !t.isTopLevel);
 
   // sessionId -> the workflow rule that session's own top-level transcript
   // resolved to, so every subagent dispatched under it can inherit the same
   // classification.
   const sessionRules = new Map();
 
-  for (const { filePath, project, sessionId } of topLevel) {
-    const { entries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs);
+  for (const { filePath, project, sessionId, sourceSessionId } of topLevel) {
+    const { entries, rawEntries, firstUserContent, firstCommand, skillRuns } = await parseTranscript(filePath, cutoffMs, {
+      sourceSessionId: sourceSessionId || sessionId,
+      sourceRef: sourceSessionId,
+      usageDedupe, upperBoundMs, rejectedUsage,
+    });
+    responseDiagnostics.recordRaw(rawEntries);
+    responseDiagnostics.recordRetained(entries);
     const projectName = prettifyProject(project);
     const rule = classifyWorkflow(workflowRules, {
       project: projectName,
@@ -800,11 +1231,14 @@ async function main() {
     applyTranscriptToAggregates({ entries, skillRuns, projectName, rule, days, projects, workflows, skills });
   }
 
-  for (const { filePath, project, sessionId } of nested) {
-    const { entries, firstUserContent, firstCommand, skillRuns, attributionAgent } = await parseTranscript(
+  for (const { filePath, project, sessionId, sourceSessionId } of nested) {
+    const { entries, rawEntries, firstUserContent, firstCommand, skillRuns, attributionAgent } = await parseTranscript(
       filePath,
-      cutoffMs
+      cutoffMs,
+      { sourceSessionId: sourceSessionId || sessionId, sourceRef: sourceSessionId, usageDedupe, upperBoundMs, rejectedUsage }
     );
+    responseDiagnostics.recordRaw(rawEntries);
+    responseDiagnostics.recordRetained(entries);
     const projectName = prettifyProject(project);
     // Prefer the parent session's own classification. Fall back to
     // classifying off this file's content only if the parent session's
@@ -893,19 +1327,44 @@ async function main() {
     if (dayMs >= thirtyDaysAgoMs) last30DaysCostUsd += d.totalCostUsd;
   }
 
+  const unpricedOpenAiModels = [...new Set(
+    dayList.flatMap((day) => Object.keys(day.models).filter((model) => isOpenAiModel(model) && !openAiApiEquivalentRate(model)))
+  )].sort();
+
   const output = {
     generatedAt: now.toISOString(),
+    scanStartedAt,
+    dayTimeZone: USAGE_DAY_TIME_ZONE,
     windowDays: WINDOW_DAYS,
     days: dayList,
     projects: projectList,
     workflows: workflowList,
     skills: skillList,
     agents: agentList,
+    // Every graph value is a token-bucket API-equivalent estimate, never a
+    // subscription charge, allowance, quota, or entitlement measurement.
+    costSemantics: {
+      claude: "api-equivalent estimate",
+      openai: "api-equivalent estimate",
+      openaiCodex: "api-equivalent estimate",
+      openaiRateCard: OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_VERSION,
+      openaiRateCardProvenance: OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE,
+      // The local card has higher rates above 272K, but transcript entries do
+      // not carry a reliable discriminator for that catalog threshold.
+      openaiCodexTier: "base rates only; transcript fields lack a reliable per-entry 272K threshold discriminator",
+      openaiCodexTierThresholdTokens: 272000,
+      unknownOpenAi: "unpriced; rate card required",
+    },
+    unpricedOpenAiModels,
+    dedupe: { skippedUsageRecords: usageDedupe.collisions.length, collisions: usageDedupe.collisions },
+    // Additive audit counters. Existing messages remain retained-response counts.
+    responseDiagnostics: responseDiagnostics.serialize(),
+    rejectedUsage: rejectedUsage.serialize(),
     totals: { last7DaysCostUsd, last30DaysCostUsd, todayCostUsd },
   };
 
-  await fs.mkdir(outDir, { recursive: true });
-  await fs.writeFile(outFile, JSON.stringify(output, null, 2) + "\n", "utf8");
+  const tempFile = path.join(outDir, `.usage-stats.${process.pid}.${Date.now()}.tmp`);
+  try { const handle = await fs.open(tempFile, "wx"); try { await handle.writeFile(JSON.stringify(output, null, 2) + "\n", "utf8"); await handle.sync(); } finally { await handle.close(); } await fs.rename(tempFile, outFile); } catch (error) { await fs.rm(tempFile, { force: true }).catch(() => {}); throw error; }
 
   const totalMessages = dayList.reduce(
     (sum, d) => sum + Object.values(d.models).reduce((s, m) => s + m.messages, 0),
@@ -924,9 +1383,10 @@ async function main() {
     ? `, top agent ${topAgent.key} $${topAgent.costUsd.toFixed(2)} x${topAgent.runs} run(s)`
     : "";
   console.log(
-    `usage-stats: ${transcripts.length} transcript(s), ${totalMessages} message(s), ` +
+    `usage-stats: ${canonicalTranscripts.length} transcript(s), ${totalMessages} message(s), ` +
       `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText}${topAgentText} -> ${outFile}`
   );
+  } finally { await lock?.close(); await fs.rm(lockFile, { force: true }).catch(() => {}); }
 }
 
 // Run only on direct execution (node export-usage-stats.mjs ...), never on import.

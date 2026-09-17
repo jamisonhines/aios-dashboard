@@ -545,13 +545,52 @@ export const USAGE_FAMILY_LABELS = {
   other: "Other",
 };
 
+
+// Claude remains grouped by family. OpenAI models retain their full keys in
+// exported data but use concise visible labels and stable palette slots.
+// Unknown model IDs deliberately remain Other grey rather than receiving an
+// accidental semantic color.
+export const USAGE_OPENAI_MODEL_COLORS = {
+  "openai-codex/gpt-5.5": "openai-codex-gpt-5-5",
+  "openai-codex/gpt-5.6-luna": "openai-codex-gpt-5-6-luna",
+  "openai-codex/gpt-5.6-sol": "openai-codex-gpt-5-6-sol",
+  "openai-codex/gpt-5.6-terra": "openai-codex-gpt-5-6-terra",
+  "openai-codex/gpt-6-astra": "openai-codex-gpt-6-astra",
+};
+
+export function usageModelKeys(models) {
+  const keys = Object.keys(models);
+  return [
+    ...USAGE_FAMILY_ORDER.filter((key) => keys.includes(key)),
+    ...Object.keys(USAGE_OPENAI_MODEL_COLORS).filter((key) => keys.includes(key)),
+    ...keys.filter((key) => !USAGE_FAMILY_ORDER.includes(key) && !Object.prototype.hasOwnProperty.call(USAGE_OPENAI_MODEL_COLORS, key)).sort(),
+  ];
+}
+
+export function usageModelLabel(key) {
+  if (/^openai(?:-codex)?\//.test(key)) return key.replace(/^openai(?:-codex)?\//, "");
+  return USAGE_FAMILY_LABELS[key] || key;
+}
+
+export function usageModelColorFamily(key) {
+  return USAGE_FAMILY_LABELS[key] ? key : USAGE_OPENAI_MODEL_COLORS[key] || "other";
+}
+
 export function usagePad2(n) {
   return n < 10 ? "0" + n : "" + n;
 }
 
-/** Local (not UTC) calendar-day key, matching the exporter's per-day bucketing. */
-export function usageLocalDayKey(d) {
-  return d.getFullYear() + "-" + usagePad2(d.getMonth() + 1) + "-" + usagePad2(d.getDate());
+/** Calendar-day key in the exporter's serialized IANA timezone. Legacy calls omit it and retain host-local behavior. */
+export function usageLocalDayKey(d, timeZone) {
+  if (!timeZone) return d.getFullYear() + "-" + usagePad2(d.getMonth() + 1) + "-" + usagePad2(d.getDate());
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+function usageShiftDayKey(key, days) {
+  const [year, month, day] = key.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return shifted.getUTCFullYear() + "-" + usagePad2(shifted.getUTCMonth() + 1) + "-" + usagePad2(shifted.getUTCDate());
 }
 
 export function usageEmptyBucket() {
@@ -598,27 +637,27 @@ export function usageFamilyBreakdown(windowDays) {
     }
   }
 
-  const legend = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => ({
-    family: f,
-    label: USAGE_FAMILY_LABELS[f],
-    costUsd: famTotals.get(f).costUsd,
+  const modelKeys = usageModelKeys(Object.fromEntries(famTotals));
+  const legend = modelKeys.map((key) => ({
+    family: usageModelColorFamily(key),
+    label: usageModelLabel(key),
+    costUsd: famTotals.get(key).costUsd,
   }));
 
-  const totalCostUsd = USAGE_FAMILY_ORDER.reduce(
-    (sum, f) => sum + (famTotals.has(f) ? famTotals.get(f).costUsd : 0),
-    0
-  );
+  const totalCostUsd = modelKeys.reduce((sum, key) => sum + famTotals.get(key).costUsd, 0);
   const safeTotalCostUsd = totalCostUsd > 0 ? totalCostUsd : 1;
 
-  const table = USAGE_FAMILY_ORDER.filter((f) => famTotals.has(f)).map((f) => {
-    const b = famTotals.get(f);
+  const table = modelKeys.map((key) => {
+    const b = famTotals.get(key);
     return {
-      family: f,
-      label: USAGE_FAMILY_LABELS[f],
+      model: key,
+      family: usageModelColorFamily(key),
+      label: usageModelLabel(key),
       messages: b.messages,
       inputTokens: b.inputTokens,
       outputTokens: b.outputTokens,
       cacheReadTokens: b.cacheReadTokens,
+      cacheWriteTokens: b.cacheWriteTokens,
       costUsd: b.costUsd,
       // Models breakdown section (header/tabs restructure, 2026-08): each
       // row's share of this window's total cost, so the "Models" table can
@@ -670,10 +709,19 @@ export function computeUsageView(stats, nowDate) {
 
   const chartDays = windowDays.map((d) => {
     const segments = [];
-    for (const fam of USAGE_FAMILY_ORDER) {
-      const bucket = d.models[fam];
+    for (const key of usageModelKeys(d.models)) {
+      const bucket = d.models[key];
       if (!bucket || bucket.costUsd <= 0) continue;
-      segments.push({ family: fam, costUsd: bucket.costUsd, heightFraction: bucket.costUsd / safeMax });
+      segments.push({
+        model: key,
+        family: usageModelColorFamily(key),
+        costUsd: bucket.costUsd,
+        inputTokens: bucket.inputTokens,
+        cacheReadTokens: bucket.cacheReadTokens,
+        cacheWriteTokens: bucket.cacheWriteTokens,
+        outputTokens: bucket.outputTokens,
+        heightFraction: bucket.costUsd / safeMax,
+      });
     }
     return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
   });
@@ -768,24 +816,20 @@ export function formatUsageWindowLabel(startKey, endKey) {
  * for a window that's already everything, so canPrev/canNext are always
  * false and `offset` is ignored.
  */
-export function computeUsageWindow(days, range, offset, todayDate) {
+export function computeUsageWindow(days, range, offset, todayDate, timeZone) {
   const dayByDate = new Map(days.map((d) => [d.date, d]));
 
   if (range === "all") {
     let earliest = null;
     for (const d of days) if (earliest === null || d.date < earliest) earliest = d.date;
-    const todayKey = usageLocalDayKey(todayDate);
+    const todayKey = usageLocalDayKey(todayDate, timeZone);
     const startKey = earliest !== null && earliest < todayKey ? earliest : todayKey;
 
     const windowDays = [];
-    let cursor = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate());
-    // Walk backward from today to startKey, then reverse -- simplest way to
-    // get a correct calendar walk (handles month/year boundaries) without
-    // computing a day-count first.
-    while (usageLocalDayKey(cursor) >= startKey) {
-      const key = usageLocalDayKey(cursor);
-      windowDays.unshift(dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
-      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1);
+    let cursorKey = todayKey;
+    while (cursorKey >= startKey) {
+      windowDays.unshift(dayByDate.get(cursorKey) || { date: cursorKey, models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
+      cursorKey = usageShiftDayKey(cursorKey, -1);
     }
 
     return {
@@ -804,8 +848,7 @@ export function computeUsageWindow(days, range, offset, todayDate) {
   const windowDays = [];
   for (let i = len - 1; i >= 0; i--) {
     const shift = safeOffset * len + i;
-    const d = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() - shift);
-    const key = usageLocalDayKey(d);
+    const key = usageShiftDayKey(usageLocalDayKey(todayDate, timeZone), -shift);
     windowDays.push(
       dayByDate.get(key) || { date: key, models: {}, totalCostUsd: 0, totalOutputTokens: 0 }
     );
@@ -872,10 +915,19 @@ export function usageChartFromWindow(windowDays) {
 
   const chartDays = windowDays.map((d) => {
     const segments = [];
-    for (const fam of USAGE_FAMILY_ORDER) {
-      const bucket = d.models[fam];
+    for (const key of usageModelKeys(d.models)) {
+      const bucket = d.models[key];
       if (!bucket || bucket.costUsd <= 0) continue;
-      segments.push({ family: fam, costUsd: bucket.costUsd, heightFraction: bucket.costUsd / safeMax });
+      segments.push({
+        model: key,
+        family: usageModelColorFamily(key),
+        costUsd: bucket.costUsd,
+        inputTokens: bucket.inputTokens,
+        cacheReadTokens: bucket.cacheReadTokens,
+        cacheWriteTokens: bucket.cacheWriteTokens,
+        outputTokens: bucket.outputTokens,
+        heightFraction: bucket.costUsd / safeMax,
+      });
     }
     return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
   });
@@ -903,10 +955,19 @@ export function usageChartFromWindow(windowDays) {
  */
 export function usageDayFamilyBars(day) {
   const raw = [];
-  for (const fam of USAGE_FAMILY_ORDER) {
-    const bucket = day.models[fam];
+  for (const key of usageModelKeys(day.models)) {
+    const bucket = day.models[key];
     if (!bucket || bucket.costUsd <= 0) continue;
-    raw.push({ family: fam, label: USAGE_FAMILY_LABELS[fam], costUsd: bucket.costUsd });
+    raw.push({
+      model: key,
+      family: usageModelColorFamily(key),
+      label: usageModelLabel(key),
+      costUsd: bucket.costUsd,
+      inputTokens: bucket.inputTokens,
+      cacheReadTokens: bucket.cacheReadTokens,
+      cacheWriteTokens: bucket.cacheWriteTokens,
+      outputTokens: bucket.outputTokens,
+    });
   }
   const maxCost = Math.max(0, ...raw.map((b) => b.costUsd));
   const safeMax = maxCost > 0 ? maxCost : 1;
@@ -2515,4 +2576,67 @@ export function coordinationQuestionFilterCounts(questions) {
   const list = Array.isArray(questions) ? questions : [];
   const answered = list.filter(isCoordinationQuestionAnswered).length;
   return { unanswered: list.length - answered, answered, all: list.length };
+}
+
+// Pi agent-model snapshot helpers. These stay pure so the dashboard never
+// infers provider access from credentials or invokes a runtime/catalog route.
+export function modelPickerOptions(catalog, enabledProviders = []) {
+  const providers = Array.isArray(catalog?.providers) ? catalog.providers : [];
+  return providers.flatMap((provider) => (Array.isArray(provider?.models) ? provider.models : []).filter((model) => typeof model === "string" && /^\S+\/\S+$/.test(model)).map((model) => {
+    const inactive = provider.availability === "inactive";
+    const enabled = enabledProviders.includes(provider.id);
+    const selectable = enabled && !inactive;
+    return { model, selectable, label: inactive ? "Subscription inactive" : enabled ? "Enabled by you; subscription and current quota not verified" : "Disabled by you; subscription and current quota not verified" };
+  })).sort((a, b) => a.model.localeCompare(b.model));
+}
+
+export function catalogCandidates(catalog, enabledProviders = []) {
+  return modelPickerOptions(catalog, enabledProviders).filter((option) => option.selectable).map((option) => option.model);
+}
+
+export function orderedFallbackModels(primary, fallbacks) {
+  const seen = new Set([primary]);
+  return (Array.isArray(fallbacks) ? fallbacks : []).filter((model) => {
+    if (typeof model !== "string" || seen.has(model)) return false;
+    seen.add(model);
+    return true;
+  });
+}
+
+export function safeFallbackCandidates(catalog, primary, enabledProviders = []) {
+  const providers = Array.isArray(catalog?.providers) ? catalog.providers : [];
+  return providers
+    .filter((provider) => enabledProviders.includes(provider?.id) && provider?.availability !== "inactive")
+    .flatMap((provider) => Array.isArray(provider.models) ? provider.models : [])
+    .filter((model) => typeof model === "string" && /^\S+\/\S+$/.test(model) && model !== primary)
+    .sort();
+}
+
+export function validateAgentSelection(catalog, primary, fallbacks, enabledProviders = []) {
+  const candidates = new Set(catalogCandidates(catalog, enabledProviders));
+  if (!candidates.has(primary)) return { valid: false, reason: "Select an exact cached catalog model." };
+  const safeFallbacks = new Set(safeFallbackCandidates(catalog, primary, enabledProviders));
+  if (!orderedFallbackModels(primary, fallbacks).every((model) => safeFallbacks.has(model))) {
+    return { valid: false, reason: "Fallback must be an exact cached model from a provider enabled by you." };
+  }
+  return { valid: true, reason: null };
+}
+
+export function agentModelPickerState(catalog, primary, fallbacks, snapshotCurrent, enabledProviders = []) {
+  const selection = validateAgentSelection(catalog, primary, fallbacks, enabledProviders);
+  return { disabled: !snapshotCurrent || !selection.valid, reason: snapshotCurrent ? selection.reason : "Configuration changed on disk, refresh and retry." };
+}
+
+export function resolveAgentConfiguration(agent, frontmatter = {}, userSettings = {}, projectSettings = {}) {
+  const user = userSettings?.subagents || userSettings || {}; const project = projectSettings?.subagents || projectSettings || {};
+  const userOverride = user.agentOverrides?.[agent]; const projectOverride = project.agentOverrides?.[agent];
+  const has = (object, key) => object && Object.prototype.hasOwnProperty.call(object, key);
+  const rawModel = has(projectOverride, "model") ? projectOverride.model : has(userOverride, "model") ? userOverride.model : frontmatter?.model;
+  const defaultModel = project.defaultModel ?? user.defaultModel ?? null;
+  const model = rawModel === "inherit" || rawModel === false ? null : rawModel || defaultModel;
+  const rawFallbacks = has(projectOverride, "fallbackModels") ? projectOverride.fallbackModels : has(userOverride, "fallbackModels") ? userOverride.fallbackModels : frontmatter?.fallbackModels;
+  const fallbackModels = rawFallbacks === false ? [] : orderedFallbackModels(model, rawFallbacks || []);
+  const source = rawModel === false ? "runtime parent model (model cleared by override)" : has(projectOverride, "model") ? "project agent override" : has(userOverride, "model") ? "user agent override" : frontmatter?.model === "inherit" ? "parent session model (inherit)" : frontmatter?.model ? "project agent frontmatter" : defaultModel ? "subagents.defaultModel" : "parent session model";
+  const providerSpecific = Object.values(project.agentOverridesByProvider || {}).some((byAgent) => byAgent?.[agent]);
+  return { effective: { model, source, fallbackModels }, runtimeOnly: Boolean(providerSpecific), overrides: [ ...(userOverride ? [{ source: "user agent override", model: userOverride.model, fallbackModels: userOverride.fallbackModels }] : []), ...(projectOverride ? [{ source: "project agent override", model: projectOverride.model, fallbackModels: projectOverride.fallbackModels }] : []) ] };
 }

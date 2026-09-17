@@ -2,6 +2,7 @@
 // usageWorkflowColorIndex, and formatCompactNumber (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Run: node usageModel.test.mjs
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import {
   formatCompactNumber,
   computeUsageView,
@@ -746,3 +747,69 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
 }
 
 console.log("usageModel: all assertions passed");
+
+// --- OpenAI model identities remain visible rather than collapsing into Other. ---
+{
+  const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
+  const { legend, table } = usageFamilyBreakdown([
+    { models: {
+      opus: bucket(2),
+      "openai-codex/gpt-5.5": bucket(1),
+      "openai-codex/gpt-5.6-luna": bucket(2),
+      "openai-codex/gpt-5.6-sol": bucket(3),
+      "openai-codex/gpt-5.6-terra": bucket(4),
+      "openai-codex/gpt-6-astra": bucket(5),
+      "openai-codex/unobserved": bucket(6),
+    } },
+  ]);
+  assert.deepEqual(legend.map((row) => row.label), ["Opus", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "unobserved"], "OpenAI labels strip only their provider prefix");
+  assert.deepEqual(table.slice(1).map((row) => row.family), ["openai-codex-gpt-5-5", "openai-codex-gpt-5-6-luna", "openai-codex-gpt-5-6-sol", "openai-codex-gpt-5-6-terra", "openai-codex-gpt-6-astra", "other"], "observed OpenAI models have stable distinct colors while unknown IDs stay Other grey");
+}
+
+
+// Provider-qualified keys remain internal while both chart view models carry
+// concise labels for their user-facing text/title paths.
+{
+  const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
+  const day = { date: "2026-09-15", models: { "openai-codex/gpt-6-astra": bucket(4) }, totalCostUsd: 4, totalOutputTokens: 1 };
+  const dayBar = usageDayFamilyBars(day).bars[0];
+  assert.equal(dayBar.model, "openai-codex/gpt-6-astra", "day chart retains its provider-qualified internal model key");
+  assert.equal(dayBar.label, "gpt-6-astra", "day chart exposes only the concise model name");
+  assert.doesNotMatch(dayBar.label, /openai(?:-codex)?\//, "day chart visible label has no provider prefix");
+  assert.equal(usageChartFromWindow([day, { ...day, date: "2026-09-14", models: { "openai-codex/gpt-5.6-sol": bucket(2) }, totalCostUsd: 2 }]).days[1].segments[0].model, "openai-codex/gpt-5.6-sol", "multi-day chart retains provider-qualified internal identity");
+}
+
+
+// Renderer contract: all three visible paths (Models table, multi-day chart,
+// and day chart) consume concise labels and never provider-qualified keys.
+{
+  const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+  const table = source.slice(source.indexOf("function renderUsageModelsTable"), source.indexOf("function renderUsageProjectsTable"));
+  assert.match(table, /nameText:\s*" " \+ row\.label/, "Models table text uses the concise label");
+  assert.match(table, /nameTitle:\s*row\.label/, "Models table tooltip uses the concise label");
+  assert.doesNotMatch(table, /nameTitle:\s*row\.model/, "Models table tooltip never uses the provider-qualified key");
+  const tooltip = source.slice(source.indexOf("function usageDayTooltip"), source.indexOf("function renderUsageChart"));
+  assert.match(tooltip, /usageModelLabel\(s\.model \|\| s\.family\)/, "multi-day chart tooltip converts its internal key to a concise label");
+  const dayChart = source.slice(source.indexOf("function renderUsageDayChart"), source.indexOf("// Range buttons"));
+  assert.match(dayChart, /title\.textContent = `\$\{bar\.label\}: \$\{formatUsd\(bar\.costUsd\)\} · \$\{formatUsageTokenBreakdown\(bar\)\}`/, "day-chart tooltip uses its concise label plus its labeled token breakdown");
+  assert.match(dayChart, /label\.textContent = bar\.label/, "day-chart text uses its concise label");
+  assert.doesNotMatch(`${table}\n${tooltip}\n${dayChart}`, /openai(?:-codex)?\//, "visible Usage render paths contain no provider prefix literal");
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const colorKeys = ["openai-codex-gpt-5-5", "openai-codex-gpt-5-6-luna", "openai-codex-gpt-5-6-sol", "openai-codex-gpt-5-6-terra", "openai-codex-gpt-6-astra"];
+  const errorRed = styles.match(/--aios-p1:\s*([^;]+);/)?.[1].trim();
+  assert.ok(errorRed, "dashboard error-red token is defined");
+  const colorValues = colorKeys.map((colorKey) => {
+    const value = styles.match(new RegExp(`--aios-usage-${colorKey}:\\s*([^;]+);`))?.[1].trim();
+    assert.ok(value, `${colorKey} has a resolved CSS token value`);
+    assert.notEqual(value, errorRed, `${colorKey} never uses the error-red token value`);
+    return value;
+  });
+  assert.equal(new Set(colorValues).size, colorKeys.length, "each observed OpenAI model resolves to a distinct color token value");
+  for (const colorKey of colorKeys) {
+    assert.match(styles, new RegExp(`\\.aios-usage-bar-${colorKey}\\s*\\{`), `${colorKey} has a chart-bar selector`);
+    assert.match(styles, new RegExp(`\\.aios-usage-dot-${colorKey}\\s*\\{`), `${colorKey} has a legend/table-dot selector`);
+  }
+  const tableRenderer = source.slice(source.indexOf("function renderUsageBreakdownTable"), source.indexOf("// Honest per-row suffix"));
+  assert.match(tableRenderer, /title:\s*row\.nameTitle \|\| row\.nameText\.trim\(\)/, "table tooltip consumer prefers the full provider-qualified title and only then falls back to concise text");
+  assert.match(source, /Claude and known OpenAI values are API-equivalent estimates from input, cache-read, cache-write, and output tokens; they are not subscription billing, allowance, quota, or entitlement\. Known OpenAI Codex estimates deliberately use base rates because transcript fields cannot reliably identify requests above the 272K tier\. Unknown OpenAI models remain labeled but unpriced until their rate card is reviewed\./, "footer identifies graph estimates, the 272K base-tier limitation, and unknown-OpenAI handling");
+}

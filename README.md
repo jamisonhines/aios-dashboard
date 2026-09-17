@@ -18,7 +18,7 @@ A row of small pills at the top of the dashboard surfaces vault upkeep issues: i
 
 ## Usage tab
 
-A "Usage" tab shows token-usage/cost stats: today/7d/30d cost tiles, a 30-day stacked bar chart by model family (fable/opus/sonnet/haiku/other), a legend, a model breakdown table, and a top-projects table. It reads `Operations/usage/usage-stats.json`, which is produced by `Operations/scripts/export-usage-stats.mjs` (a dependency of this tab, not part of the plugin itself). The exporter scans Claude Code session transcripts and estimates API-equivalent cost; it is wired into the vault's SessionStart hook so the data refreshes automatically, or run it manually. If the stats file does not exist yet, the tab shows a hint instead of an error. The stats file path is configurable in settings (`usageStatsPath`, default `Operations/usage/usage-stats.json`).
+A "Usage" tab shows token usage and API-equivalent cost estimates: range-scoped estimate tiles, a stacked model chart, a legend, a model breakdown table, and a top-projects table. It reads `Operations/usage/usage-stats.json`, which is produced by `Operations/scripts/export-usage-stats.mjs` (a dependency of this tab, not part of the plugin itself). The exporter estimates Claude and known OpenAI Codex model costs from input, cache-read, cache-write, and output token buckets; these are not subscription billing, allowance, quota, or entitlement measurements. It is wired into the vault's SessionStart hook so the data refreshes automatically, or run it manually. If the stats file does not exist yet, the tab shows a hint instead of an error. The stats file path is configurable in settings (`usageStatsPath`, default `Operations/usage/usage-stats.json`).
 
 ## Actions
 
