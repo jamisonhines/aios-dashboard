@@ -1,2 +1,9 @@
 node_modules/
 *.map
+# Disposable esbuild entry files test harnesses write into the repo root (esbuild resolves
+# relative import specifiers against the importing file's own directory, so these can't live
+# in $TMPDIR) and remove in a `finally`. A crashed/killed run can still leave one behind
+# (tsk-2026-09-17-021 Minor M-8; this is exactly how .agent-model-dom-entry.ts ended up
+# untracked in a dirty checkout elsewhere).
+.next-task-id-wiring-entry.ts
+.*-entry.ts

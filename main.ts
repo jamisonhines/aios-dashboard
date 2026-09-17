@@ -16,6 +16,11 @@ import {
   setIcon,
 } from "obsidian";
 import {
+  maxOnDiskFromBasenames,
+  resolveNextTaskId,
+  todayUTCDay,
+} from "./taskIdClaim.mjs";
+import {
   resolveBuckets,
   resolveStatusSections,
   groupProjectsByStatus,
@@ -316,9 +321,13 @@ function nowIso(): string {
   );
 }
 
+// tsk-2026-09-17-021 Minor M-6: this used to duplicate todayUTCDay()'s own UTC-day logic
+// (harmlessly, since both used getUTC* -- but only todayUTCDay() was pinned by a test, so a
+// future drift in EITHER one would silently put the two day facts this plugin computes out of
+// sync with each other, e.g. the "## Updates" line in a new task file vs. the id it's named
+// after). One implementation now, reused here.
 function isoDate(): string {
-  const d = new Date();
-  return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
+  return todayUTCDay();
 }
 
 function yearMonth(): { y: string; m: string } {
@@ -1237,22 +1246,50 @@ async function setTaskStatus(
   return { pathBefore, pathAfter: file.path, contentBefore, contentAfter };
 }
 
-async function nextTaskId(app: App, day: string): Promise<string> {
-  let max = 0;
-  const prefix = "tsk-" + day + "-";
-  for (const file of app.vault.getMarkdownFiles()) {
-    if (!file.basename.startsWith(prefix)) continue;
-    const rest = file.basename.slice(prefix.length);
-    const num = parseInt(rest.slice(0, 3), 10);
-    if (!isNaN(num) && num > max) max = num;
-  }
-  return prefix + pad3(max + 1);
-}
-
-function pad3(n: number): string {
-  let s = "" + n;
-  while (s.length < 3) s = "0" + s;
-  return s;
+// Claims the id through the same atomic primitive agents and decompose-plan.mjs use
+// (Operations/scripts/mint-task-id.mjs, tsk-2026-09-17-010), instead of re-deriving
+// MAX(filename NNN)+1 and handing it back unclaimed (tsk-2026-09-17-021: that let quick-add
+// reissue a number an agent had already reserved but not yet written a file for).
+// `tasksRoot` is the caller's own setting (see createQuickTask), never hardcoded here: a
+// mismatch between the folder the file is written under and the folder the claim is filed
+// under would silently split the claim space in two (Reviewer Important-3). Selection
+// between the atomic fs path and the best-effort adapter path, and the getBasePath/require
+// probes themselves, all live in resolveNextTaskId (taskIdClaim.mjs) with every dependency
+// injected, so this wrapper is thin enough that a wrong root or a broken selection shows up
+// as a red test on the module, not as untested wiring here (Reviewer Important-1).
+async function nextTaskId(app: App, tasksRoot: string, day: string): Promise<string> {
+  const diskMax = maxOnDiskFromBasenames(
+    app.vault.getMarkdownFiles().map((f) => f.basename),
+    day
+  );
+  const adapter = app.vault.adapter as any;
+  return await resolveNextTaskId({
+    adapter,
+    tasksRootRel: tasksRoot,
+    day,
+    diskMax,
+    getBasePath: () => adapter?.getBasePath?.(),
+    // Desktop-only: Node's fs is already relied on at runtime elsewhere in this plugin when
+    // imported this way (see runLaunchCommand's require("child_process") a few lines below).
+    // The require() must stay lexically inside a try/catch: esbuild's browser-platform bundle
+    // otherwise tries to statically resolve "fs" at build time and fails (measured -- moving
+    // this require to an un-guarded call site broke `node esbuild.config.mjs production`
+    // with "Could not resolve fs" until it was wrapped here).
+    requireFs: () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        return require("fs");
+      } catch (e) {
+        return null;
+      }
+    },
+    notice: (msg: string) => new Notice(msg),
+    // Platform.isDesktop, not base-path presence, is the real "should the atomic path have
+    // worked" signal (tsk-2026-09-17-021 round 2, Important-4): a resolved base path is what
+    // the atomic path NEEDS, but its absence on desktop is an anomaly worth a Notice, while
+    // its absence on mobile is simply how mobile is.
+    isDesktop: Platform.isDesktop,
+  });
 }
 
 // Phase names and titles routinely contain ": " (e.g. "Phase 0: Storefront"),
@@ -1272,8 +1309,8 @@ async function createQuickTask(
 ): Promise<{ path: string; content: string } | null> {
   const title = opts.title.trim();
   if (!title) return null;
-  const day = isoDate();
-  const id = await nextTaskId(app, day);
+  const day = todayUTCDay();
+  const id = await nextTaskId(app, tasksRoot, day);
   const slug = slugify(title) || "task";
   const folder = `${tasksRoot}/open`;
   await ensureFolder(app, folder);
