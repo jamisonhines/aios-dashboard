@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { todayUTCDay } from "./taskIdClaim.mjs";
 
 const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +54,7 @@ const EXPORT_APPEND =
   "\nexport {\n" +
   "  nextTaskId as __nextTaskId,\n" +
   "  createQuickTask as __createQuickTask,\n" +
+  "  isoDate as __isoDate,\n" +
   "};\n" +
   'export { __getNoticeLog, __clearNoticeLog, __setIsDesktop } from "obsidian";\n';
 
@@ -124,6 +126,7 @@ const mod = loadWiringModule();
 const {
   __nextTaskId: nextTaskId,
   __createQuickTask: createQuickTask,
+  __isoDate: isoDate,
   __getNoticeLog: getNoticeLog,
   __clearNoticeLog: clearNoticeLog,
   __setIsDesktop: setIsDesktop,
@@ -318,6 +321,30 @@ function makeFakeAppForQuickTask(vaultDir) {
     !fs.existsSync(path.join(vault, "Operations/tasks")),
     "must not also (or instead) claim under Operations/tasks when the real tasksRoot setting is different"
   );
+}
+
+// --- isoDate() must stay converged with todayUTCDay() (Reviewer round 2, M-6) ---------------
+// Before the M-6 fix, isoDate() (main.ts) and todayUTCDay() (taskIdClaim.mjs) were two
+// independent implementations of the same UTC-day fact, only one of which was pinned by a
+// test; main.ts's isoDate() now just delegates. isoDate() takes no injectable clock, so this
+// pins the PROCESS's timezone (Node re-reads process.env.TZ for local Date getters, measured
+// earlier in this task) far from UTC and calls both back-to-back at real "now": a reintroduced
+// independent, locally-clocked isoDate() would disagree with todayUTCDay() at this instant.
+{
+  const originalTZ = process.env.TZ;
+  process.env.TZ = "Pacific/Kiritimati"; // UTC+14
+  try {
+    const gotIsoDate = isoDate();
+    const gotTodayUTCDay = todayUTCDay();
+    assert.equal(
+      gotIsoDate,
+      gotTodayUTCDay,
+      "isoDate() and todayUTCDay() must never disagree -- isoDate() should delegate, not re-implement"
+    );
+  } finally {
+    if (originalTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTZ;
+  }
 }
 
 console.log("nextTaskIdWiring: all assertions passed");
