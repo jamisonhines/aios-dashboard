@@ -16,6 +16,11 @@ import {
   setIcon,
 } from "obsidian";
 import {
+  maxOnDiskFromBasenames,
+  claimNextTaskIdFs,
+  claimNextTaskIdAdapter,
+} from "./taskIdClaim.mjs";
+import {
   resolveBuckets,
   resolveStatusSections,
   groupProjectsByStatus,
@@ -1203,22 +1208,33 @@ async function setTaskStatus(
   return { pathBefore, pathAfter: file.path, contentBefore, contentAfter };
 }
 
+// Claims the id through the same atomic primitive agents and decompose-plan.mjs use
+// (Operations/scripts/mint-task-id.mjs, tsk-2026-09-17-010), instead of re-deriving
+// MAX(filename NNN)+1 and handing it back unclaimed (tsk-2026-09-17-021: that let quick-add
+// reissue a number an agent had already reserved but not yet written a file for). See
+// taskIdClaim.mjs for the fs-available vs. adapter-only paths and why only the former is
+// atomic.
 async function nextTaskId(app: App, day: string): Promise<string> {
-  let max = 0;
-  const prefix = "tsk-" + day + "-";
-  for (const file of app.vault.getMarkdownFiles()) {
-    if (!file.basename.startsWith(prefix)) continue;
-    const rest = file.basename.slice(prefix.length);
-    const num = parseInt(rest.slice(0, 3), 10);
-    if (!isNaN(num) && num > max) max = num;
+  const tasksRootRel = "Operations/tasks";
+  const diskMax = maxOnDiskFromBasenames(
+    app.vault.getMarkdownFiles().map((f) => f.basename),
+    day
+  );
+  const adapter = app.vault.adapter as any;
+  const basePath: string | undefined = adapter?.getBasePath?.();
+  if (typeof basePath === "string" && basePath) {
+    try {
+      // Desktop-only: Node's fs is already relied on at runtime elsewhere in this plugin
+      // when imported this way (see agent-models-write.mjs's usage).
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fsp = require("fs").promises;
+      return await claimNextTaskIdFs({ fsp, basePath, tasksRootRel, day, diskMax });
+    } catch (e) {
+      // fs unavailable, or the atomic claim failed unexpectedly; fall through to the
+      // best-effort adapter path rather than blocking task creation.
+    }
   }
-  return prefix + pad3(max + 1);
-}
-
-function pad3(n: number): string {
-  let s = "" + n;
-  while (s.length < 3) s = "0" + s;
-  return s;
+  return await claimNextTaskIdAdapter({ adapter, tasksRootRel, day, diskMax });
 }
 
 // Phase names and titles routinely contain ": " (e.g. "Phase 0: Storefront"),
