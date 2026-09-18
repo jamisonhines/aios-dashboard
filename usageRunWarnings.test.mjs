@@ -224,25 +224,36 @@ let spawnLog = [];
 function resetSpawnLog() {
   spawnLog = [];
 }
-function installFakeChildProcess(spawnOutcomeProvider) {
+function installFakeChildProcess(spawnOutcomeProvider, { fsExists = null } = {}) {
   globalThis.require = (id) => {
     // tsk-2026-09-18-020: refreshUsageSnapshot resolves a real node binary (resolveNodeForExporter
     // -> resolveExporterLaunch in model.mjs) BEFORE spawning. That resolution's own correctness
     // is unit-tested directly against model.mjs elsewhere (pure function, no fs); here it only
     // needs to succeed trivially so the fake child_process.spawn below is reached at all -- these
     // tests are about the launcher's WIRING (one launch, dedup, immediate re-render, error
-    // surfacing), not about which real path gets picked on this machine.
+    // surfacing), not about which real path gets picked on this machine. `fsExists`, when given,
+    // overrides the default "everything exists" fake -- round 2's I3 wiring tests use this to
+    // control exactly which candidate path resolveNodeForExporter picks, and to simulate "no
+    // node found anywhere".
     if (id === "fs") {
-      return { existsSync: () => true, readFileSync: () => "24.14.1", readdirSync: () => ["v24.14.1"] };
+      return {
+        existsSync: fsExists || (() => true),
+        readFileSync: () => "24.14.1",
+        readdirSync: () => ["v24.14.1"],
+      };
     }
     if (id === "os") {
       return { homedir: () => "/fake/home" };
     }
     if (id === "child_process") {
       return {
-        spawn() {
+        spawn(command, args) {
           const callIndex = spawnLog.length;
-          spawnLog.push({ callIndex });
+          // Round 2, Reviewer Important I3 (Coder contract rule 2): the command and args are
+          // RECORDED, not discarded -- a mock that drops the identifier argument makes the
+          // identifier untested by construction. Every existing test that only reads
+          // `callIndex`/`spawnLog.length` is unaffected by these extra fields.
+          spawnLog.push({ callIndex, command, args });
           const listeners = { data: [], error: [], exit: [] };
           const errListeners = [];
           const child = {
@@ -262,6 +273,11 @@ function installFakeChildProcess(spawnOutcomeProvider) {
             once(event, cb) {
               (listeners[event] ||= []).push(cb);
             },
+            // Round 2, I1: refreshUsageSnapshot's timeout handler calls child.kill() -- a no-op
+            // here is enough (the timeout tests below use their own dedicated fake, see I1
+            // block) since production code already tolerates a throwing/missing kill via
+            // try/catch.
+            kill() {},
           };
           const outcome = spawnOutcomeProvider ? spawnOutcomeProvider(callIndex) : { code: 1, stdout: "" };
           // A `null`/`undefined` outcome means "never resolve this one" -- used as a
@@ -350,6 +366,11 @@ async function renderUsageTabToCompletion({
   statsPath = "Operations/usage/usage-stats.json",
   statusJson = null,
   generatedAt = null,
+  // Round 2: an optional array of generatedAt values -- the fake adapter's `read` advances
+  // through it (one step per read of the usage-stats.json path, sticking on the last entry once
+  // exhausted) instead of returning a single fixed snapshot forever. Lets a test simulate "a
+  // NEWER snapshot appears" (M4) without needing a real exporter run.
+  generatedAtSequence = null,
   // R3-M1: when set, the fake adapter's `basePath` becomes a real string (satisfying
   // refreshUsageSnapshot's own `typeof basePath !== "string"` guard) and `spawnOutcomeProvider`
   // drives the fake `child_process.spawn` -- see installFakeChildProcess above. `null` (the
@@ -406,7 +427,24 @@ async function renderUsageTabToCompletion({
       alias: { obsidian: stub },
     });
     const { renderUsageTab } = await import(pathToFileURL(out).href);
-    const statsJson = JSON.stringify({ generatedAt: generatedAt ?? new Date().toISOString(), days: [], projects: [], windowDays: 35 });
+    const fixedStatsJson = JSON.stringify({ generatedAt: generatedAt ?? new Date().toISOString(), days: [], projects: [], windowDays: 35 });
+    // Round 2 (M4 test support): each read of usage-stats.json advances one step through
+    // generatedAtSequence when given, sticking on the last entry once exhausted; otherwise every
+    // read returns the same fixedStatsJson forever, exactly as before this round. Entries may be
+    // a string OR a `() => string` thunk, evaluated lazily at read time -- a plain string
+    // captured before the test starts can end up EARLIER, in wall-clock terms, than
+    // lastUsageRefreshResultAt (set inside the executor a moment after this test's own setup
+    // ran), which would make M4's "newer than the failure" comparison silently false. A thunk
+    // evaluated at the actual read instant is reliably later.
+    let statsReadCount = 0;
+    const statsJsonFor = () => {
+      if (!generatedAtSequence || generatedAtSequence.length === 0) return fixedStatsJson;
+      const idx = Math.min(statsReadCount, generatedAtSequence.length - 1);
+      statsReadCount++;
+      const entry = generatedAtSequence[idx];
+      const generatedAtValue = typeof entry === "function" ? entry() : entry;
+      return JSON.stringify({ generatedAt: generatedAtValue, days: [], projects: [], windowDays: 35 });
+    };
     const app = {
       vault: {
         adapter: {
@@ -417,7 +455,7 @@ async function renderUsageTabToCompletion({
           },
           async read(p) {
             if (p.endsWith(".status.json")) return statusJson;
-            return statsJson;
+            return statsJsonFor();
           },
         },
       },
@@ -426,10 +464,23 @@ async function renderUsageTabToCompletion({
     const viewState = { expanded: new Set(), usageRange: "7d", usageOffset: 0 };
     const container = fakeEl();
     const periodbarHost = fakeEl();
-    renderUsageTab(app, container, periodbarHost, settings, viewState);
+    // Round 2, Minor M1: renderUsageTab now takes a `refresh` callback (threaded from the real
+    // renderDashboard) that its own settle-triggered doRefresh calls instead of a purely local
+    // draw(). This harness's equivalent: empty the container and re-render the whole tab in
+    // place, mirroring what the real full-dashboard rebuild does for this narrower scope.
+    const refresh = () => {
+      container.empty();
+      periodbarHost.empty();
+      renderUsageTab(app, container, periodbarHost, settings, viewState, refresh);
+    };
+    renderUsageTab(app, container, periodbarHost, settings, viewState, refresh);
     // renderUsageTab's own load is a real microtask chain (Promise.all -> .then); give it room
     // to settle before inspecting the tree.
     await new Promise((r) => setTimeout(r, settleMs));
+    // Round 2 (I2 storm test support): `refresh` exposed so a caller can drive additional
+    // re-renders manually, simulating a vault-change storm (scheduleRefresh firing repeatedly)
+    // independent of doRefresh's own settle-triggered call.
+    container.__refresh = refresh;
     return container;
   } finally {
     fs.rmSync(entry, { force: true });
@@ -481,7 +532,9 @@ async function renderUsageTabToCompletion({
   // tsk-2026-09-18-020, D-2026-09-18-02 "one button": the Usage tab's own Refresh button is
   // gone. The header icon (tested separately below, renderDashboardToCompletion) is now the
   // only control that launches the exporter.
-  const refreshButtonEntries = creationLog.filter((e) => e.cls === "aios-refresh");
+  // Round 2, Reviewer Minor M6: token match, not exact-string -- a reintroduced Usage button
+  // with any extra class (e.g. "aios-refresh aios-usage-btn") would pass an exact-string check.
+  const refreshButtonEntries = creationLog.filter((e) => (e.cls || "").split(/\s+/).includes("aios-refresh"));
   assert.equal(refreshButtonEntries.length, 0, "D-2026-09-18-02: the Usage tab must no longer create its own Refresh button");
 
   // The creation-log checks above prove draw() computed the right text at creation time, but
@@ -513,39 +566,90 @@ async function renderUsageTabToCompletion({
   const busyOutcomeProvider = (callIndex) => (callIndex < BUSY_CAP ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null);
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-  // --- refreshTriggeredForThisLoad: correct code must spawn exactly once, even though every
-  // --- busy response leaves the snapshot just as stale and would otherwise re-trigger. -------
+  // --- usageAutoRefreshAttempted (module-level, round 2): correct code must spawn exactly
+  // --- once, even though every busy response leaves the snapshot just as stale and would
+  // --- otherwise re-trigger. ------------------------------------------------------------------
   await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo, basePath: "/fake/vault", spawnOutcomeProvider: busyOutcomeProvider, settleMs: 200 });
-  assert.equal(spawnLog.length, 1, `R3-M1: with the guard intact, a persistently busy stale snapshot must trigger exactly ONE exporter launch per load, not one per busy response -- got ${spawnLog.length}`);
+  assert.equal(spawnLog.length, 1, `with the guard intact, a persistently busy stale snapshot must trigger exactly ONE exporter launch per load, not one per busy response -- got ${spawnLog.length}`);
 
-  // --- MUTATION: remove the guard (main.ts source string transform, never the tracked file --
-  // --- see mutateSource on renderUsageTabToCompletion), rerun, capture the real RED. ----------
-  const removeRefreshGuard = (source) => {
-    const needle = "if (stale && !refreshTriggeredForThisLoad) {\n        refreshTriggeredForThisLoad = true;\n        void doRefresh();\n      }";
-    assert.ok(source.includes(needle), "R3-M1: the refreshTriggeredForThisLoad guard must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "if (stale) {\n        void doRefresh();\n      }");
-    assert.notEqual(mutated, source, "R3-M1: the mutation must actually change the source");
-    return mutated;
-  };
-  await renderUsageTabToCompletion({
+  console.log(`I2 (once per load, within one instance): intact -- 1 spawn despite ${BUSY_CAP} busy responses.`);
+}
+
+{
+  // Round 2, Reviewer Important I2: the actual measured bug -- a FAILING exporter re-renders the
+  // dashboard (its own status-sidecar rewrite is a vault write) which, with a per-render (not
+  // per-load) guard, relaunches on EVERY re-render, AND doRefresh's own settle-triggered
+  // refresh() (Minor M1's fix) feeds a FRESH render right back into that same loop on its own,
+  // with no external trigger needed -- exactly Reviewer's "a failing run itself causes a
+  // re-render, so the loop sustains itself." Deterministic circuit breaker, same pattern as the
+  // busy-cap tests above: FAIL_CAP failing spawns, then `null` (never resolves) freezes the
+  // chain -- a genuinely unbounded runaway (the mutated code) cannot OOM the test process; it
+  // always stops after exactly FAIL_CAP spawns.
+  const FAIL_CAP = 6;
+  const failProvider = (callIndex) => (callIndex < FAIL_CAP ? { code: 1, stdout: "", stderr: "boom: disk full" } : null);
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const container = await renderUsageTabToCompletion({
     statusJson: null,
     generatedAt: twoHoursAgo,
     basePath: "/fake/vault",
-    spawnOutcomeProvider: busyOutcomeProvider,
-    mutateSource: removeRefreshGuard,
-    settleMs: 200,
+    spawnOutcomeProvider: failProvider,
+    settleMs: 300,
   });
-  // BUSY_CAP + 1, not BUSY_CAP: the (BUSY_CAP+1)th spawn call IS still logged (the log push
-  // happens before the outcome lookup) -- it is the one whose outcome comes back `null` and
-  // never resolves, which is what actually freezes the chain. Any count above 1 here already
-  // proves the runaway; BUSY_CAP + 1 is the exact, deterministic value this circuit breaker
-  // produces.
+  // Also simulate 4 EXTERNAL vault-change-storm re-renders (what scheduleRefresh's debounced
+  // handler does on every create/modify/rename/delete) against the same still-stale snapshot
+  // (a failed run never touches the data file, only its status sidecar).
+  for (let i = 0; i < 4; i++) {
+    container.__refresh();
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  await new Promise((r) => setTimeout(r, 200));
   assert.equal(
     spawnLog.length,
-    BUSY_CAP + 1,
-    `MUTATION CHECK: with refreshTriggeredForThisLoad removed, a persistently busy stale snapshot must WRONGLY keep re-triggering (capped here only by the test's own circuit breaker; Reviewer measured 63 spawns in 2s with no cap at all) -- proving the guard (not something else) was what stopped this. Got ${spawnLog.length} spawns.`
+    1,
+    `I2: with the guard intact, 1 initial load plus doRefresh's own settle-triggered redraws plus 4 simulated external re-renders must still show exactly 1 total exporter launch -- got ${spawnLog.length}`
   );
-  console.log(`R3-M1: refreshTriggeredForThisLoad guard -- intact: 1 spawn per load. MUTATION (guard removed): ${spawnLog.length}/${BUSY_CAP} spawns (runaway, capped only by the test harness). Reverted (never touched the tracked file).`);
+  console.log(`I2 (re-render storm + self-sustaining settle redraws, guard intact): -> ${spawnLog.length} total spawn(s).`);
+
+  // --- MUTATION: move the guard back to RENDER scope (a per-renderUsageTab-instance `let`
+  // --- reset on every fresh render -- the exact round-1 shape Reviewer's I2 finding identified
+  // --- as the root cause -- main.ts source string transform, never the tracked file). ---------
+  const moveGuardToRenderScope = (source) => {
+    const declareNeedle = "    const STALE_THRESHOLD_MS = 15 * 60 * 1000;\n";
+    assert.ok(source.includes(declareNeedle), "the STALE_THRESHOLD_MS declaration must be present verbatim (fixture drift guard)");
+    const conditionNeedle =
+      '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        void doRefresh();\n      }';
+    assert.ok(source.includes(conditionNeedle), "the module-level auto-refresh guard block must be present verbatim before mutating it (fixture drift guard)");
+    let mutated = source.replace(declareNeedle, `${declareNeedle}    let mutatedRenderScopeGuard = false;\n`);
+    mutated = mutated.replace(
+      conditionNeedle,
+      '      if (stale && !refreshing && !mutatedRenderScopeGuard) {\n        mutatedRenderScopeGuard = true;\n        void doRefresh();\n      }'
+    );
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedContainer = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: twoHoursAgo,
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failProvider,
+    mutateSource: moveGuardToRenderScope,
+    settleMs: 300,
+  });
+  for (let i = 0; i < 4; i++) {
+    mutatedContainer.__refresh();
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  // FAIL_CAP + 1, not FAIL_CAP: the (FAIL_CAP+1)th spawn call IS still logged (the log push
+  // happens before the outcome lookup) -- it is the one whose outcome comes back `null` and
+  // never resolves, which is what actually freezes the chain (same accounting as the busy-cap
+  // runaway proof above). Any count above 1 already proves the runaway.
+  assert.equal(
+    spawnLog.length,
+    FAIL_CAP + 1,
+    `MUTATION CHECK: with the guard moved back to render scope, the SAME storm must WRONGLY relaunch on every re-render and every settle-triggered redraw, proving the guard's MODULE-level scope (not something else) is what stops it -- got ${spawnLog.length} spawns`
+  );
+  console.log(`I2 (re-render storm, guard MUTATED to render scope): -> ${spawnLog.length} total spawn(s) (runaway, capped only by the test harness). Reverted (never touched the tracked file).`);
 }
 
 {
@@ -566,9 +670,9 @@ async function renderUsageTabToCompletion({
   // --- MUTATION: neutralize the busy branch of draw()'s refreshStatusText ternary (main.ts
   // --- source string transform, never the tracked file), rerun, capture the real RED. --------
   const removeBusyBranch = (source) => {
-    const needle = "            : lastUsageRefreshResult?.busy\n";
-    assert.ok(source.includes(needle), "the lastUsageRefreshResult?.busy branch must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "            : false\n");
+    const needle = "          : effectiveResult?.busy\n";
+    assert.ok(source.includes(needle), "the effectiveResult?.busy branch must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "          : false\n");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
@@ -602,9 +706,9 @@ async function renderUsageTabToCompletion({
   assert.match(refreshStatusNode.text, /Refresh failed \(exporter exited 1\)/, `a real (fake-spawned) exit-1 exporter must surface "exporter exited 1" -- got: ${JSON.stringify(refreshStatusNode.text)}`);
 
   const removeErrorBranch = (source) => {
-    const needle = "          : lastUsageRefreshResult?.error\n";
-    assert.ok(source.includes(needle), "the lastUsageRefreshResult?.error branch must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "          : false\n");
+    const needle = "        : effectiveResult?.error\n";
+    assert.ok(source.includes(needle), "the effectiveResult?.error branch must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "        : false\n");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
@@ -634,6 +738,16 @@ async function renderUsageTabToCompletion({
 async function renderDashboardToCompletion({
   spawnOutcomeProvider = null,
   mutateSource = null,
+  fsExists = null,
+  // esbuild's bare `require(...)` shim resolves `globalThis.require` ONCE, at module-EVAL time
+  // (when the dynamic `import()` below first runs this module), not freshly on every call --
+  // measured directly (a post-import reassignment of globalThis.require had no effect on an
+  // already-imported module's own require() calls). So a caller that needs a CUSTOM
+  // globalThis.require (not just a custom spawnOutcomeProvider/fsExists) must set it up BEFORE
+  // calling this function and pass `installChildProcess: false` here to skip the default
+  // installFakeChildProcess call that would otherwise clobber it before this module loads.
+  installChildProcess = true,
+  isDesktop = true,
 } = {}) {
   resetCreationLog();
   resetSpawnLog();
@@ -646,7 +760,7 @@ async function renderDashboardToCompletion({
     stub,
     [
       "export class App {}", "export class ItemView {}", "export class Menu {}", "export class Modal {}", "export class Notice {}",
-      "export const Platform = { isDesktop: true };", "export class Plugin {}", "export class PluginSettingTab {}", "export class Scope {}",
+      `export const Platform = { isDesktop: ${isDesktop} };`, "export class Plugin {}", "export class PluginSettingTab {}", "export class Scope {}",
       "export class Setting {}", "export class TFile {}", "export class TFolder {}", "export class WorkspaceLeaf {}",
       "export const normalizePath = (p) => p;", "export const setIcon = () => {};",
     ].join("\n")
@@ -672,7 +786,7 @@ async function renderDashboardToCompletion({
     createElementNS(_ns, tag) { return fakeEl(tag); },
     createElement(tag) { return fakeEl(tag); },
   };
-  installFakeChildProcess(spawnOutcomeProvider);
+  if (installChildProcess) installFakeChildProcess(spawnOutcomeProvider, { fsExists });
   try {
     esbuild.buildSync({
       absWorkingDir: root,
@@ -787,9 +901,9 @@ async function renderDashboardToCompletion({
   // regardless of Platform.isDesktop or in-flight state. Removing it must leave the click
   // with NO visible effect until the exporter settles seconds later.
   const removeImmediateRefresh = (source) => {
-    const needle = "      if (!alreadyRunning) void runPromise.finally(() => refresh());\n    }\n    refresh();\n  });";
+    const needle = "      void refreshUsageSnapshot(app).finally(() => refresh());\n    }\n    refresh();\n  });";
     assert.ok(source.includes(needle), "the click handler's trailing refresh() call must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "      if (!alreadyRunning) void runPromise.finally(() => refresh());\n    }\n  });");
+    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app).finally(() => refresh());\n    }\n  });");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
@@ -829,7 +943,7 @@ async function renderDashboardToCompletion({
   const failProvider = () => ({
     code: 1,
     stdout: "",
-    stderr: "no Node.js binary found (checked /usr/local/bin, /opt/homebrew/bin, and nvm); install Node.js or add it to PATH",
+    stderr: "usage export: failed to write lock owner token: EACCES",
   });
   const h = await renderDashboardToCompletion({ spawnOutcomeProvider: failProvider });
   const btn = h.getRefreshBtn();
@@ -839,10 +953,330 @@ async function renderDashboardToCompletion({
   assert.ok(statusNode, "the Usage tab status line must exist after a header-triggered refresh settles");
   assert.match(
     statusNode.text,
-    /Refresh failed \(no Node\.js binary found/,
+    /Refresh failed \(usage export: failed to write lock owner token: EACCES\)/,
     `the status line must name the SPECIFIC failure reason (GL-009 rule 3), not a bare "failed" -- got: ${JSON.stringify(statusNode.text)}`
   );
   console.log(`header-triggered refresh failure: Usage tab status line names the real cause -- "${statusNode.text}"`);
+}
+
+// --- Round 2, Reviewer Important I3: the fix is not mutation-proven at the WIRING level -------
+// Round 1's tests ran entirely under real node (process.execPath IS a working node binary), so
+// resolveExporterLaunch's "already node" shortcut fired every time regardless of whether the
+// downstream `spawn(launch.command, ...)` call actually used its answer -- putting the original
+// bug back (`spawn(process.execPath, ...)`) or deleting the no-node guard both left `npm test`
+// green, because the fake spawn also discarded its command argument (Coder contract rule 2).
+// This block fixes BOTH problems: `process.execPath` is temporarily overridden to a fake
+// Electron-shaped path (with `process.versions.electron` set, for realism) so the "already
+// node" shortcut cannot fire and the REAL fs-candidate resolution logic runs; the fake spawn
+// (updated above) now RECORDS the command it was actually given.
+{
+  const originalExecPath = process.execPath;
+  const hadElectronVersion = Object.prototype.hasOwnProperty.call(process.versions, "electron");
+  const originalElectronVersion = process.versions.electron;
+  process.execPath = "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
+  process.versions.electron = "39.8.3";
+  try {
+    // Only ONE candidate path "exists": /opt/homebrew/bin/node. This pins exactly which path
+    // the resolver should pick, so the assertion below is meaningful (not just "spawn was
+    // called with SOMETHING").
+    const onlyHomebrewNode = (p) => p === "/opt/homebrew/bin/node";
+    const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+
+    const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, fsExists: onlyHomebrewNode });
+    h.getRefreshBtn().click();
+    assert.equal(spawnLog.length, 1, "sanity: exactly one spawn");
+    assert.equal(
+      spawnLog[0].command,
+      "/opt/homebrew/bin/node",
+      `the ACTUAL spawned command must be the resolved node path, not process.execPath (the fake Electron path) -- got ${JSON.stringify(spawnLog[0].command)}`
+    );
+    assert.notEqual(spawnLog[0].command, process.execPath, "sanity: the spawned command must differ from the fake Electron execPath");
+    console.log(`I3 wiring (intact): spawned command = ${spawnLog[0].command} (process.execPath was the fake Electron path ${process.execPath})`);
+
+    // --- MUTATION D: put the ORIGINAL BUG back -- spawn(process.execPath, ...) instead of
+    // --- spawn(launch.command, ...). Must go RED: the spawned command becomes the fake
+    // --- Electron path, not the resolved node path. -----------------------------------------
+    const restoreOriginalBug = (source) => {
+      const needle =
+        'const child = require("child_process").spawn(launch.command, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "pipe"] });';
+      assert.ok(source.includes(needle), "the real spawn call must be present verbatim before mutating it (fixture drift guard)");
+      const mutated = source.replace(needle, needle.replace("launch.command", "process.execPath"));
+      assert.notEqual(mutated, source, "the mutation must actually change the source");
+      return mutated;
+    };
+    const hD = await renderDashboardToCompletion({
+      spawnOutcomeProvider: successProvider,
+      fsExists: onlyHomebrewNode,
+      mutateSource: restoreOriginalBug,
+    });
+    hD.getRefreshBtn().click();
+    assert.equal(
+      spawnLog[0].command,
+      process.execPath,
+      `MUTATION D CHECK: with spawn(launch.command,...) reverted to spawn(process.execPath,...) (the original bug), the spawned command must WRONGLY be the fake Electron path, proving the fix actually depends on using launch.command -- got ${JSON.stringify(spawnLog[0].command)}`
+    );
+    console.log(`I3 wiring, MUTATION D (original bug restored): spawned command WRONGLY = ${spawnLog[0].command}. Reverted (never touched the tracked file).`);
+
+    // --- MUTATION E: delete the no-node guard. With NO candidate existing anywhere, intact
+    // --- code must settle with a named error and spawn NOTHING; the mutation must wrongly
+    // --- spawn a null/undefined command. --------------------------------------------------
+    const nothingExists = () => false;
+    const hIntactNoNode = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, fsExists: nothingExists });
+    hIntactNoNode.getRefreshBtn().click();
+    await hIntactNoNode.settle(150);
+    assert.equal(spawnLog.length, 0, `sanity: with no candidate anywhere, intact code must never spawn -- got ${spawnLog.length} spawns`);
+    const noNodeStatus = findByClass(hIntactNoNode.getRoot(), "aios-usage-refresh-status");
+    assert.match(noNodeStatus.text, /Refresh failed \(no Node\.js binary found/, `the no-node case must surface its OWN named failure -- got: ${JSON.stringify(noNodeStatus.text)}`);
+
+    const removeNoNodeGuard = (source) => {
+      const needle = '      if (!launch.command) { settle({ busy: false, error: launch.reason }); return; }\n';
+      assert.ok(source.includes(needle), "the no-node guard must be present verbatim before mutating it (fixture drift guard)");
+      const mutated = source.replace(needle, "");
+      assert.notEqual(mutated, source, "the mutation must actually change the source");
+      return mutated;
+    };
+    const hMutatedNoNode = await renderDashboardToCompletion({
+      spawnOutcomeProvider: successProvider,
+      fsExists: nothingExists,
+      mutateSource: removeNoNodeGuard,
+    });
+    hMutatedNoNode.getRefreshBtn().click();
+    assert.equal(
+      spawnLog.length,
+      1,
+      `MUTATION E CHECK: with the no-node guard removed, a run with no candidate anywhere must WRONGLY attempt to spawn a null/undefined command instead of settling with a named failure -- got ${spawnLog.length} spawns`
+    );
+    assert.equal(spawnLog[0].command, null, "MUTATION E CHECK: the wrongly-attempted spawn's command must be null (launch.command was never checked)");
+    console.log(`I3 wiring, MUTATION E (no-node guard removed): WRONGLY spawned command=${JSON.stringify(spawnLog[0].command)} (intact: 0 spawns, named failure). Reverted (never touched the tracked file).`);
+  } finally {
+    process.execPath = originalExecPath;
+    if (hadElectronVersion) process.versions.electron = originalElectronVersion;
+    else delete process.versions.electron;
+  }
+}
+
+// --- Round 2, Reviewer Important I1: a hung exporter must time out, kill the child, settle as a
+// --- named failure, and clear usageRefreshInFlight -- not spin/disable the one refresh control
+// --- forever. Uses a dedicated fake spawn whose fake child NEVER fires "exit" or "error" on its
+// --- own (simulating a genuine hang) but DOES record whether kill() was called, and a
+// --- source-mutated SHORT timeout (real 60s would make this test itself take a minute).
+{
+  const shortenTimeout = (source) => {
+    const needle = "const USAGE_EXPORT_TIMEOUT_MS = 60_000;";
+    assert.ok(source.includes(needle), "the timeout constant must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "const USAGE_EXPORT_TIMEOUT_MS = 50;");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  // Must be set BEFORE renderDashboardToCompletion's dynamic import() runs, not after: esbuild's
+  // bare `require(...)` shim resolves globalThis.require ONCE at module-eval time (measured --
+  // a post-import reassignment had no effect on an already-imported module's own require()
+  // calls). `installChildProcess: false` stops the function's own default fake from clobbering
+  // this one before the module loads.
+  let killCalled = false;
+  globalThis.require = (id) => {
+    if (id === "fs") return { existsSync: () => true, readFileSync: () => "24.14.1", readdirSync: () => ["v24.14.1"] };
+    if (id === "os") return { homedir: () => "/fake/home" };
+    if (id === "child_process") {
+      return {
+        spawn() {
+          spawnLog.push({ callIndex: spawnLog.length });
+          return {
+            stdout: { on() {} },
+            stderr: { on() {} },
+            once() { /* never fires exit or error -- a genuine hang */ },
+            kill() { killCalled = true; },
+          };
+        },
+      };
+    }
+    throw new Error(`fake require: unsupported module "${id}"`);
+  };
+  const h = await renderDashboardToCompletion({ mutateSource: shortenTimeout, settleMs: 0, installChildProcess: false });
+  const btn = h.getRefreshBtn();
+  btn.click();
+  const btnAfterClick = h.getRefreshBtn();
+  assert.ok(hasClass(btnAfterClick, "aios-refresh-spinning"), "sanity: spinning immediately after the click");
+  // Wait comfortably past the shortened 50ms timeout.
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(killCalled, "I1: the timeout must call kill() on the hung child");
+  const settledBtn = h.getRefreshBtn();
+  assert.ok(!hasClass(settledBtn, "aios-refresh-spinning"), "I1: the icon must stop spinning once the timeout settles the hung run");
+  assert.equal(settledBtn.disabled, false, "I1: the icon must be re-enabled once the timeout settles the hung run");
+  const statusNode = findByClass(h.getRoot(), "aios-usage-refresh-status");
+  assert.match(statusNode.text, /Refresh failed \(exporter timed out after/, `I1: the status line must name the timeout specifically -- got: ${JSON.stringify(statusNode.text)}`);
+  console.log(`I1 (hung exporter): kill() called, icon un-stuck, status = "${statusNode.text}"`);
+}
+
+// --- Round 2, Reviewer Minor M4: a failure message must clear once a NEWER snapshot appears,
+// --- from ANY writer (not only this plugin's own refreshUsageSnapshot calls). ------------------
+{
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  // A thunk, not a value captured now: evaluated lazily at the actual read instant (strictly
+  // after the failure settles and records lastUsageRefreshResultAt), so it is reliably NEWER in
+  // wall-clock terms, not a value that happened to be captured a few ms before this test's own
+  // setup work ran. +1000ms (not just "now"): everything in this fake-timer test runs
+  // synchronously/microtask-fast enough that "now" at read time can land on the EXACT SAME
+  // millisecond as lastUsageRefreshResultAt's Date.now() a few lines earlier -- a real tie, not
+  // a test bug -- and the production code's `generated > lastUsageRefreshResultAt` is a strict
+  // inequality (correctly: equal timestamps are not "newer"). The 1s margin only exists to give
+  // this synthetic test a real, unambiguous gap; it says nothing about real-world timing.
+  const justNow = () => new Date(Date.now() + 1000).toISOString();
+  const failOnceProvider = (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null);
+  // First read (the initial load): stale, triggers the auto-refresh, which fails.
+  // Second read (after the failed run's own reload inside doRefresh): a FRESH, non-stale
+  // snapshot -- simulating another writer (e.g. the SessionStart hook) having produced a newer
+  // snapshot in the meantime.
+  const tree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAtSequence: [twoHoursAgo, justNow, justNow],
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failOnceProvider,
+    settleMs: 250,
+  });
+  const statusNode = findByClass(tree, "aios-usage-refresh-status");
+  assert.ok(statusNode, "a refresh-status node must exist after the newer snapshot settles in");
+  assert.doesNotMatch(
+    statusNode.text,
+    /Refresh failed/,
+    `M4: once a snapshot NEWER than the recorded failure appears, the old failure text must clear -- got: ${JSON.stringify(statusNode.text)}`
+  );
+  assert.doesNotMatch(statusNode.text, /\(stale\)/, "M4: the newer snapshot is fresh, so no stale suffix either");
+  console.log(`M4: failure text cleared once a newer snapshot appeared -- final status: "${statusNode.text}"`);
+
+  // --- MUTATION: remove the "newer snapshot clears it" check. ------------------------------
+  const removeNewerClearsCheck = (source) => {
+    const needle = "const effectiveResult = Number.isFinite(generated) && generated > lastUsageRefreshResultAt ? null : lastUsageRefreshResult;";
+    assert.ok(source.includes(needle), "the effectiveResult computation must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "const effectiveResult = lastUsageRefreshResult;");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAtSequence: [twoHoursAgo, justNow, justNow],
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failOnceProvider,
+    mutateSource: removeNewerClearsCheck,
+    settleMs: 250,
+  });
+  const mutatedStatus = findByClass(mutatedTree, "aios-usage-refresh-status");
+  assert.match(
+    mutatedStatus.text,
+    /Refresh failed/,
+    `MUTATION CHECK: with the "newer snapshot clears it" check removed, the stale failure text must WRONGLY stick next to fresh data -- got: ${JSON.stringify(mutatedStatus.text)}`
+  );
+  console.log(`M4 MUTATION (clear-check removed): failure text WRONGLY stuck -- "${mutatedStatus.text}". Reverted (never touched the tracked file).`);
+}
+
+// --- Round 2, Reviewer Minor M5: a failed refresh must be visible even when generatedAt cannot
+// --- be parsed at all -- base (9369edc) showed the failure text in this exact case; round 1
+// --- accidentally hid it behind "Snapshot generation time unavailable". -----------------------
+{
+  const failOnceProvider = (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null);
+  const tree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: "not-a-date",
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failOnceProvider,
+    settleMs: 250,
+  });
+  const statusNode = findByClass(tree, "aios-usage-refresh-status");
+  assert.ok(statusNode, "a refresh-status node must exist even with an unparseable generatedAt");
+  assert.match(
+    statusNode.text,
+    /Refresh failed \(boom: disk full\)/,
+    `M5: an unparseable generatedAt must not hide a real failure -- got: ${JSON.stringify(statusNode.text)}`
+  );
+  console.log(`M5: failure visible despite unparseable generatedAt -- "${statusNode.text}"`);
+
+  // --- MUTATION: restore the round-1 regression (check !Number.isFinite(generated) FIRST,
+  // --- before refreshing/error/busy, same shape as base's opposite bug). --------------------
+  const restoreUnavailableFirst = (source) => {
+    const needle = "      const refreshStatusText = refreshing\n";
+    assert.ok(source.includes(needle), "the refreshStatusText ternary must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, '      const refreshStatusText = !generatedText\n        ? "Snapshot generation time unavailable"\n        : refreshing\n');
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: "not-a-date",
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failOnceProvider,
+    mutateSource: restoreUnavailableFirst,
+    settleMs: 250,
+  });
+  const mutatedStatus = findByClass(mutatedTree, "aios-usage-refresh-status");
+  assert.doesNotMatch(
+    mutatedStatus.text,
+    /Refresh failed/,
+    `MUTATION CHECK: with the unavailable-first regression restored, a real failure must go WRONGLY invisible behind "Snapshot generation time unavailable" -- got: ${JSON.stringify(mutatedStatus.text)}`
+  );
+  assert.match(mutatedStatus.text, /unavailable/i);
+  console.log(`M5 MUTATION (unavailable-first restored): failure WRONGLY hidden -- "${mutatedStatus.text}". Reverted (never touched the tracked file).`);
+}
+
+// --- Round 2, Reviewer Minor M6 (post-settle header re-render, "I'" in round 1): the
+// --- CONTINUATION attached to the run that STARTS on click (`.finally(() => refresh())`,
+// --- distinct from the unconditional trailing refresh() proven above) was unpinned in round 1
+// --- -- removing it left `npm test` green even though it is what un-sticks the icon after a
+// --- normal (non-hung) run settles. -------------------------------------------------------
+{
+  const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider });
+  h.getRefreshBtn().click();
+  await h.settle(150);
+  const settledBtn = h.getRefreshBtn();
+  assert.ok(!hasClass(settledBtn, "aios-refresh-spinning"), "the icon must stop spinning once a normal run settles");
+  assert.equal(settledBtn.disabled, false, "the icon must be re-enabled once a normal run settles");
+  console.log("M6 (post-settle re-render): icon un-stuck after a normal run settles.");
+
+  const removePostSettleRefresh = (source) => {
+    const needle = "      void refreshUsageSnapshot(app).finally(() => refresh());\n";
+    assert.ok(source.includes(needle), "the post-settle continuation must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app);\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removePostSettleRefresh });
+  hMutated.getRefreshBtn().click();
+  await hMutated.settle(150);
+  const mutatedBtn = hMutated.getRefreshBtn();
+  assert.ok(
+    hasClass(mutatedBtn, "aios-refresh-spinning"),
+    "MUTATION CHECK: with the post-settle continuation removed, the icon must WRONGLY stay spinning forever after a normal run settles (nothing ever re-renders the header to pick up usageRefreshInFlight clearing)"
+  );
+  console.log("M6 MUTATION (post-settle continuation removed): icon WRONGLY stuck spinning after settle. Reverted (never touched the tracked file).");
+}
+
+// --- Round 2, Reviewer Minor M6 (mobile gate, "G" in round 1): on mobile the header click must
+// --- re-read the vault but never touch the exporter. Unpinned in round 1 -- flipping the gate
+// --- to always-true left `npm test` green. ------------------------------------------------
+{
+  const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, isDesktop: false });
+  const countBefore = h.getRefreshCount();
+  h.getRefreshBtn().click();
+  assert.equal(h.getRefreshCount(), countBefore + 1, "mobile: a click must still trigger the immediate vault re-read");
+  assert.equal(spawnLog.length, 0, `mobile: a click must never launch the exporter -- got ${spawnLog.length} spawns`);
+  console.log("M6 (mobile gate): click re-reads the vault, 0 exporter launches.");
+
+  const removeMobileGate = (source) => {
+    const needle = "  refreshBtn.addEventListener(\"click\", () => {\n    if (Platform.isDesktop) {\n";
+    assert.ok(source.includes(needle), "the mobile gate must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "  refreshBtn.addEventListener(\"click\", () => {\n    if (true) {\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, isDesktop: false, mutateSource: removeMobileGate });
+  hMutated.getRefreshBtn().click();
+  assert.equal(
+    spawnLog.length,
+    1,
+    `MUTATION CHECK: with the mobile gate removed, a click on mobile must WRONGLY launch the exporter -- got ${spawnLog.length} spawns`
+  );
+  console.log(`M6 MUTATION (mobile gate removed): mobile click WRONGLY launched the exporter (${spawnLog.length} spawn). Reverted (never touched the tracked file).`);
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");

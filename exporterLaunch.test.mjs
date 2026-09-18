@@ -91,4 +91,93 @@ import { resolveExporterLaunch } from "./model.mjs";
   assert.ok(result.reason);
 }
 
+// Round 2, Reviewer Minor M2: the failure reason must name the paths actually checked and must
+// NOT tell the user to add node to PATH (this function never reads PATH, and Obsidian's GUI
+// process has no shell PATH to search anyway).
+{
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: () => false,
+    readFile: () => null,
+    listNodeVersionDirs: () => [],
+  });
+  assert.match(result.reason, /\/usr\/local\/bin\/node/, "must name a checked fixed candidate");
+  assert.match(result.reason, /\/opt\/homebrew\/bin\/node/, "must name a checked fixed candidate");
+  assert.match(result.reason, /\/opt\/homebrew\/opt\/node\/bin\/node/, "must name the third checked candidate (round 1 checked but never mentioned it)");
+  assert.match(result.reason, /nvm/i, "must mention nvm was also checked");
+  assert.doesNotMatch(result.reason, /add it to PATH/i, "must not claim adding to PATH would help -- PATH is never searched");
+  assert.doesNotMatch(result.reason, /\bPATH\b/, "must not mention PATH at all, to avoid implying it was searched");
+}
+
+// Round 2, Reviewer Minor M3: `lts/*` resolves through nvm's own alias-chain shape (alias/default
+// -> "lts/*" -> alias/lts/* -> a real version), not just a full x.y.z default.
+{
+  const files = {
+    "/Users/jaymo/.nvm/alias/default": "lts/*",
+    "/Users/jaymo/.nvm/alias/lts/*": "iron",
+    "/Users/jaymo/.nvm/alias/iron": "v20.11.0",
+  };
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: (p) => p === "/Users/jaymo/.nvm/versions/node/v20.11.0/bin/node",
+    readFile: (p) => files[p] ?? null,
+  });
+  assert.equal(result.command, "/Users/jaymo/.nvm/versions/node/v20.11.0/bin/node", "must follow a multi-hop alias chain, not stop at the first non-version alias");
+}
+
+// M3: a chained custom alias ("work" -> "v18.0.0") resolves the same way.
+{
+  const files = { "/Users/jaymo/.nvm/alias/default": "work", "/Users/jaymo/.nvm/alias/work": "v18.0.0" };
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: (p) => p === "/Users/jaymo/.nvm/versions/node/v18.0.0/bin/node",
+    readFile: (p) => files[p] ?? null,
+  });
+  assert.equal(result.command, "/Users/jaymo/.nvm/versions/node/v18.0.0/bin/node");
+}
+
+// M3: a partial version alias ("24") picks the HIGHEST INSTALLED version matching that major,
+// not nvm's own "highest installed overall" fallback (round 1 measured: partial "24" resolved
+// to a newer v25 install, silently picking a different major than the user pinned).
+{
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: (p) => p === "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node",
+    readFile: (p) => (p === "/Users/jaymo/.nvm/alias/default" ? "24" : null),
+    listNodeVersionDirs: (dir) =>
+      dir === "/Users/jaymo/.nvm/versions/node" ? ["v20.11.0", "v24.9.0", "v24.14.1", "v25.0.0"] : [],
+  });
+  assert.equal(result.command, "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node", "must pick the highest v24.x, not v25.0.0");
+}
+// M3: a major.minor partial ("24.14") narrows further.
+{
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: (p) => p === "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node",
+    readFile: (p) => (p === "/Users/jaymo/.nvm/alias/default" ? "24.14" : null),
+    listNodeVersionDirs: (dir) =>
+      dir === "/Users/jaymo/.nvm/versions/node" ? ["v24.9.0", "v24.14.0", "v24.14.1"] : [],
+  });
+  assert.equal(result.command, "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node");
+}
+
+// M3: a half-installed HIGHEST version (directory exists, no bin/node -- an interrupted nvm
+// install) must not block a working lower version. Round 1 only tried the single highest dir.
+{
+  const result = resolveExporterLaunch({
+    execPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+    homedir: "/Users/jaymo",
+    exists: (p) => p === "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node", // v99.0.0 has no bin/node
+    readFile: () => null,
+    listNodeVersionDirs: (dir) =>
+      dir === "/Users/jaymo/.nvm/versions/node" ? ["v24.14.1", "v99.0.0"] : [],
+  });
+  assert.equal(result.command, "/Users/jaymo/.nvm/versions/node/v24.14.1/bin/node", "must fall through past a half-installed newer version to a working older one");
+}
+
 console.log("exporterLaunch: all assertions passed");

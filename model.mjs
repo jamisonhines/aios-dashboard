@@ -2709,6 +2709,31 @@ export function agentModelPickerState(catalog, primary, fallbacks, snapshotCurre
 // Returns `{ command, reason }`: exactly one of the two is non-null. `reason` is a short,
 // specific, one-line explanation for why no launch was found, meant to be shown verbatim to the
 // user (GL-009 rule 3: name the failure, not just that one occurred).
+function nodeVersionCompare(a, b) {
+  const parse = (v) => v.slice(1).split(".").map(Number);
+  const [a1, a2, a3] = parse(a);
+  const [b1, b2, b3] = parse(b);
+  return a1 - b1 || a2 - b2 || a3 - b3;
+}
+
+// Round 2, Reviewer Minor M3: nvm aliases can point at another alias file rather than a version
+// directly -- `lts/*` (nvm stores this as `alias/lts/*` -> a codename alias -> a version),
+// `lts/iron`, a user's own chained alias (`work` -> `v18.0.0`), and nvm's own built-in
+// `node`/`stable`/`iojs` aliases are all alias-to-alias chains of this shape. Followed up to a
+// small fixed depth (cycles or absurd chains just fail to resolve, falling through to the
+// highest-installed scan below, never throwing). A bare `system` alias means "use the OS's own
+// node, not an nvm-managed one" -- this function has no way to honour that distinctly from "not
+// found", so it deliberately falls through the same way an unresolvable alias does.
+function resolveNvmAliasChain(nvmDir, aliasValue, readFile, depth = 0) {
+  if (depth > 5) return null;
+  const trimmed = (aliasValue || "").trim();
+  if (!trimmed) return null;
+  if (/^v?\d+\.\d+\.\d+$/.test(trimmed)) return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+  const next = readFile(`${nvmDir}/alias/${trimmed}`);
+  if (next) return resolveNvmAliasChain(nvmDir, next, readFile, depth + 1);
+  return null;
+}
+
 export function resolveExporterLaunch({
   execPath,
   env = {},
@@ -2722,40 +2747,83 @@ export function resolveExporterLaunch({
     return { command: execPath, reason: null };
   }
 
+  // Round 2, Reviewer Minor M2: every path actually probed, in order, so the "not found" message
+  // below can name them honestly instead of pointing at PATH (never searched by this function --
+  // and the Obsidian GUI process has no shell PATH to search anyway, measured in the task's
+  // build log).
+  const checked = [];
+  const tryPath = (p) => { checked.push(p); return exists(p); };
+
   const fixedCandidates = ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/opt/homebrew/opt/node/bin/node"];
   for (const candidate of fixedCandidates) {
-    if (exists(candidate)) return { command: candidate, reason: null };
+    if (tryPath(candidate)) return { command: candidate, reason: null };
   }
 
   const nvmDir = env.NVM_DIR || (homedir ? `${homedir}/.nvm` : "");
   if (nvmDir) {
-    const alias = readFile(`${nvmDir}/alias/default`);
-    if (alias) {
-      const trimmed = alias.trim();
-      if (trimmed) {
-        const versioned = trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
-        const nodePath = `${nvmDir}/versions/node/${versioned}/bin/node`;
-        if (exists(nodePath)) return { command: nodePath, reason: null };
-      }
+    const aliasRaw = readFile(`${nvmDir}/alias/default`);
+    const aliasTrimmed = aliasRaw ? aliasRaw.trim() : "";
+    let resolvedVersion = aliasTrimmed ? resolveNvmAliasChain(nvmDir, aliasTrimmed, readFile) : null;
+    // Round 2, M3: a partial version ("24" or "24.14") is not a chainable alias file, but IS a
+    // real, cheap-to-honour signal -- pick the highest INSTALLED version matching that prefix,
+    // not nvm's own "highest installed overall" fallback (which can silently pick a newer major
+    // than the user pinned; measured in round 1 review: partial `24` resolved to v25).
+    if (!resolvedVersion && /^\d+(\.\d+)?$/.test(aliasTrimmed)) {
+      const prefix = `v${aliasTrimmed}.`;
+      const matching = listNodeVersionDirs(`${nvmDir}/versions/node`).filter(
+        (v) => /^v\d+\.\d+\.\d+$/.test(v) && v.startsWith(prefix)
+      );
+      if (matching.length) resolvedVersion = [...matching].sort(nodeVersionCompare).at(-1);
     }
-    const installed = listNodeVersionDirs(`${nvmDir}/versions/node`).filter((v) => /^v\d+\.\d+\.\d+$/.test(v));
-    if (installed.length) {
-      const parseVer = (v) => v.slice(1).split(".").map(Number);
-      const cmp = (a, b) => {
-        const [a1, a2, a3] = parseVer(a);
-        const [b1, b2, b3] = parseVer(b);
-        return a1 - b1 || a2 - b2 || a3 - b3;
-      };
-      const highest = [...installed].sort(cmp).at(-1);
-      const nodePath = `${nvmDir}/versions/node/${highest}/bin/node`;
-      if (exists(nodePath)) return { command: nodePath, reason: null };
+    if (resolvedVersion) {
+      const nodePath = `${nvmDir}/versions/node/${resolvedVersion}/bin/node`;
+      if (tryPath(nodePath)) return { command: nodePath, reason: null };
+    }
+    // Round 2, M3: try EVERY installed version from highest to lowest, not just the single
+    // highest -- round 1 tried only the highest dir, so a half-installed newest version (nvm
+    // interrupted mid-install, leaving the directory but no `bin/node`) reported "not found"
+    // even though a working older version sat right next to it.
+    const installedDesc = listNodeVersionDirs(`${nvmDir}/versions/node`)
+      .filter((v) => /^v\d+\.\d+\.\d+$/.test(v))
+      .sort(nodeVersionCompare)
+      .reverse();
+    for (const v of installedDesc) {
+      const nodePath = `${nvmDir}/versions/node/${v}/bin/node`;
+      if (tryPath(nodePath)) return { command: nodePath, reason: null };
     }
   }
 
+  const nvmNote = nvmDir ? `, and nvm (${nvmDir}, default alias "${aliasFor(env, homedir, readFile)}") found no usable version` : "";
   return {
     command: null,
-    reason: "no Node.js binary found (checked /usr/local/bin, /opt/homebrew/bin, and nvm); install Node.js or add it to PATH",
+    reason: `no Node.js binary found (checked ${checked.join(", ")}${nvmNote}); install Node.js, e.g. via nvm (https://nodejs.org/), so a version is available at one of the paths above`,
   };
+}
+
+// Small helper only for the failure message above: re-reads the default alias purely for
+// display (never throws -- readFile already swallows its own errors by contract).
+function aliasFor(env, homedir, readFile) {
+  const nvmDir = env.NVM_DIR || (homedir ? `${homedir}/.nvm` : "");
+  if (!nvmDir) return "none";
+  const raw = readFile(`${nvmDir}/alias/default`);
+  return raw ? raw.trim() || "none" : "none";
+}
+
+// Round 2, Reviewer Important I2 (second link): a write under the usage exporter's own output
+// folder (its data file, status sidecar, lock directory/owner-token file, or atomic-write temp
+// files and rename-tombstones) should not itself trigger a dashboard re-render. Without this, a
+// FAILING exporter run's own status-sidecar rewrite is a vault "modify" event that re-renders
+// the dashboard on every attempt -- the module-level per-snapshot auto-refresh guard
+// (usageAutoRefreshAttempted, main.ts) already stops that re-render from relaunching the
+// exporter again, but the re-render itself is still unnecessary churn this predicate avoids
+// outright, closing a second, independent link in the same loop. Pure string check: derives the
+// exporter's output folder from usageStatsPath (e.g. "Operations/usage/usage-stats.json" ->
+// "Operations/usage") and returns true for that folder itself or anything nested under it.
+export function isUsageExporterOutputPath(path, usageStatsPath) {
+  if (!path || !usageStatsPath) return false;
+  const folder = usageStatsPath.split("/").slice(0, -1).join("/");
+  if (!folder) return false;
+  return path === folder || path.startsWith(folder + "/");
 }
 
 export function resolveAgentConfiguration(agent, frontmatter = {}, userSettings = {}, projectSettings = {}) {
