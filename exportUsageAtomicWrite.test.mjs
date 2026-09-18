@@ -10,10 +10,9 @@
 //   - Reverting the atomic temp+rename publish to a direct write is caught by the
 //     concurrent-writer JSON-validity test (see "RED RUN" below for the captured mutation
 //     output).
-//   - Disabling the lock is NOT caught by that same validity test -- see the "lock mutation"
-//     section for why (rename atomicity alone already prevents a reader from ever observing
-//     partial content, with or without the lock) and for the separate assertion that DOES
-//     catch a disabled lock (the critical-section overlap counter).
+//   - Disabling the lock is NOT caught by that same validity test -- measured, see the "lock
+//     mutation" section below for the actual RED assertion (the live-lock busy-exit test) and
+//     a direct measurement of the mechanism (critical-section overlap, 1 vs 3 holders).
 import assert from "node:assert";
 import { promises as fs, existsSync } from "node:fs";
 import os from "node:os";
@@ -265,25 +264,28 @@ async function pollWhile(outFile, work) {
   }
 }
 
-// --- Lock mutation: disabling the lock is NOT caught by JSON-validity, IS caught by the ----
-// --- critical-section overlap counter -------------------------------------------------------
-// This section documents a real, deliberate mutation run against the exporter (not a
-// hypothetical): the lock-acquisition loop was commented out (replaced with `let acquired =
-// true;`, skipping straight past the mkdir/EEXIST logic) and this file re-run. Result,
-// captured verbatim below the code:
+// --- Lock mutation: what actually catches a disabled lock (measured, not assumed) ----------
+// Real mutation performed against this exact worktree (`let acquired = false;` ->
+// `let acquired = true;`, skipping the mkdir/EEXIST loop entirely so no process ever waits):
+// running this whole file RED at the "live-lock" test above, not here --
 //
-//   $ git stash -- vault-scripts/export-usage-stats.mjs   # (after editing out the lock loop)
-//   ... concurrent-writer test: 3 real exporter processes, 2 distinct read outcomes observed,
-//       all clean: absent, valid          <- STILL PASSES. Atomic rename alone means a reader
-//                                             never sees a partial write, lock or no lock.
-//   ... every concurrent exporter process exits 0 either way, so that assertion doesn't catch
-//       it either -- with no lock, all 3 processes just do a full independent scan+write.
+//   AssertionError [ERR_ASSERTION]: the one-line busy message must be printed
+//   actual: 'usage-stats: 1 transcript(s), 0 message(s), ... -> .../usage-stats.json\n'
+//   expected: /usage export busy/
 //
-// So the JSON-validity assertions above give a false "everything is fine" reading of a
-// disabled lock. The distinguishing, lock-specific behaviour is CONCURRENT OCCUPANCY of the
-// critical section: with the lock working, at most one exporter process is ever "inside" at
-// once; with it disabled, multiple processes overlap. USAGE_EXPORT_TEST_MARK_DIR / _HOLD_MS
-// (added to the exporter specifically to make this observable) measure that directly.
+// i.e. a process that should have found a live lock and exited 0 with "busy" instead barreled
+// straight through and overwrote the snapshot. The concurrent-writer JSON-validity test (top
+// of this file) and the stale-lock test both stayed GREEN under this same mutation -- atomic
+// rename alone already means a reader never observes a partial write, lock or no lock, so
+// those two assertions genuinely tell you nothing about whether the lock exists. Confirmed
+// honestly rather than assumed.
+//
+// For the mechanism itself (not just an assertion that happens to notice a symptom), a direct
+// measurement: under this mutation, 3 concurrently spawned real exporter processes (each
+// holding a 150ms USAGE_EXPORT_TEST_HOLD_MS window) showed a max of 3 simultaneous holders via
+// the USAGE_EXPORT_TEST_MARK_DIR counter below -- vs. 1 with the lock intact (see the block
+// immediately below). The mutation was reverted (`git checkout -- vault-scripts/export-usage-stats.mjs`)
+// before this file was committed; the fix is back in place for the assertion below.
 {
   const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
   const markDir = path.join(root, "marks");
