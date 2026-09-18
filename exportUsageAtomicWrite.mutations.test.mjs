@@ -22,7 +22,8 @@
 // and asserts the mutation's specific, real, captured RED. Run: node
 // exportUsageAtomicWrite.mutations.test.mjs (or `npm run test:mutations`).
 import assert from "node:assert";
-import { promises as fs } from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import {
   makeFixtureRoot,
   outPaths,
@@ -251,6 +252,60 @@ import {
       } finally {
         await fs.chmod(outDir, 0o755);
       }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await cleanup();
+  }
+}
+
+// --- MUTATION (Round 3, Reviewer Minor N1): remove the SIGTERM/SIGINT handler registration.
+// --- A real SIGTERM mid-run must WRONGLY orphan the lock (Node's default signal action ends
+// --- the process immediately, skipping main()'s own owner-checked release). --------------------
+{
+  const needle =
+    '  process.on("SIGTERM", () => { void releaseOwnedLockAndExit(); });\n  process.on("SIGINT", () => { void releaseOwnedLockAndExit(); });\n';
+  const { exporterCli, changed, cleanup } = await makeMutatedExporterCopy((original) => {
+    assert.ok(original.includes(needle), "the SIGTERM/SIGINT handler registration must be present verbatim before mutating it (fixture drift guard)");
+    return original.replace(needle, "");
+  });
+  assert.ok(changed, "the mutation must actually change the source");
+  try {
+    const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+    const { lockFile } = outPaths(vaultRoot);
+    try {
+      const child = spawn(
+        process.execPath,
+        [exporterCli, vaultRoot],
+        {
+          env: {
+            ...process.env,
+            USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot,
+            USAGE_EXPORT_TEST_PI_ROOT: piRoot,
+            USAGE_EXPORT_TEST_BB_ROOT: bbRoot,
+            USAGE_EXPORT_TEST_HOLD_MS: "5000",
+            USAGE_EXPORT_TEST_LOCK_STALE_MS: "60000",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+      const exitPromise = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+      const deadline = Date.now() + 5000;
+      let sawLock = false;
+      while (Date.now() < deadline) {
+        if (existsSync(lockFile)) { sawLock = true; break; }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(sawLock, "sanity: the mutated child must still acquire and hold the lock before this test signals it");
+      child.kill("SIGTERM");
+      const { code, signal } = await exitPromise;
+      assert.equal(
+        existsSync(lockFile),
+        true,
+        `MUTATION CHECK: with the signal handler removed, a real SIGTERM mid-run must WRONGLY leave the lock dir behind (Node's default SIGTERM action skips main()'s own finally) -- got code=${code} signal=${signal}, lock existsSync=${existsSync(lockFile)}`
+      );
+      console.log(`N1 MUTATION (signal handler removed): SIGTERM WRONGLY orphaned the lock (still present at ${lockFile}, exit code=${code} signal=${signal}). Reverted (never touched the tracked file).`);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

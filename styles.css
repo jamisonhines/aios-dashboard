@@ -250,6 +250,15 @@
   width: 15px;
   height: 15px;
 }
+/* tsk-2026-09-18-020: shows the header refresh icon is actively re-running the usage exporter,
+   not just its (near-instant) vault re-read. */
+.aios-dashboard-root .aios-header-actions .aios-refresh.aios-refresh-spinning svg {
+  animation: aios-refresh-spin 900ms linear infinite;
+}
+@keyframes aios-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 
 /* Primary "Ask Dispatch" button: the signature gradient, used sparingly. */
 .aios-dashboard-root .aios-ask-dispatch {

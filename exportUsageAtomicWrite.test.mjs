@@ -28,6 +28,7 @@
 import assert from "node:assert";
 import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import {
   makeFixtureRoot,
   outPaths,
@@ -37,6 +38,7 @@ import {
   runWidenedGapScenario,
   runReleaseOwnershipScenario,
   runHerdIteration,
+  TRACKED_EXPORTER_CLI,
 } from "./exportUsageAtomicWriteHelpers.mjs";
 
 // --- Concurrent-writer test: N real exporter processes, one reader loop -------------------
@@ -431,6 +433,74 @@ import {
     } finally {
       await fs.chmod(outDir, 0o755);
     }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- Round 3, Reviewer Minor N1: a real SIGTERM mid-run must release the lock, not orphan it. --
+// Reviewer round 2, attack 2 measured: the plugin's own 60s hang timeout calls `child.kill()`
+// (SIGTERM, no argument), Node's DEFAULT action for an unhandled SIGTERM ends the process
+// immediately, so the exporter's own owner-checked lock release (main()'s finally) never ran --
+// the next run then falsely reported "a live writer holds the lock" until the orphaned lock aged
+// past LOCK_STALE_MS (~120s default, shortened here so this test does not itself take 2 minutes).
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { lockFile } = outPaths(vaultRoot);
+  try {
+    const child = spawn(
+      process.execPath,
+      [TRACKED_EXPORTER_CLI, vaultRoot],
+      {
+        env: {
+          ...process.env,
+          USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot,
+          USAGE_EXPORT_TEST_PI_ROOT: piRoot,
+          USAGE_EXPORT_TEST_BB_ROOT: bbRoot,
+          // Holds the lock for a while AFTER acquiring it -- long enough that this test can
+          // reliably observe the lock dir on disk and send SIGTERM well before the run would
+          // finish on its own (simulating the plugin's timeout killing a genuinely hung run).
+          USAGE_EXPORT_TEST_HOLD_MS: "5000",
+          USAGE_EXPORT_TEST_LOCK_STALE_MS: "60000",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    const exitPromise = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+
+    // Poll for the real lock dir to appear on disk (acquired, then holding) before signalling --
+    // no fixed sleep, so this is not a race against how fast the child happens to start.
+    const deadline = Date.now() + 5000;
+    let sawLock = false;
+    while (Date.now() < deadline) {
+      if (existsSync(lockFile)) { sawLock = true; break; }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(sawLock, "sanity: the child must actually acquire and hold the lock before this test signals it");
+
+    child.kill("SIGTERM");
+    const { code, signal } = await exitPromise;
+    // The handler calls process.exit(1) itself (not left to die by the raw signal), so `code`
+    // is the deciding field, not `signal` -- a process that installs its own signal handler and
+    // calls process.exit() exits with that code, not `null`/killed-by-signal.
+    assert.equal(code, 1, `SIGTERM must exit non-zero (the handler's own process.exit(1)) -- got code=${code} signal=${signal}, stdout=${JSON.stringify(stdout)} stderr=${JSON.stringify(stderr)}`);
+    assert.equal(
+      existsSync(lockFile),
+      false,
+      `SIGTERM mid-run must release the lock dir, not orphan it -- lock still present at ${lockFile} after exit`
+    );
+    console.log(`N1: real SIGTERM mid-run -> exit code ${code}, lock released (no longer present at ${lockFile})`);
+
+    // The NEXT run must acquire the lock normally (not report busy), proving the release was
+    // real and not merely absent from disk for some other reason (e.g. it was never created).
+    const nextRun = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot });
+    assert.equal(nextRun.code, 0, `the next run after a SIGTERM-released lock must succeed -- got: ${JSON.stringify(nextRun)}`);
+    assert.doesNotMatch(nextRun.stdout, /usage export busy/, `the next run must acquire the lock normally, not find it still (falsely) held -- got: ${JSON.stringify(nextRun.stdout)}`);
+    console.log(`N1: the next run after the SIGTERM acquired the lock normally -- "${nextRun.stdout.trim()}"`);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
