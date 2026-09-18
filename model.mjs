@@ -2809,21 +2809,40 @@ function aliasFor(env, homedir, readFile) {
   return raw ? raw.trim() || "none" : "none";
 }
 
-// Round 2, Reviewer Important I2 (second link): a write under the usage exporter's own output
-// folder (its data file, status sidecar, lock directory/owner-token file, or atomic-write temp
-// files and rename-tombstones) should not itself trigger a dashboard re-render. Without this, a
-// FAILING exporter run's own status-sidecar rewrite is a vault "modify" event that re-renders
-// the dashboard on every attempt -- the module-level per-snapshot auto-refresh guard
-// (usageAutoRefreshAttempted, main.ts) already stops that re-render from relaunching the
-// exporter again, but the re-render itself is still unnecessary churn this predicate avoids
-// outright, closing a second, independent link in the same loop. Pure string check: derives the
-// exporter's output folder from usageStatsPath (e.g. "Operations/usage/usage-stats.json" ->
-// "Operations/usage") and returns true for that folder itself or anything nested under it.
+// Round 2, Reviewer Important I2 (second link) -- NARROWED in round 3 per Reviewer Important I4.
+// The round-2 version matched the entire output FOLDER, which suppressed re-renders for
+// usage-stats.json itself (including the exporter's own atomic-rename publish) and for
+// automation-health.json (a DIFFERENT exporter's output that happens to live in the same
+// folder by default, and drives the header systems-status dot / System tab). That meant
+// another session's SessionStart-hook publish, or an automation-health update, never reached
+// an open dashboard. Round 2's own measurement (R1 in the review) showed the module-level
+// usageAutoRefreshAttempted Set alone already holds the relaunch loop to 1 spawn with NO event
+// filter at all -- the filter only ever bought a reduction in unnecessary re-render churn, so
+// narrowing it to just the exporter's INTERNAL coordination artifacts (never the published
+// data file) keeps the loop closed while restoring live-refresh for real snapshot writes.
+// Matches, relative to the output folder, only:
+//   - the status sidecar (usage-stats.json -> usage-stats.status.json, see statusSidecarPath)
+//   - the lock directory itself, and anything nested under it (owner-token file, the
+//     ".steal-coord" mkdir-lock, and "<lock>.stale-<pid>-<hex>" rename-tombstones, which are
+//     all named "<lockBase>" or "<lockBase>.<suffix>" or "<lockBase>/...")
+//   - the exporter's own atomic-write temp files, named ".<basename>.<pid>.<ts>.tmp" in the
+//     same directory (see writeJsonAtomic in export-usage-stats.mjs)
+// Never usage-stats.json itself, never automation-health.json, never any other file in the
+// folder (e.g. its .md notes).
 export function isUsageExporterOutputPath(path, usageStatsPath) {
   if (!path || !usageStatsPath) return false;
   const folder = usageStatsPath.split("/").slice(0, -1).join("/");
-  if (!folder) return false;
-  return path === folder || path.startsWith(folder + "/");
+  const base = usageStatsPath.split("/").pop();
+  if (!folder || !base) return false;
+  if (!(path === folder || path.startsWith(folder + "/"))) return false;
+  const rel = path === folder ? "" : path.slice(folder.length + 1);
+  if (!rel) return false;
+  const statusName = base.replace(/\.json$/, ".status.json");
+  const lockBase = `${base}.lock`;
+  if (rel === statusName) return true;
+  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;
+  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;
+  return false;
 }
 
 export function resolveAgentConfiguration(agent, frontmatter = {}, userSettings = {}, projectSettings = {}) {

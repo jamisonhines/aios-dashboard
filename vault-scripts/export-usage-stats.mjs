@@ -31,6 +31,17 @@ import { createHash, randomBytes } from "node:crypto";
 const WINDOW_DAYS = 35;
 export const USAGE_DAY_TIME_ZONE = "Asia/Tbilisi";
 
+// Round 3, Reviewer Minor N1: the LIVE lock this process currently owns, if any -- set right
+// after main() successfully acquires it (mkdir + owner-token write both succeeded), cleared once
+// main()'s own finally block has run (whether or not it actually removed the lock dir). Read by
+// the SIGTERM/SIGINT handler below so an interrupted run (a hung exporter killed by the plugin's
+// own 60s timeout, per N1's original defect: `child.kill()` sends SIGTERM and, without this, the
+// lock was orphaned until it aged past LOCK_STALE_MS) can release its OWN lock on the way out,
+// the same owner-checked release main()'s finally already performs on a normal exit -- never an
+// unconditional rm, which would delete a newer holder's live lock out from under it if this
+// process's lock was already stolen after exceeding LOCK_STALE_MS.
+let currentHeldLock = null;
+
 // Per-Mtok rates: { in, out }. Cache read bills at 0.1x input rate, cache write at 1.25x input rate.
 export const RATES = {
   fable: { in: 10, out: 50 },
@@ -1414,6 +1425,7 @@ export async function main({
         throw new Error(`usage export: failed to write lock owner token: ${ownerWriteError?.message || ownerWriteError}`, { cause: ownerWriteError });
       }
       acquired = true;
+      currentHeldLock = { lockFile, ownerToken };
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -1832,13 +1844,43 @@ export async function main({
     if (ownerToken && (await isCurrentOwner(lockFile, ownerToken))) {
       await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});
     }
+    // This run no longer owns (or never acquired) a live lock the signal handler below needs to
+    // know about, whether this finally actually removed it (normal exit) or found it already
+    // stolen (left alone, on purpose, for the new owner).
+    currentHeldLock = null;
   }
+}
+
+// Round 3, Reviewer Minor N1: without a handler, Node's DEFAULT SIGTERM/SIGINT action ends the
+// process immediately -- main()'s own finally block (the owner-checked lock release above) never
+// runs. Measured (Reviewer round 2, attack 2): a `child.kill()` (SIGTERM, the plugin's own 60s
+// hang timeout) orphaned the lock dir; the next run then falsely reported "a live writer holds
+// the lock" for up to LOCK_STALE_MS (~60s) after a 60s timeout, and every concurrent
+// SessionStart-hook export in that window published nothing. `shuttingDown` guards against a
+// second signal (or SIGTERM immediately followed by SIGINT) re-entering this mid-release.
+let shuttingDown = false;
+async function releaseOwnedLockAndExit() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    // Same owner-checked release as main()'s own finally -- never unconditional: if this
+    // process's lock was already stolen (aged past LOCK_STALE_MS) by a newer holder before the
+    // signal arrived, an unconditional rm here would delete THAT holder's live lock instead.
+    if (currentHeldLock && (await isCurrentOwner(currentHeldLock.lockFile, currentHeldLock.ownerToken))) {
+      await fs.rm(currentHeldLock.lockFile, { recursive: true, force: true }).catch(() => {});
+    }
+  } catch {
+    // Best-effort: a release failure here must not prevent the process from exiting.
+  }
+  process.exit(1);
 }
 
 // Run only on direct execution (node export-usage-stats.mjs ...), never on import.
 const isDirectRun =
   process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isDirectRun) {
+  process.on("SIGTERM", () => { void releaseOwnedLockAndExit(); });
+  process.on("SIGINT", () => { void releaseOwnedLockAndExit(); });
   main().catch((e) => {
     if (e?.code === "USAGE_EXPORT_BUSY") {
       // Not a failure: another writer holds the lock and is producing an equally fresh

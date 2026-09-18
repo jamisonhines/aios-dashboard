@@ -2686,12 +2686,23 @@ let usageRefreshInFlight: Promise<UsageRefreshResult> | null = null;
 // whether it was woken by this run's own header-triggered refresh(), or by an unrelated redraw
 // that just happens to run later -- sees the same, current answer.
 let lastUsageRefreshResult: UsageRefreshResult | null = null;
-// Round 2, Reviewer Minor M4: the wall-clock time settle() recorded the above result. Read at
-// draw() time -- if the snapshot CURRENTLY being displayed was generated AFTER this timestamp,
-// something else (another writer entirely, not necessarily this plugin's own refreshUsageSnapshot)
-// has since produced a newer snapshot, so the old failure/busy text is moot and must not stick
-// next to fresh data forever.
+// Round 2, Reviewer Minor M4: the wall-clock time settle() recorded the above result.
 let lastUsageRefreshResultAt = 0;
+// Round 3, Reviewer Minor N3: `generatedAt` is the EXPORTER's start time, stamped when a run
+// begins (export-usage-stats.mjs writes `now` on entry to main()), not when it finishes or
+// publishes. A busy result by definition means another writer already held the lock BEFORE us,
+// so its eventual snapshot's `generatedAt` is always earlier than our own busy settle -- a
+// time-ordering comparison against `lastUsageRefreshResultAt` (round 2's fix, wall-clock vs
+// wall-clock is fine, but wall-clock vs the OTHER writer's start-stamp is the wrong test) can
+// therefore never clear a busy message, since the fresh snapshot it should clear against is
+// always "older" than our settle by that measure (Reviewer round 2, R5/R5f). Fix: capture the
+// generatedAt that was CURRENTLY DISPLAYED at the moment THIS run started (before spawning,
+// inside refreshUsageSnapshot's executor -- see generatedAtWhenStarted there), store it here
+// alongside the result, and at draw() time compare the CURRENTLY DISPLAYED generatedAt against
+// this stored value for INEQUALITY, not time order. Any snapshot identity change since our run
+// started -- earlier or later, our own success or any other writer's -- clears the stuck
+// message. "" (never loaded / unparseable at start) is a real, comparable value, not a sentinel.
+let lastUsageRefreshResultForGeneratedAt = "";
 // Round 2, Reviewer Important I2 (see renderUsageTab's own comment for the full mechanism):
 // module-level, keyed by `${statsPath}|${generatedAt}`, so an auto-triggered attempt for a
 // given snapshot identity happens at most once per plugin load, regardless of how many times
@@ -2769,8 +2780,12 @@ function resolveNodeForExporter(): { command: string | null; reason: string | nu
 // failure well before the lock-recovery machinery would even consider a legitimately slow run
 // abandoned, and never races that mechanism's own recovery.
 const USAGE_EXPORT_TIMEOUT_MS = 60_000;
-function refreshUsageSnapshot(app: App): Promise<UsageRefreshResult> {
+function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageRefreshResult> {
   if (usageRefreshInFlight) return usageRefreshInFlight;
+  // Round 3, Reviewer Minor N3: captured ONCE, here, at the moment this call actually STARTS a
+  // new run (not when a later caller joins the in-flight promise above) -- the identity of the
+  // snapshot on disk right before we touch anything.
+  const generatedAtWhenStarted = usageLastGood.get(statsPath)?.generatedAt || "";
   usageRefreshInFlight = new Promise<UsageRefreshResult>((resolve) => {
     // Round 2, I1: settled exactly once, however it happens (normal exit, spawn error, or the
     // timeout below racing an exit that arrives in the same tick) -- without this guard a
@@ -2788,6 +2803,7 @@ function refreshUsageSnapshot(app: App): Promise<UsageRefreshResult> {
       if (timeoutHandle !== null) clearTimeout(timeoutHandle);
       lastUsageRefreshResult = result;
       lastUsageRefreshResultAt = Date.now();
+      lastUsageRefreshResultForGeneratedAt = generatedAtWhenStarted;
       resolve(result);
     };
     try {
@@ -3632,14 +3648,16 @@ function renderUsageTab(
       // very next redraw, same as everything else draw() renders.
       const generated = Date.parse(stats.generatedAt || "");
       const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
-      // Round 2, Reviewer Minor M4: once a NEWER snapshot than the recorded failure/busy result
-      // appears -- from ANY writer, not only this plugin's own refreshUsageSnapshot calls -- the
-      // old result is moot and must stop being shown next to fresh data. `generated` compares
-      // against the WALL-CLOCK time the result was recorded (lastUsageRefreshResultAt), not
-      // against another generatedAt, so this also correctly clears a stuck message once an
-      // external writer (e.g. the SessionStart hook) succeeds after this plugin's own attempt
-      // failed. `NaN > x` is always false, so an unparseable generatedAt never clears anything.
-      const effectiveResult = Number.isFinite(generated) && generated > lastUsageRefreshResultAt ? null : lastUsageRefreshResult;
+      // Round 3, Reviewer Minor N3 (supersedes round 2's wall-clock-vs-generatedAt comparison,
+      // which never cleared a BUSY result -- see lastUsageRefreshResultForGeneratedAt's comment
+      // above): once the snapshot identity CURRENTLY displayed differs from the one that was
+      // displayed when our run started -- from ANY writer, not only this plugin's own
+      // refreshUsageSnapshot calls, and regardless of whether the change happened before or
+      // after our settle -- the old result is moot and must stop being shown next to fresh data.
+      const effectiveResult =
+        lastUsageRefreshResult !== null && (stats.generatedAt || "") !== lastUsageRefreshResultForGeneratedAt
+          ? null
+          : lastUsageRefreshResult;
       // tsk-2026-09-18-020, D-2026-09-18-02 "one button": reads MODULE-LEVEL state
       // (usageRefreshInFlight / effectiveResult), not a per-tab-instance flag -- a run triggered
       // by the header icon must be visible here even though this tab's own doRefresh never
@@ -3676,7 +3694,7 @@ function renderUsageTab(
         // tab from scratch AFTER usageRefreshInFlight is already set, so its refreshStatusText
         // computation sees `refreshing` correctly from the start.
         refreshStatus.setText("Refreshing usage snapshot...");
-        refreshUsageSnapshot(app)
+        refreshUsageSnapshot(app, settings.usageStatsPath)
           .then((result) =>
             Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(
               ([fresh]) => ({ fresh, result })
@@ -3709,10 +3727,20 @@ function renderUsageTab(
       // started one moments before this render) -- refreshUsageSnapshot would only join that
       // same promise anyway (no second spawn), so this just avoids an entirely redundant extra
       // continuation for the exact same in-flight run.
+      // Round 3, Reviewer Minor N2: the key is now marked as soon as we decide THIS snapshot
+      // identity is due for an auto-attempt, even when a run is already in flight (e.g. a
+      // header click started one moments before this render) -- previously the `!refreshing`
+      // guard was INSIDE the marking condition, so a skip-because-busy never recorded the key,
+      // and the header's post-settle refresh() would find it still unattempted and launch a
+      // SECOND exporter for the exact same stale snapshot the first run had just finished
+      // failing/reporting busy on (Reviewer measured 2 launches per click). Marking is now
+      // unconditional on `refreshing`; only the ACTUAL trigger (doRefresh, which would spawn a
+      // redundant continuation onto the same in-flight promise -- never a second process, see
+      // refreshUsageSnapshot's own dedupe) still skips while a run is already active.
       const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;
-      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {
+      if (stale && !usageAutoRefreshAttempted.has(autoRefreshKey)) {
         usageAutoRefreshAttempted.add(autoRefreshKey);
-        void doRefresh();
+        if (!refreshing) void doRefresh();
       }
 
       const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date(), stats.dayTimeZone);
@@ -5516,7 +5544,7 @@ function renderDashboard(
       // how many callers attach a continuation to it; the only cost of attaching on every click
       // is a possible extra redundant re-render if several clicks land during one run, which is
       // cheap next to a permanently stuck disabled control.
-      void refreshUsageSnapshot(app).finally(() => refresh());
+      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());
     }
     refresh();
   });
@@ -6238,7 +6266,13 @@ export default class AiosDashboardPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", onChange));
     this.registerEvent(
       this.app.vault.on("rename", (file: { path?: string }, oldPath: string) => {
-        if (isUsageOutputFile(file?.path) || isUsageOutputFile(oldPath)) return;
+        // Round 3, Reviewer Important I4: AND, not OR. The exporter's atomic publish IS a
+        // rename (its temp file -> usage-stats.json), so the OLD side is always an internal
+        // artifact (the temp file) while the NEW side is the real published data -- an OR check
+        // suppressed that publish outright, the exact regression I4 measured. Suppress only when
+        // BOTH endpoints are exporter-internal (e.g. a stale-lock rename: lock dir -> tombstone,
+        // both internal); any rename where either endpoint is real, visible data still refreshes.
+        if (isUsageOutputFile(file?.path) && isUsageOutputFile(oldPath)) return;
         this.scheduleRefresh();
       })
     );

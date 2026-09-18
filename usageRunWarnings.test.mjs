@@ -285,11 +285,20 @@ function installFakeChildProcess(spawnOutcomeProvider, { fsExists = null } = {})
           // spawns to prove its point, later calls hang forever instead of continuing to
           // recurse, so the chain terminates without any timing-dependent cap.
           if (outcome) {
-            queueMicrotask(() => {
+            // Round 3, N2: a MACROTASK (setTimeout), not a microtask -- a real child process's
+            // "exit" event arrives through Node's event loop (a genuine I/O/OS event), never the
+            // microtask queue, and in production the exporter takes several SECONDS, comfortably
+            // after any renderer-side vault read (also async, but resolving in milliseconds) has
+            // long since finished. A microtask-scheduled fake exit could resolve BEFORE a
+            // just-triggered re-render's own async Promise.all(loadUsageStats, loadUsageRunStatus)
+            // chain finishes -- measured directly: it produced a genuine extra exporter launch in
+            // the N2 test below, from two concurrently in-flight render passes each finding the
+            // auto-refresh key unmarked, a race that cannot happen at real relative timings.
+            setTimeout(() => {
               if (outcome.stdout) for (const cb of listeners.data) cb(Buffer.from(outcome.stdout));
               if (outcome.stderr) for (const cb of errListeners) cb(Buffer.from(outcome.stderr));
               for (const cb of listeners.exit) cb(outcome.code);
-            });
+            }, 0);
           }
           return child;
         },
@@ -617,12 +626,12 @@ async function renderUsageTabToCompletion({
     const declareNeedle = "    const STALE_THRESHOLD_MS = 15 * 60 * 1000;\n";
     assert.ok(source.includes(declareNeedle), "the STALE_THRESHOLD_MS declaration must be present verbatim (fixture drift guard)");
     const conditionNeedle =
-      '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        void doRefresh();\n      }';
+      '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        if (!refreshing) void doRefresh();\n      }';
     assert.ok(source.includes(conditionNeedle), "the module-level auto-refresh guard block must be present verbatim before mutating it (fixture drift guard)");
     let mutated = source.replace(declareNeedle, `${declareNeedle}    let mutatedRenderScopeGuard = false;\n`);
     mutated = mutated.replace(
       conditionNeedle,
-      '      if (stale && !refreshing && !mutatedRenderScopeGuard) {\n        mutatedRenderScopeGuard = true;\n        void doRefresh();\n      }'
+      '      if (stale && !mutatedRenderScopeGuard) {\n        mutatedRenderScopeGuard = true;\n        if (!refreshing) void doRefresh();\n      }'
     );
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
@@ -748,6 +757,14 @@ async function renderDashboardToCompletion({
   // installFakeChildProcess call that would otherwise clobber it before this module loads.
   installChildProcess = true,
   isDesktop = true,
+  // Round 3, N2/N3: lets a test control the loaded snapshot's generatedAt directly (default:
+  // "now", i.e. fresh at mount, unchanged from before this option existed) and, separately,
+  // advance/replace it on SUBSEQUENT reads (statsReadCount-indexed, same "sticks on the last
+  // entry" convention as renderUsageTabToCompletion's generatedAtSequence) -- needed so a test
+  // can simulate a fresh load followed by another writer's newer snapshot appearing later,
+  // without waiting on real exporter output.
+  generatedAt = null,
+  generatedAtSequence = null,
 } = {}) {
   resetCreationLog();
   resetSpawnLog();
@@ -799,7 +816,22 @@ async function renderDashboardToCompletion({
       alias: { obsidian: stub },
     });
     const { __renderDashboard: renderDashboard, __DEFAULT_SETTINGS: DEFAULT_SETTINGS } = await import(pathToFileURL(out).href);
-    const statsJson = JSON.stringify({ generatedAt: new Date().toISOString(), days: [], projects: [], windowDays: 35 });
+    let statsReadCount = 0;
+    // Fixed once, at mount, not re-evaluated per read: every earlier test in this file relies on
+    // repeated reads of the SAME unchanged snapshot returning the IDENTICAL generatedAt string
+    // (identity-stable), matching the pre-round-3 behaviour where this was a single `const`
+    // computed once outside this function.
+    const defaultGeneratedAt = generatedAt ?? new Date().toISOString();
+    const statsJsonFor = () => {
+      let value = defaultGeneratedAt;
+      if (generatedAtSequence && generatedAtSequence.length > 0) {
+        const idx = Math.min(statsReadCount, generatedAtSequence.length - 1);
+        const entry = generatedAtSequence[idx];
+        value = typeof entry === "function" ? entry() : entry;
+      }
+      statsReadCount++;
+      return JSON.stringify({ generatedAt: value, days: [], projects: [], windowDays: 35 });
+    };
     const app = {
       vault: {
         getMarkdownFiles() { return []; },
@@ -807,7 +839,7 @@ async function renderDashboardToCompletion({
         adapter: {
           basePath: "/fake/vault",
           async exists(p) { return p.endsWith("usage-stats.json"); },
-          async read(_p) { return statsJson; },
+          async read(_p) { return statsJsonFor(); },
         },
       },
       metadataCache: { getFileCache() { return undefined; }, unresolvedLinks: {} },
@@ -901,9 +933,9 @@ async function renderDashboardToCompletion({
   // regardless of Platform.isDesktop or in-flight state. Removing it must leave the click
   // with NO visible effect until the exporter settles seconds later.
   const removeImmediateRefresh = (source) => {
-    const needle = "      void refreshUsageSnapshot(app).finally(() => refresh());\n    }\n    refresh();\n  });";
+    const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n    refresh();\n  });";
     assert.ok(source.includes(needle), "the click handler's trailing refresh() call must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app).finally(() => refresh());\n    }\n  });");
+    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n  });");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
@@ -1108,28 +1140,28 @@ async function renderDashboardToCompletion({
   console.log(`I1 (hung exporter): kill() called, icon un-stuck, status = "${statusNode.text}"`);
 }
 
-// --- Round 2, Reviewer Minor M4: a failure message must clear once a NEWER snapshot appears,
-// --- from ANY writer (not only this plugin's own refreshUsageSnapshot calls). ------------------
+// --- Round 2/3, Reviewer Minor M4/N3: a failure OR busy message must clear once a snapshot
+// --- with a DIFFERENT identity than the one shown when our run started appears, from ANY
+// --- writer (not only this plugin's own refreshUsageSnapshot calls). Round 2's fix (compare
+// --- the CURRENT generatedAt against the WALL-CLOCK time our result settled) closed this for a
+// --- failure the writer's snapshot appears AFTER, but Reviewer round 2 (R5/R5f) measured it
+// --- never clears a BUSY result: `generatedAt` is the exporter's START time, so a writer that
+// --- was already holding the lock before we even tried (which is what "busy" means) always has
+// --- an EARLIER generatedAt than our busy settle, so the old "generated > lastUsageRefreshResultAt"
+// --- comparison was always false for that case. Round 3 fixes this by comparing snapshot
+// --- IDENTITY (the generatedAt string itself, captured at the moment our run started vs. the
+// --- one currently displayed) for INEQUALITY instead of comparing timestamps for order. --------
 {
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-  // A thunk, not a value captured now: evaluated lazily at the actual read instant (strictly
-  // after the failure settles and records lastUsageRefreshResultAt), so it is reliably NEWER in
-  // wall-clock terms, not a value that happened to be captured a few ms before this test's own
-  // setup work ran. +1000ms (not just "now"): everything in this fake-timer test runs
-  // synchronously/microtask-fast enough that "now" at read time can land on the EXACT SAME
-  // millisecond as lastUsageRefreshResultAt's Date.now() a few lines earlier -- a real tie, not
-  // a test bug -- and the production code's `generated > lastUsageRefreshResultAt` is a strict
-  // inequality (correctly: equal timestamps are not "newer"). The 1s margin only exists to give
-  // this synthetic test a real, unambiguous gap; it says nothing about real-world timing.
-  const justNow = () => new Date(Date.now() + 1000).toISOString();
+  const anotherWritersSnapshot = () => new Date(Date.now() + 1000).toISOString();
   const failOnceProvider = (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null);
   // First read (the initial load): stale, triggers the auto-refresh, which fails.
-  // Second read (after the failed run's own reload inside doRefresh): a FRESH, non-stale
-  // snapshot -- simulating another writer (e.g. the SessionStart hook) having produced a newer
-  // snapshot in the meantime.
+  // Second read (after the failed run's own reload inside doRefresh): a snapshot with a
+  // DIFFERENT identity -- simulating another writer (e.g. the SessionStart hook) having
+  // produced a newer snapshot in the meantime.
   const tree = await renderUsageTabToCompletion({
     statusJson: null,
-    generatedAtSequence: [twoHoursAgo, justNow, justNow],
+    generatedAtSequence: [twoHoursAgo, anotherWritersSnapshot, anotherWritersSnapshot],
     basePath: "/fake/vault",
     spawnOutcomeProvider: failOnceProvider,
     settleMs: 250,
@@ -1139,34 +1171,144 @@ async function renderDashboardToCompletion({
   assert.doesNotMatch(
     statusNode.text,
     /Refresh failed/,
-    `M4: once a snapshot NEWER than the recorded failure appears, the old failure text must clear -- got: ${JSON.stringify(statusNode.text)}`
+    `M4/N3 (failure): once a snapshot with a DIFFERENT identity than the recorded failure appears, the old failure text must clear -- got: ${JSON.stringify(statusNode.text)}`
   );
-  assert.doesNotMatch(statusNode.text, /\(stale\)/, "M4: the newer snapshot is fresh, so no stale suffix either");
-  console.log(`M4: failure text cleared once a newer snapshot appeared -- final status: "${statusNode.text}"`);
+  assert.doesNotMatch(statusNode.text, /\(stale\)/, "M4/N3: the newer snapshot is fresh, so no stale suffix either");
+  console.log(`M4/N3 (failure): failure text cleared once a newer-identity snapshot appeared -- final status: "${statusNode.text}"`);
 
-  // --- MUTATION: remove the "newer snapshot clears it" check. ------------------------------
-  const removeNewerClearsCheck = (source) => {
-    const needle = "const effectiveResult = Number.isFinite(generated) && generated > lastUsageRefreshResultAt ? null : lastUsageRefreshResult;";
+  // --- N3, the case round 2 could not close: a BUSY result overlapping a writer that started
+  // --- (and whose snapshot's generatedAt is stamped) BEFORE our own busy settle. ---------------
+  const busyOnceProvider = (callIndex) => (callIndex === 0 ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null);
+  // The other writer's generatedAt is EARLIER than "now" (it started before us, which is what
+  // busy means) -- exactly the shape round 2's time-ordering comparison could never clear.
+  const earlierWritersSnapshot = () => new Date(Date.now() - 5000).toISOString();
+  const busyTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAtSequence: [twoHoursAgo, earlierWritersSnapshot, earlierWritersSnapshot],
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: busyOnceProvider,
+    settleMs: 250,
+  });
+  const busyStatusNode = findByClass(busyTree, "aios-usage-refresh-status");
+  assert.ok(busyStatusNode, "a refresh-status node must exist after the busy run's overlapping writer settles in");
+  assert.doesNotMatch(
+    busyStatusNode.text,
+    /Another export was already in progress/,
+    `N3 (busy): once a DIFFERENT-identity snapshot appears -- even one whose generatedAt is EARLIER than our busy settle -- the stuck busy message must clear -- got: ${JSON.stringify(busyStatusNode.text)}`
+  );
+  console.log(`N3 (busy): busy text cleared once a different-identity (earlier-stamped) snapshot appeared -- final status: "${busyStatusNode.text}"`);
+
+  // --- MUTATION: remove the "different identity clears it" check. --------------------------
+  const removeIdentityClearsCheck = (source) => {
+    const needle =
+      '      const effectiveResult =\n        lastUsageRefreshResult !== null && (stats.generatedAt || "") !== lastUsageRefreshResultForGeneratedAt\n          ? null\n          : lastUsageRefreshResult;';
     assert.ok(source.includes(needle), "the effectiveResult computation must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "const effectiveResult = lastUsageRefreshResult;");
+    const mutated = source.replace(needle, "      const effectiveResult = lastUsageRefreshResult;");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
   const mutatedTree = await renderUsageTabToCompletion({
     statusJson: null,
-    generatedAtSequence: [twoHoursAgo, justNow, justNow],
+    generatedAtSequence: [twoHoursAgo, anotherWritersSnapshot, anotherWritersSnapshot],
     basePath: "/fake/vault",
     spawnOutcomeProvider: failOnceProvider,
-    mutateSource: removeNewerClearsCheck,
+    mutateSource: removeIdentityClearsCheck,
     settleMs: 250,
   });
   const mutatedStatus = findByClass(mutatedTree, "aios-usage-refresh-status");
   assert.match(
     mutatedStatus.text,
     /Refresh failed/,
-    `MUTATION CHECK: with the "newer snapshot clears it" check removed, the stale failure text must WRONGLY stick next to fresh data -- got: ${JSON.stringify(mutatedStatus.text)}`
+    `MUTATION CHECK: with the "different identity clears it" check removed, the stale failure text must WRONGLY stick next to fresh data -- got: ${JSON.stringify(mutatedStatus.text)}`
   );
-  console.log(`M4 MUTATION (clear-check removed): failure text WRONGLY stuck -- "${mutatedStatus.text}". Reverted (never touched the tracked file).`);
+  console.log(`M4/N3 MUTATION (clear-check removed): failure text WRONGLY stuck -- "${mutatedStatus.text}". Reverted (never touched the tracked file).`);
+
+  const mutatedBusyTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAtSequence: [twoHoursAgo, earlierWritersSnapshot, earlierWritersSnapshot],
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: busyOnceProvider,
+    mutateSource: removeIdentityClearsCheck,
+    settleMs: 250,
+  });
+  const mutatedBusyStatus = findByClass(mutatedBusyTree, "aios-usage-refresh-status");
+  assert.match(
+    mutatedBusyStatus.text,
+    /Another export was already in progress/,
+    `MUTATION CHECK (busy): with the "different identity clears it" check removed, the stuck busy text must WRONGLY stick next to fresh data -- got: ${JSON.stringify(mutatedBusyStatus.text)}`
+  );
+  console.log(`N3 MUTATION (busy, clear-check removed): busy text WRONGLY stuck -- "${mutatedBusyStatus.text}". Reverted (never touched the tracked file).`);
+}
+
+// --- Round 3, Reviewer Minor N2: one HEADER CLICK on a snapshot that went stale WHILE
+// --- DISPLAYED (no re-render happened while it aged, so the Usage tab's own auto-refresh never
+// --- got a chance to see it stale before the click) must cause exactly ONE exporter launch, not
+// --- two. Mechanism Reviewer measured: the click starts a run (usageRefreshInFlight set) and
+// --- immediately re-renders; that re-render's draw() sees `stale=true, refreshing=true` and,
+// --- with the OLD code, skipped marking the auto-refresh key at all (only marked inside the
+// --- `!refreshing` branch) -- so once the run settles (fail or busy) and the header's own
+// --- `.finally(() => refresh())` re-renders again with `refreshing=false`, the key is STILL
+// --- unmarked and the Usage tab's own auto-refresh trigger launches a SECOND exporter for the
+// --- exact same stale snapshot the click's run just finished on.
+// --- STALE_THRESHOLD_MS is shrunk (source mutation, never the tracked file) so the snapshot
+// --- becomes stale from ordinary wall-clock elapsed time within the test itself, without a
+// --- second render evaluating staleness before the click -- exactly the real shape ("ages past
+// --- 15 min while displayed, no re-render in between").
+{
+  const shrinkStaleThreshold = (source) => {
+    const needle = "    const STALE_THRESHOLD_MS = 15 * 60 * 1000;\n";
+    assert.ok(source.includes(needle), "the STALE_THRESHOLD_MS declaration must be present verbatim (fixture drift guard)");
+    const mutated = source.replace(needle, "    const STALE_THRESHOLD_MS = 80;\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  async function oneClickOnAgedStaleSnapshot({ spawnOutcomeProvider, mutateSource }) {
+    // generatedAt defaults to "now" (fresh at mount, so the FIRST post-load draw -- which
+    // happens within a few ms, well under even the shrunk 80ms threshold -- does not see it as
+    // stale and does not auto-trigger on its own). renderDashboardToCompletion's own internal
+    // 150ms settle wait, before it ever returns control to this test, already exceeds 80ms with
+    // no re-render having happened in between -- by the time this test clicks, the snapshot has
+    // aged past the (mutated) threshold purely from elapsed wall-clock time.
+    const h = await renderDashboardToCompletion({ spawnOutcomeProvider, mutateSource: (src) => shrinkStaleThreshold(mutateSource ? mutateSource(src) : src) });
+    assert.equal(spawnLog.length, 0, "sanity: no exporter launch before any click, even though the snapshot ages during the settle wait");
+    h.getRefreshBtn().click();
+    await h.settle(300);
+    return spawnLog.length;
+  }
+
+  const failingSpawns = await oneClickOnAgedStaleSnapshot({
+    spawnOutcomeProvider: (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null),
+  });
+  assert.equal(failingSpawns, 1, `N2 (failing): one header click on a snapshot that aged stale while displayed must give exactly 1 launch -- got ${failingSpawns}`);
+
+  const busySpawns = await oneClickOnAgedStaleSnapshot({
+    spawnOutcomeProvider: (callIndex) => (callIndex === 0 ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null),
+  });
+  assert.equal(busySpawns, 1, `N2 (busy): one header click on a snapshot that aged stale while displayed must give exactly 1 launch -- got ${busySpawns}`);
+  console.log(`N2: one click on an aged-stale snapshot -> exactly 1 launch for both failing (${failingSpawns}) and busy (${busySpawns}) outcomes.`);
+
+  // --- MUTATION: restore the OLD shape -- mark-and-trigger both gated on `!refreshing`. -------
+  const restoreMarkInsideRefreshingGuard = (source) => {
+    const needle =
+      '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        if (!refreshing) void doRefresh();\n      }';
+    assert.ok(source.includes(needle), "the N2-fixed auto-refresh guard block must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(
+      needle,
+      '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        void doRefresh();\n      }'
+    );
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedFailingSpawns = await oneClickOnAgedStaleSnapshot({
+    spawnOutcomeProvider: (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null),
+    mutateSource: restoreMarkInsideRefreshingGuard,
+  });
+  assert.equal(
+    mutatedFailingSpawns,
+    2,
+    `MUTATION CHECK: with marking gated back on !refreshing, one click on an aged-stale snapshot must WRONGLY give 2 launches (the settle-triggered redraw re-arms the Usage tab's own auto-refresh) -- got ${mutatedFailingSpawns}`
+  );
+  console.log(`N2 MUTATION (mark gated back on !refreshing): 1 click -> WRONGLY ${mutatedFailingSpawns} launches. Reverted (never touched the tracked file).`);
 }
 
 // --- Round 2, Reviewer Minor M5: a failed refresh must be visible even when generatedAt cannot
@@ -1233,9 +1375,9 @@ async function renderDashboardToCompletion({
   console.log("M6 (post-settle re-render): icon un-stuck after a normal run settles.");
 
   const removePostSettleRefresh = (source) => {
-    const needle = "      void refreshUsageSnapshot(app).finally(() => refresh());\n";
+    const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n";
     assert.ok(source.includes(needle), "the post-settle continuation must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app);\n");
+    const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath);\n");
     assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
@@ -1277,6 +1419,214 @@ async function renderDashboardToCompletion({
     `MUTATION CHECK: with the mobile gate removed, a click on mobile must WRONGLY launch the exporter -- got ${spawnLog.length} spawns`
   );
   console.log(`M6 MUTATION (mobile gate removed): mobile click WRONGLY launched the exporter (${spawnLog.length} spawn). Reverted (never touched the tracked file).`);
+}
+
+// --- 6. Round 3, Reviewer Important I4: the vault-event filter must not hide FRESH data. -------
+// Round 2's isUsageExporterOutputPath (model.mjs) suppressed re-renders for the WHOLE
+// Operations/usage folder, including usage-stats.json itself (the exporter's own atomic-rename
+// publish) and automation-health.json (a DIFFERENT exporter's output, drives the header
+// systems-status dot). That meant another session's SessionStart-hook publish never reached an
+// open dashboard. Round 3 narrows the predicate to the status sidecar, the lock dir, and
+// temp/tombstone names only (see model.mjs's updated comment) -- proven here through the REAL
+// AiosDashboardPlugin.onload() vault listeners, the way the Reviewer measured it, not a direct
+// unit call on the pure predicate alone (that is covered separately, this proves the WIRING).
+async function renderOnloadListeners({ mutateSource = null, mutateModelSource = null } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "onload-listeners-"));
+  const stub = path.join(dir, "obsidian.mjs");
+  const entryName = ".onload-listeners-entry.ts";
+  const entry = path.join(root, entryName);
+  const out = path.join(dir, "out.mjs");
+  // isUsageExporterOutputPath lives in model.mjs, imported by main.ts via a RELATIVE specifier
+  // ("./model.mjs") -- mutating main.ts's own source text cannot reach it, and model.mjs itself
+  // has its OWN relative/cross-tree imports (taskIdClaim.mjs, ../../AIOS/Operations/scripts/lib/
+  // coordination-*.mjs), so copying a mutated model.mjs into an isolated temp dir breaks THOSE.
+  // Instead: a tiny override module, placed next to the REAL model.mjs (so ITS relative imports
+  // still resolve normally, never copied or touched), re-exports everything from the real
+  // model.mjs via `export *` and then locally re-declares ONLY isUsageExporterOutputPath (in
+  // ESM, a local named export always wins over a star-reexport of the same name -- standard,
+  // not esbuild-specific behaviour) -- the real model.mjs file itself is never written to, only
+  // read, so a crash/SIGINT here leaves nothing but this file's own scratch file on disk (removed
+  // in `finally` below, same as the entry file).
+  const modelOverrideName = ".onload-listeners-model-override.mjs";
+  const modelOverride = path.join(root, modelOverrideName);
+  let usingModelOverride = false;
+  if (mutateModelSource) {
+    const isUsageExporterOutputPathSource =
+      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
+    const mutatedFn = mutateModelSource(isUsageExporterOutputPathSource);
+    fs.writeFileSync(modelOverride, `export * from "./model.mjs";\n${mutatedFn}\n`);
+    usingModelOverride = true;
+  }
+  fs.writeFileSync(
+    stub,
+    [
+      "export class App {}", "export class ItemView {}", "export class Menu {}", "export class Modal {}", "export class Notice {}",
+      "export const Platform = { isDesktop: true };",
+      // Real constructor + no-op lifecycle methods: onload() calls loadSettings (-> loadData),
+      // addSettingTab, registerView, addRibbonIcon, addCommand, registerMarkdownCodeBlockProcessor,
+      // and registerEvent -- all must be callable and non-throwing for a real onload() to run to
+      // completion, same discipline as this file's other real-render harnesses.
+      "export class Plugin {",
+      "  constructor(app, manifest) { this.app = app; this.manifest = manifest; }",
+      "  addSettingTab() {}",
+      "  registerView() {}",
+      "  addRibbonIcon() {}",
+      "  addCommand() {}",
+      "  registerMarkdownCodeBlockProcessor() {}",
+      "  registerEvent() {}",
+      "  register() {}",
+      "  loadData() { return Promise.resolve({}); }",
+      "  saveData() { return Promise.resolve(); }",
+      "}",
+      "export class PluginSettingTab { constructor() {} }",
+      "export class Scope {}",
+      "export class Setting {}",
+      "export class TFile {}",
+      "export class TFolder {}",
+      "export class WorkspaceLeaf {}",
+      "export const normalizePath = (p) => p;",
+      "export const setIcon = () => {};",
+    ].join("\n")
+  );
+  let mainSource = fs.readFileSync(path.join(root, "main.ts"), "utf8");
+  if (mutateSource) mainSource = mutateSource(mainSource);
+  if (usingModelOverride) {
+    const needle = '} from "./model.mjs";';
+    if (!mainSource.includes(needle)) throw new Error("main.ts's model.mjs import must be present verbatim (fixture drift guard)");
+    mainSource = mainSource.replace(needle, `} from "./${modelOverrideName}";`);
+  }
+  fs.writeFileSync(entry, mainSource + "\nexport { AiosDashboardPlugin as __AiosDashboardPlugin };\n");
+  try {
+    esbuild.buildSync({
+      absWorkingDir: root,
+      entryPoints: [entryName],
+      bundle: true,
+      format: "esm",
+      outfile: out,
+      treeShaking: false,
+      external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"],
+      alias: { obsidian: stub },
+    });
+    const { __AiosDashboardPlugin: AiosDashboardPlugin } = await import(pathToFileURL(out).href);
+    const vaultListeners = { create: [], delete: [], modify: [], rename: [] };
+    const metadataListeners = { changed: [], resolved: [] };
+    const app = {
+      vault: {
+        on(event, cb) {
+          (vaultListeners[event] ||= []).push(cb);
+          return { event, cb };
+        },
+        adapter: { basePath: "/fake/vault" },
+        getMarkdownFiles() { return []; },
+      },
+      metadataCache: {
+        on(event, cb) {
+          (metadataListeners[event] ||= []).push(cb);
+          return { event, cb };
+        },
+      },
+      workspace: { getLeavesOfType() { return []; } },
+    };
+    const plugin = new AiosDashboardPlugin(app, {});
+    let scheduleRefreshCount = 0;
+    // scheduleRefresh is looked up dynamically off `this` inside every registered listener
+    // closure (`() => this.scheduleRefresh()` / the `onChange` closure calling
+    // `this.scheduleRefresh()`), so overriding the instance property AFTER onload() has already
+    // registered the listeners still intercepts every call -- JS property lookup on `this.x()`
+    // is late-bound, not captured at closure-creation time.
+    plugin.scheduleRefresh = () => { scheduleRefreshCount++; };
+    await plugin.onload();
+    return {
+      fireVault(event, file, oldPath) {
+        for (const cb of vaultListeners[event] || []) cb(file, oldPath);
+      },
+      fireMetadata(event, file) {
+        for (const cb of metadataListeners[event] || []) cb(file);
+      },
+      getScheduleRefreshCount: () => scheduleRefreshCount,
+      resetScheduleRefreshCount: () => { scheduleRefreshCount = 0; },
+    };
+  } finally {
+    fs.rmSync(entry, { force: true });
+    if (usingModelOverride) fs.rmSync(modelOverride, { force: true });
+  }
+}
+
+{
+  const cases = [
+    // [description, event bucket, fire fn, expected scheduleRefresh calls]
+    ["usage-stats.json publish (modify)", () => 1, async (h) => h.fireVault("modify", { path: "Operations/usage/usage-stats.json" })],
+    ["usage-stats.json publish (atomic rename)", () => 1, async (h) => h.fireVault("rename", { path: "Operations/usage/usage-stats.json" }, "Operations/usage/.usage-stats.json.12345.999.tmp")],
+    ["automation-health.json update", () => 1, async (h) => h.fireVault("modify", { path: "Operations/usage/automation-health.json" })],
+    ["a real .md note in the same folder", () => 1, async (h) => h.fireMetadata("changed", { path: "Operations/usage/context-forensics.md" })],
+    ["control: an unrelated file", () => 1, async (h) => h.fireVault("modify", { path: "Operations/tasks/open/x.md" })],
+    ["status sidecar write", () => 0, async (h) => h.fireVault("modify", { path: "Operations/usage/usage-stats.status.json" })],
+    ["lock dir create", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/usage-stats.json.lock" })],
+    ["lock owner-token file nested under the lock dir", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/usage-stats.json.lock/owner" })],
+    ["steal-coord mkdir-lock", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/usage-stats.json.lock.steal-coord" })],
+    ["stale-lock rename-tombstone", () => 0, async (h) => h.fireVault("rename", { path: "Operations/usage/usage-stats.json.lock.stale-12345-abcd1234" }, "Operations/usage/usage-stats.json.lock")],
+    ["exporter's own atomic-write temp file", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/.usage-stats.json.12345.999.tmp" })],
+  ];
+  for (const [desc, expected, fire] of cases) {
+    const h = await renderOnloadListeners();
+    await fire(h);
+    assert.equal(h.getScheduleRefreshCount(), expected(), `I4: ${desc} must cause exactly ${expected()} scheduleRefresh call(s) -- got ${h.getScheduleRefreshCount()}`);
+  }
+  console.log("I4: real onload() vault/metadata listeners -- published data and automation-health reach the dashboard; the exporter's own coordination artifacts (sidecar, lock, steal-coord, tombstones, temp files) do not.");
+
+  // --- MUTATION A: restore round 2's whole-folder filter. usage-stats.json's own publish must
+  // --- WRONGLY stop reaching the dashboard. --------------------------------------------------
+  const restoreWholeFolderFilter = (source) => {
+    const needle =
+      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
+    assert.ok(source.includes(needle), "the narrowed isUsageExporterOutputPath must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(
+      needle,
+      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  if (!folder) return false;\n  return path === folder || path.startsWith(folder + "/");\n}'
+    );
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const hMutatedA = await renderOnloadListeners({ mutateModelSource: restoreWholeFolderFilter });
+  await hMutatedA.fireVault("modify", { path: "Operations/usage/usage-stats.json" });
+  assert.equal(
+    hMutatedA.getScheduleRefreshCount(),
+    0,
+    `MUTATION CHECK A: with round 2's whole-folder filter restored, a fresh usage-stats.json publish must WRONGLY be suppressed -- got ${hMutatedA.getScheduleRefreshCount()} scheduleRefresh call(s)`
+  );
+  const hMutatedA2 = await renderOnloadListeners({ mutateModelSource: restoreWholeFolderFilter });
+  await hMutatedA2.fireVault("modify", { path: "Operations/usage/automation-health.json" });
+  assert.equal(
+    hMutatedA2.getScheduleRefreshCount(),
+    0,
+    `MUTATION CHECK A: with round 2's whole-folder filter restored, an automation-health.json update must WRONGLY be suppressed -- got ${hMutatedA2.getScheduleRefreshCount()} scheduleRefresh call(s)`
+  );
+  console.log("I4 MUTATION A (whole-folder filter restored): usage-stats.json and automation-health.json WRONGLY suppressed. Reverted (never touched the tracked file).");
+
+  // --- MUTATION B: isUsageExporterOutputPath always false. The sidecar/lock/temp writes must
+  // --- WRONGLY reach the dashboard (proves the filter, when kept, is actually pinned). --------
+  const disableFilterEntirely = (source) => {
+    const needle = "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n";
+    assert.ok(source.includes(needle), "the isUsageExporterOutputPath entry must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  return false;\n  if (!path || !usageStatsPath) return false;\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const hMutatedB = await renderOnloadListeners({ mutateModelSource: disableFilterEntirely });
+  await hMutatedB.fireVault("modify", { path: "Operations/usage/usage-stats.status.json" });
+  assert.equal(
+    hMutatedB.getScheduleRefreshCount(),
+    1,
+    `MUTATION CHECK B: with isUsageExporterOutputPath always false, a status-sidecar write must WRONGLY schedule a re-render -- got ${hMutatedB.getScheduleRefreshCount()} scheduleRefresh call(s)`
+  );
+  const hMutatedB2 = await renderOnloadListeners({ mutateModelSource: disableFilterEntirely });
+  await hMutatedB2.fireVault("create", { path: "Operations/usage/usage-stats.json.lock" });
+  assert.equal(
+    hMutatedB2.getScheduleRefreshCount(),
+    1,
+    `MUTATION CHECK B: with isUsageExporterOutputPath always false, a lock-dir create must WRONGLY schedule a re-render -- got ${hMutatedB2.getScheduleRefreshCount()} scheduleRefresh call(s)`
+  );
+  console.log("I4 MUTATION B (filter disabled entirely): sidecar and lock writes WRONGLY reach the dashboard. Reverted (never touched the tracked file).");
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");
