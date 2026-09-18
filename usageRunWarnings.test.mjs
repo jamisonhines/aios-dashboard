@@ -27,7 +27,18 @@
 // #3 below with the warning div genuinely absent from the rendered tree -- a real behavioral
 // RED, not a text-match RED. Captured output recorded in the round-2 build log
 // (~/AIOS/Projects/aios-dashboard/2026-09-18-usage-exporter-atomic-write-review.md).
-// Run: node usageRunWarnings.test.mjs
+// Run: node usageRunWarnings.test.mjs (part of the default `npm test` suite -- every mutation
+// proof in this file, R2-I1's and R3-M1's, is deterministic and stays in the default suite; see
+// exportUsageAtomicWrite.mutations.test.mjs / `npm run test:mutations` for the SEPARATE,
+// opt-in, exporter-side mutation suite this file has nothing to do with).
+//
+// R3-M1 (round 4, Reviewer round 3 Minor): mutation proofs added here for the
+// `refreshTriggeredForThisLoad` guard and the `lastRefreshWasBusy` flag NEVER touch the
+// tracked main.ts on disk (same R3-I1 discipline as the exporter-side fix, applied here to the
+// UI source) -- `renderUsageTabToCompletion`'s `mutateSource` option applies a string
+// transform to main.ts's SOURCE TEXT before it is written into the temp file that gets
+// bundled. `git status`/a file hash on main.ts is unaffected by running this file, including
+// under a SIGINT.
 import assert from "node:assert";
 import esbuild from "esbuild";
 import fs from "node:fs";
@@ -194,6 +205,61 @@ let creationLog = [];
 function resetCreationLog() {
   creationLog = [];
 }
+
+// R3-M1 (Reviewer round 3): the render harness had no `basePath` on its fake adapter, so
+// `refreshUsageSnapshot`'s own `if (typeof basePath !== "string") throw ...` guard rejected
+// every refresh immediately -- neither the busy path nor the redraw-after-refresh path (where
+// the `refreshTriggeredForThisLoad` and `lastRefreshWasBusy` guards actually do their work)
+// ever ran under test. `spawnLog`/`installFakeChildProcess` below give the harness a
+// controllable fake exporter launch that can return busy, success, or failure outcomes, so
+// those paths can be driven and observed for real.
+//
+// Mechanism: main.ts's `refreshUsageSnapshot` calls `require("child_process").spawn(...)`.
+// esbuild (even with "child_process" marked external) compiles a bare `require(...)` call
+// into a small shim, `__require`, that checks `typeof require !== "undefined"` and falls back
+// to the real global `require` if so -- confirmed by inspecting the actual bundled output, not
+// assumed. Setting `globalThis.require` before the bundle runs makes that bare identifier
+// resolve to this fake, since unqualified identifier lookup falls through to the global object.
+let spawnLog = [];
+function resetSpawnLog() {
+  spawnLog = [];
+}
+function installFakeChildProcess(spawnOutcomeProvider) {
+  globalThis.require = (id) => {
+    if (id === "child_process") {
+      return {
+        spawn() {
+          const callIndex = spawnLog.length;
+          spawnLog.push({ callIndex });
+          const listeners = { data: [], error: [], exit: [] };
+          const child = {
+            stdout: {
+              on(event, cb) {
+                if (event === "data") listeners.data.push(cb);
+              },
+            },
+            once(event, cb) {
+              (listeners[event] ||= []).push(cb);
+            },
+          };
+          const outcome = spawnOutcomeProvider ? spawnOutcomeProvider(callIndex) : { code: 1, stdout: "" };
+          // A `null`/`undefined` outcome means "never resolve this one" -- used as a
+          // deterministic circuit breaker: once a runaway-loop test has observed enough
+          // spawns to prove its point, later calls hang forever instead of continuing to
+          // recurse, so the chain terminates without any timing-dependent cap.
+          if (outcome) {
+            queueMicrotask(() => {
+              if (outcome.stdout) for (const cb of listeners.data) cb(Buffer.from(outcome.stdout));
+              for (const cb of listeners.exit) cb(outcome.code);
+            });
+          }
+          return child;
+        },
+      };
+    }
+    throw new Error(`fake require: unsupported module "${id}"`);
+  };
+}
 function fakeEl(tag = "div", options = {}) {
   const node = {
     tag,
@@ -236,8 +302,27 @@ function findByClass(node, cls) {
   return undefined;
 }
 
-async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-stats.json", statusJson = null, generatedAt = null } = {}) {
+async function renderUsageTabToCompletion({
+  statsPath = "Operations/usage/usage-stats.json",
+  statusJson = null,
+  generatedAt = null,
+  // R3-M1: when set, the fake adapter's `basePath` becomes a real string (satisfying
+  // refreshUsageSnapshot's own `typeof basePath !== "string"` guard) and `spawnOutcomeProvider`
+  // drives the fake `child_process.spawn` -- see installFakeChildProcess above. `null` (the
+  // default) preserves every EXISTING test's behavior exactly: no basePath, every refresh
+  // rejects immediately, same as before this round.
+  basePath = null,
+  spawnOutcomeProvider = null,
+  // R3-M1: an optional string->string transform applied to the main.ts SOURCE TEXT before it
+  // is written into the temp entry file that gets bundled -- never the tracked main.ts on
+  // disk. This is how the guard-removal mutation tests below prove their point without ever
+  // touching a tracked file (the same discipline as R3-I1's exporter fix, applied here to the
+  // UI source).
+  mutateSource = null,
+  settleMs = 100,
+} = {}) {
   resetCreationLog();
+  resetSpawnLog();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage-run-warnings-wiring-"));
   const stub = path.join(dir, "obsidian.mjs");
   const entryName = ".usage-run-warnings-wiring-entry.ts";
@@ -252,7 +337,8 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
       "export const normalizePath = (p) => p;", "export const setIcon = () => {};",
     ].join("\n")
   );
-  fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderUsageTab };\n");
+  const mainSource = fs.readFileSync(path.join(root, "main.ts"), "utf8");
+  fs.writeFileSync(entry, (mutateSource ? mutateSource(mainSource) : mainSource) + "\nexport { renderUsageTab };\n");
   globalThis.ResizeObserver = class { observe() {} disconnect() {} };
   globalThis.getComputedStyle = () => ({ overflowY: "visible" });
   const docEl = fakeEl();
@@ -263,6 +349,7 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
     createElementNS(_ns, tag) { return fakeEl(tag); },
     createElement(tag) { return fakeEl(tag); },
   };
+  if (basePath !== null) installFakeChildProcess(spawnOutcomeProvider);
   try {
     esbuild.buildSync({
       absWorkingDir: root,
@@ -279,6 +366,7 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
     const app = {
       vault: {
         adapter: {
+          basePath,
           async exists(p) {
             if (p.endsWith(".status.json")) return statusJson !== null;
             return p.endsWith("usage-stats.json");
@@ -297,7 +385,7 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
     renderUsageTab(app, container, periodbarHost, settings, viewState);
     // renderUsageTab's own load is a real microtask chain (Promise.all -> .then); give it room
     // to settle before inspecting the tree.
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, settleMs));
     return container;
   } finally {
     fs.rmSync(entry, { force: true });
@@ -359,6 +447,98 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
   assert.ok(findByClass(finalTree, "aios-usage-refresh-status"), "R2-I1: the refresh-status element must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
   assert.ok(findByClass(finalTree, "aios-refresh"), "R2-I1: the Refresh button must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
   console.log("R2-I1: a 2-hour-old snapshot shows Generated/age + stale text and a Refresh button, at creation time, surviving draw()'s body.empty()");
+}
+
+{
+  // R3-M1 (Reviewer round 3, Minor): the `refreshTriggeredForThisLoad` guard
+  // (`if (stale && !refreshTriggeredForThisLoad) { refreshTriggeredForThisLoad = true; void
+  // doRefresh(); }`) and the busy flag (`lastRefreshWasBusy`) were both untested -- Reviewer
+  // measured 63 real exporter spawns in 2s (an endless refresh loop) with the guard removed,
+  // and the busy suffix silently disappearing with the flag removed. Both require driving the
+  // full busy-then-redraw cycle, which needs a real basePath and a controllable fake exporter
+  // launch (see installFakeChildProcess above) -- the harness previously had neither.
+  //
+  // Deterministic circuit breaker, not a wall-clock race: `spawnOutcomeProvider` answers
+  // "busy" for the first BUSY_CAP calls, then returns `null` (never resolves) for any call
+  // beyond that -- so even a genuinely runaway loop (the mutated code) cannot spin forever or
+  // race a timer; it always stops after exactly BUSY_CAP spawns, deterministically, and the
+  // fixed settle wait below is comfortably longer than BUSY_CAP microtask-driven cycles need.
+  const BUSY_CAP = 5;
+  const busyOutcomeProvider = (callIndex) => (callIndex < BUSY_CAP ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null);
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+  // --- refreshTriggeredForThisLoad: correct code must spawn exactly once, even though every
+  // --- busy response leaves the snapshot just as stale and would otherwise re-trigger. -------
+  await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo, basePath: "/fake/vault", spawnOutcomeProvider: busyOutcomeProvider, settleMs: 200 });
+  assert.equal(spawnLog.length, 1, `R3-M1: with the guard intact, a persistently busy stale snapshot must trigger exactly ONE exporter launch per load, not one per busy response -- got ${spawnLog.length}`);
+
+  // --- MUTATION: remove the guard (main.ts source string transform, never the tracked file --
+  // --- see mutateSource on renderUsageTabToCompletion), rerun, capture the real RED. ----------
+  const removeRefreshGuard = (source) => {
+    const needle = "if (stale && !refreshTriggeredForThisLoad) {\n        refreshTriggeredForThisLoad = true;\n        void doRefresh();\n      }";
+    assert.ok(source.includes(needle), "R3-M1: the refreshTriggeredForThisLoad guard must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "if (stale) {\n        void doRefresh();\n      }");
+    assert.notEqual(mutated, source, "R3-M1: the mutation must actually change the source");
+    return mutated;
+  };
+  await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: twoHoursAgo,
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: busyOutcomeProvider,
+    mutateSource: removeRefreshGuard,
+    settleMs: 200,
+  });
+  // BUSY_CAP + 1, not BUSY_CAP: the (BUSY_CAP+1)th spawn call IS still logged (the log push
+  // happens before the outcome lookup) -- it is the one whose outcome comes back `null` and
+  // never resolves, which is what actually freezes the chain. Any count above 1 here already
+  // proves the runaway; BUSY_CAP + 1 is the exact, deterministic value this circuit breaker
+  // produces.
+  assert.equal(
+    spawnLog.length,
+    BUSY_CAP + 1,
+    `MUTATION CHECK: with refreshTriggeredForThisLoad removed, a persistently busy stale snapshot must WRONGLY keep re-triggering (capped here only by the test's own circuit breaker; Reviewer measured 63 spawns in 2s with no cap at all) -- proving the guard (not something else) was what stopped this. Got ${spawnLog.length} spawns.`
+  );
+  console.log(`R3-M1: refreshTriggeredForThisLoad guard -- intact: 1 spawn per load. MUTATION (guard removed): ${spawnLog.length}/${BUSY_CAP} spawns (runaway, capped only by the test harness). Reverted (never touched the tracked file).`);
+}
+
+{
+  // --- lastRefreshWasBusy: a busy outcome must still say so after the redraw it triggers, not
+  // --- silently look like a normal fresh Generated line. ----------------------------------
+  const BUSY_CAP = 1;
+  const busyOnceProvider = (callIndex) => (callIndex < BUSY_CAP ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null);
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+  const finalTree = await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo, basePath: "/fake/vault", spawnOutcomeProvider: busyOnceProvider, settleMs: 200 });
+  const refreshStatusNode = findByClass(finalTree, "aios-usage-refresh-status");
+  assert.ok(refreshStatusNode, "R3-M1: a refresh-status node must exist after the busy redraw settles");
+  assert.match(refreshStatusNode.text, /Another export was already in progress/, `R3-M1: with lastRefreshWasBusy intact, the settled text after a busy outcome must say another export was in progress -- got: ${JSON.stringify(refreshStatusNode.text)}`);
+
+  // --- MUTATION: remove the `lastRefreshWasBusy = busy;` assignment (main.ts source string
+  // --- transform, never the tracked file), rerun, capture the real RED. ----------------------
+  const removeBusyFlag = (source) => {
+    const needle = "            lastRefreshWasBusy = busy;\n";
+    assert.ok(source.includes(needle), "R3-M1: the lastRefreshWasBusy assignment must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "");
+    assert.notEqual(mutated, source, "R3-M1: the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: twoHoursAgo,
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: busyOnceProvider,
+    mutateSource: removeBusyFlag,
+    settleMs: 200,
+  });
+  const mutatedNode = findByClass(mutatedTree, "aios-usage-refresh-status");
+  assert.ok(mutatedNode, "sanity: a refresh-status node must still exist under the mutation");
+  assert.doesNotMatch(
+    mutatedNode.text,
+    /Another export was already in progress/,
+    `MUTATION CHECK: with lastRefreshWasBusy never set, the busy outcome's redraw must WRONGLY look like a normal fresh read, proving the flag (not something else) carries that distinction -- got: ${JSON.stringify(mutatedNode.text)}`
+  );
+  console.log(`R3-M1: lastRefreshWasBusy -- intact: busy text visible after redraw ("${refreshStatusNode.text}"). MUTATION (flag removed): busy text vanished ("${mutatedNode.text}"). Reverted (never touched the tracked file).`);
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");

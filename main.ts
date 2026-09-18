@@ -3538,7 +3538,20 @@ function renderUsageTab(
             lastRefreshWasBusy = busy;
             draw();
           })
-          .catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot."))
+          .catch(() => {
+            // R3-M2 (Reviewer round 3): this used to drop the age/stale suffix entirely on a
+            // failed refresh, right when it matters most -- the auto-refresh that triggered
+            // this call fires BECAUSE the snapshot is stale, so a stale-and-broken pipeline
+            // showed a failure line with no age at all until the next unrelated redraw
+            // happened to restore it. `generated`/`stale` are already in scope from this same
+            // draw() call (computed above, before doRefresh was even defined), so this can
+            // reference them directly rather than waiting for a redraw to recompute them.
+            refreshStatus.setText(
+              Number.isFinite(generated)
+                ? `Refresh failed; showing last valid snapshot: Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
+                : "Refresh failed; showing last valid snapshot."
+            );
+          })
           .finally(() => { refresh.disabled = false; });
       };
       refresh.addEventListener("click", doRefresh);
