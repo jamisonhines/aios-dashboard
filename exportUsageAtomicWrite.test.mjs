@@ -237,6 +237,10 @@ async function pollWhile(outFile, work) {
     });
     assert.equal(result.code, 0, "a run that finds a LIVE lock held must exit 0 cleanly, not fail the SessionStart hook step");
     assert.match(result.stdout, /usage export busy/, "the one-line busy message must be printed");
+    // M3 (Reviewer round 2): THIS is the one genuine "a live writer holds it" case -- a fresh
+    // lock, never stale, never stolen. The message must actually say that (not a generic
+    // catch-all), distinguishing it from the stale-but-unremovable-lock case below.
+    assert.match(result.stdout, /a live writer holds the lock/, `a genuinely live (non-stale) lock must produce the honest "live writer" reason, not a generic busy message: ${JSON.stringify(result.stdout)}`);
     const finalRaw = await fs.readFile(outFile, "utf8");
     assert.equal(JSON.parse(finalRaw).marker, "prior-good-snapshot", "the busy run must never touch the prior valid snapshot");
     console.log("live-lock test: busy run exited 0 with a one-line message, prior snapshot untouched");
@@ -397,6 +401,80 @@ async function pollWhile(outFile, work) {
   }
 }
 
+// --- Owner-token write failure (Round 3, M4): a failed owner-token write must fail loudly with
+// --- its real cause, not be swallowed and later misreported as a stolen lock. ------------------
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile, statusFile, lockFile } = outPaths(vaultRoot);
+  try {
+    await fs.mkdir(path.dirname(outFile), { recursive: true });
+    const result = await runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: { USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL: "1" },
+    });
+    assert.notEqual(result.code, 0, `a run whose owner-token write fails must not exit 0: ${JSON.stringify(result)}`);
+    assert.match(result.stderr, /failed to write lock owner token/, `the failure must name its REAL cause, not surface as a misleading "lock lost/stolen" error: ${JSON.stringify(result)}`);
+    assert.doesNotMatch(result.stderr, /stolen|lock lost mid-run/, `must not be misreported as a stolen/lost lock -- that never happened here, the write itself failed: ${JSON.stringify(result)}`);
+    const lockStillPresent = await fs.stat(lockFile).then(() => true).catch(() => false);
+    assert.equal(lockStillPresent, false, "a run that fails to establish real ownership must not leave an unowned lock dir behind, blocking every future run");
+    // No status write should have happened either -- this run never legitimately held the
+    // lock (M1's "only the lock holder writes status" principle applies here too: a run that
+    // never got a valid owner token is not a legitimate writer).
+    const statusExists = await fs.stat(statusFile).then(() => true).catch(() => false);
+    assert.equal(statusExists, false, "a run that never established ownership must not write the status sidecar either");
+    console.log(`owner-token-write-failure test: failed loudly (stderr: "${result.stderr.trim().split("\n").pop()}"), lock dir cleaned up, no status written`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- MUTATION (GL-009): re-swallow the owner-token write failure (round-1 behaviour: bare
+// --- `.catch(() => {})`), rerun the exact same scenario, capture the real RED. -----------------
+{
+  const exporterPath = EXPORTER_CLI;
+  const original = await fs.readFile(exporterPath, "utf8");
+  const needle = `      try {\n        // Test-only failure injection, inert unless set (same pattern as\n        // USAGE_EXPORT_TEST_FORCE_FAIL): every real cause of this write failing (disk full,\n        // EACCES on a misconfigured Operations/usage dir) is awkward to reproduce\n        // deterministically from outside a real filesystem race, so a test can force it here\n        // to exercise the catch below with a real thrown error.\n        if (process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL) {\n          throw new Error(\`synthetic owner-token write failure requested via USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL=\${process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL}\`);\n        }\n        await fs.writeFile(ownerFilePath(lockFile), JSON.stringify(ownerToken));\n      } catch (ownerWriteError) {\n        await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});\n        throw new Error(\`usage export: failed to write lock owner token: \${ownerWriteError?.message || ownerWriteError}\`, { cause: ownerWriteError });\n      }`;
+  assert.ok(original.includes(needle), "the owner-token write failure-handling block must be present verbatim before mutating it (fixture drift guard)");
+  const swallowed = `      try {\n        if (process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL) {\n          throw new Error(\`synthetic owner-token write failure requested via USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL=\${process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL}\`);\n        }\n        await fs.writeFile(ownerFilePath(lockFile), JSON.stringify(ownerToken));\n      } catch { /* round-1 behaviour: swallowed */ }`;
+  const mutated = original.replace(needle, swallowed);
+  assert.notEqual(mutated, original, "the mutation must actually change the source");
+  await fs.writeFile(exporterPath, mutated, "utf8");
+  let observed;
+  try {
+    const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+    try {
+      await fs.mkdir(path.join(vaultRoot, "Operations", "usage"), { recursive: true });
+      const result = await runExporter({
+        vaultRoot,
+        projectsRoot,
+        piRoot,
+        bbRoot,
+        env: { USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL: "1", USAGE_EXPORT_TEST_LOCK_STALE_MS: "50000" },
+      });
+      observed = { code: result.code, stdout: result.stdout, stderr: result.stderr };
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fs.writeFile(exporterPath, original, "utf8");
+  }
+  // With the write swallowed, ownerToken is still set locally but owner.json was never
+  // actually written to disk -- so the LATER pre-publish isCurrentOwner recheck reads no
+  // owner file at all, always disagrees with the in-memory token, and the run still fails,
+  // but now with the WRONG, misleading cause: exactly the M4 defect Dispatch described ("later
+  // reported as stolen" instead of surfacing the write failure itself).
+  assert.match(
+    observed.stderr,
+    /stolen|lock lost mid-run/,
+    `MUTATION CHECK: with the owner-token write failure re-swallowed, the run must be WRONGLY misreported as a stolen/lost lock instead of naming the real write failure, proving the loud failure (not something else) was what surfaced the correct cause -- got exit ${observed.code}, stderr: ${JSON.stringify(observed.stderr)}`
+  );
+  assert.doesNotMatch(observed.stderr, /failed to write lock owner token/, `with the write swallowed, the real cause must no longer be visible in the error at all -- got: ${JSON.stringify(observed.stderr)}`);
+  console.log("MUTATION (owner-token write failure re-swallowed): the run's real cause vanished and it was misreported as a stolen lock instead -- confirms the loud failure is load-bearing. Reverted.");
+}
+
 // --- Slow-holder scenario (Important 1): a holder that outlives the stale threshold must not -
 // --- publish over, or corrupt the status of, whoever legitimately took its lock -------------
 // Reproduces Reviewer's exact measured scenario: Holder A acquires and starts a long-running
@@ -476,6 +554,216 @@ async function runSlowHolderScenario() {
     `MUTATION CHECK: with the ownership recheck removed, the slow holder A must now WRONGLY succeed and publish over B's snapshot (exit 0), proving the recheck (not something else) was what stopped this -- got exit ${observed.aCode}, stderr: ${observed.aStderr}`
   );
   console.log("MUTATION (ownership recheck removed): A wrongly succeeded and would have overwritten B's newer snapshot -- confirms the recheck is load-bearing. Reverted.");
+}
+
+// --- Widened-gap status race (Round 3, M1/R2-M1): writeStatusMonotonic's read-merge-write is
+// --- NOT atomic across processes -- a slow holder's status write, computed from a read taken
+// --- BEFORE a genuinely newer holder's success write lands, can still commit to disk AFTER it,
+// --- silently erasing the newer holder's clean success. Reviewer's own harness shape: a slow
+// --- holder A (USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS widens A's own write duration well past
+// --- the moment B's real write lands) loses its lock to a stealer B; B's genuine success must
+// --- survive untouched -- lastSuccessAt must never go backwards to null.
+async function runWidenedGapScenario() {
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile, statusFile } = outPaths(vaultRoot);
+  try {
+    const staleMs = "80";
+    const aHoldMs = 100;
+    // 8x-amplified internally (writeJsonAtomic splits into 8 chunks, one sleep of this length
+    // between each) -- 150ms here means ~1200ms per write, comfortably longer than B's whole
+    // real scan+publish (measured well under 200ms against this fixture), which is exactly
+    // what widens the gap between A's read (early, before B has written anything) and A's
+    // eventual commit (late, after B's real write has already landed).
+    const aChunkDelayMs = "150";
+    const aPromise = runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: {
+        USAGE_EXPORT_TEST_LOCK_STALE_MS: staleMs,
+        USAGE_EXPORT_TEST_HOLD_MS: String(aHoldMs),
+        USAGE_EXPORT_TEST_LOCK_WAIT_MS: "50",
+        USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS: aChunkDelayMs,
+      },
+    });
+    // Give A's lock time to age past the (80ms) stale threshold before B starts looking.
+    await new Promise((r) => setTimeout(r, 200));
+    const bResult = await runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: { USAGE_EXPORT_TEST_LOCK_STALE_MS: staleMs, USAGE_EXPORT_TEST_LOCK_WAIT_MS: "5000" },
+    });
+    const aResult = await aPromise;
+    return { aResult, bResult, outFile, statusFile, root };
+  } catch (e) {
+    await fs.rm(root, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+{
+  const { aResult, bResult, statusFile, root } = await runWidenedGapScenario();
+  try {
+    assert.notEqual(aResult.code, 0, `A (the slow, losing holder) must not exit 0: ${JSON.stringify(aResult)}`);
+    assert.equal(bResult.code, 0, `B (the stealer) must succeed for real, not just be reported busy: ${JSON.stringify(bResult)}`);
+    assert.match(bResult.stdout, /usage-stats: \d+ transcript\(s\)/, `B's own stdout must be a genuine success banner, not a busy one-liner, or this scenario is not testing what it claims: ${JSON.stringify(bResult)}`);
+    const status = JSON.parse(await fs.readFile(statusFile, "utf8"));
+    assert.ok(status.lastSuccessAt, `B's genuine success must survive A's later, slower, now-stale write -- lastSuccessAt must not go backwards to null: ${JSON.stringify(status)}`);
+    assert.equal(status.lastError, null, `A's stale failure must not overwrite B's clean success: ${JSON.stringify(status)}`);
+    console.log(`widened-gap test: B's genuine success (lastSuccessAt=${status.lastSuccessAt}) survived A's slower, later-landing status write`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- MUTATION (GL-009): disable the pre-rename ownership recheck (beforeRename) that closes
+// --- the widened-gap race, rerun the exact same scenario, capture the real RED. ---------------
+{
+  const exporterPath = EXPORTER_CLI;
+  const original = await fs.readFile(exporterPath, "utf8");
+  const needle = `    if (beforeRename && !(await beforeRename())) {\n      await fs.rm(tempFile, { force: true }).catch(() => {});\n      return { skipped: true };\n    }\n`;
+  assert.ok(original.includes(needle), "the pre-rename beforeRename check must be present verbatim before mutating it (fixture drift guard)");
+  const mutated = original.replace(needle, "");
+  assert.notEqual(mutated, original, "the mutation must actually change the source");
+  await fs.writeFile(exporterPath, mutated, "utf8");
+  let observed;
+  try {
+    const { statusFile, root } = await runWidenedGapScenario();
+    observed = { status: JSON.parse(await fs.readFile(statusFile, "utf8")) };
+    await fs.rm(root, { recursive: true, force: true });
+  } finally {
+    await fs.writeFile(exporterPath, original, "utf8");
+  }
+  assert.equal(
+    observed.status.lastSuccessAt,
+    null,
+    `MUTATION CHECK: with the pre-rename ownership recheck removed, A's slow, stale, now-unauthorized write must WRONGLY land after B's and erase B's real success (lastSuccessAt back to null), proving the recheck (not something else) was what stopped this -- got: ${JSON.stringify(observed.status)}`
+  );
+  console.log(`MUTATION (pre-rename ownership recheck removed): B's genuine success was wrongly erased back to lastSuccessAt=null by A's later write -- confirms the recheck is load-bearing. Reverted.`);
+}
+
+// --- Release ownership check (Round 3, M2): a slow holder A that has its lock stolen must
+// --- never delete the NEW holder's lock out from under it on its own way out. Reviewer's
+// --- harness shape: A is stolen and exits; the new holder B's lock must still be PRESENT
+// --- (checked directly, not through A); and a third run C, arriving while B is still
+// --- genuinely holding it, must be told busy (not find an absent lock and wrongly acquire).
+async function runReleaseOwnershipScenario() {
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { lockFile, statusFile } = outPaths(vaultRoot);
+  try {
+    // staleMs sits strictly between "how long B's start delay ages A's original lock" (must
+    // exceed staleMs, so B correctly deems it stale and steals) and "how long the whole
+    // A-wakes-and-exits-then-we-check window takes" (must stay under staleMs, so B's OWN
+    // freshly re-created lock still reads as live, not stale, to both our direct check and to
+    // C). B itself is held open (TEST_HOLD_MS) well past that whole window so it is still
+    // genuinely inside its critical section when we check and when C runs.
+    const staleMs = "1500";
+    const bStartDelayMs = 1700; // > staleMs: A's original lock is unambiguously stale by then
+    // aHoldMs needs a comfortable buffer past bStartDelayMs, not just "greater than" -- B's own
+    // steal (detect stale -> coordinate -> rename away -> tail-sleep -> re-mkdir) takes a real,
+    // if usually small, amount of wall time. Too thin a margin here made the MUTATION check
+    // below flaky (measured): A's own finally could fire in the brief window BEFORE B's fresh
+    // mkdir lands, so an unconditional (mutated) rm would hit ENOENT on nothing yet, and B's
+    // lock would end up present anyway by sheer ordering, not because the removed check "still
+    // worked" -- a false pass that would have hidden a real regression.
+    const aHoldMs = 2000;
+    const bHoldMs = 6000; // far longer than the whole scenario: B must still hold when C runs
+    const aPromise = runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: { USAGE_EXPORT_TEST_LOCK_STALE_MS: staleMs, USAGE_EXPORT_TEST_HOLD_MS: String(aHoldMs), USAGE_EXPORT_TEST_LOCK_WAIT_MS: "50" },
+    });
+    await new Promise((r) => setTimeout(r, bStartDelayMs));
+    const bPromise = runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: { USAGE_EXPORT_TEST_LOCK_STALE_MS: staleMs, USAGE_EXPORT_TEST_HOLD_MS: String(bHoldMs), USAGE_EXPORT_TEST_LOCK_WAIT_MS: "5000" },
+    });
+    const aResult = await aPromise;
+    // A has now fully exited (including its finally-block release attempt). B is still deep
+    // inside its own hold (3000ms >> whatever A's own path just took), so this is the exact
+    // moment Reviewer's harness checks: is B's lock still present right after A's own exit?
+    // Polled rather than checked once: B's own steal-then-reacquire sequence has a brief
+    // (~tens of ms) window where no lock exists at all between renaming A's stale entry away
+    // and B's own fresh mkdir landing, and child-process startup jitter can still be in that
+    // window right when A exits -- polling for up to 1s (B holds for 3000ms once acquired, so
+    // this margin is not remotely close to racing B's own release) finds B's real, sustained
+    // acquisition rather than an artifact of catching that transient gap.
+    let bLockPresentAfterAExit = false;
+    for (let i = 0; i < 10 && !bLockPresentAfterAExit; i++) {
+      bLockPresentAfterAExit = await fs
+        .stat(lockFile)
+        .then(() => true)
+        .catch(() => false);
+      if (!bLockPresentAfterAExit) await new Promise((r) => setTimeout(r, 30));
+    }
+    const cResult = await runExporter({
+      vaultRoot,
+      projectsRoot,
+      piRoot,
+      bbRoot,
+      env: { USAGE_EXPORT_TEST_LOCK_STALE_MS: staleMs, USAGE_EXPORT_TEST_LOCK_WAIT_MS: "200" },
+    });
+    const bResult = await bPromise;
+    return { aResult, bResult, cResult, bLockPresentAfterAExit, lockFile, statusFile, root };
+  } catch (e) {
+    await fs.rm(root, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+{
+  const { aResult, bResult, cResult, bLockPresentAfterAExit, root } = await runReleaseOwnershipScenario();
+  try {
+    assert.notEqual(aResult.code, 0, `A (stolen, losing holder) must not exit 0: ${JSON.stringify(aResult)}`);
+    assert.ok(bLockPresentAfterAExit, "B's lock must still be present immediately after A's own exit -- A must not delete a lock it no longer owns");
+    assert.match(cResult.stdout, /usage export busy/, `C, arriving while B still genuinely holds the lock, must be told busy, not silently acquire: ${JSON.stringify(cResult)}`);
+    assert.equal(bResult.code, 0, `B must still complete normally and successfully once its own hold ends: ${JSON.stringify(bResult)}`);
+    console.log("release-ownership test: A's exit left B's stolen lock present; C correctly found it busy while B still held it");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+// --- MUTATION (GL-009): remove the ownership check on release (round-1 behaviour: unconditional
+// --- rm), rerun the exact same scenario, capture the real RED. --------------------------------
+{
+  const exporterPath = EXPORTER_CLI;
+  const original = await fs.readFile(exporterPath, "utf8");
+  const needle = "    if (ownerToken && (await isCurrentOwner(lockFile, ownerToken))) {\n      await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});\n    }";
+  assert.ok(original.includes(needle), "the release ownership-check block must be present verbatim before mutating it (fixture drift guard)");
+  const mutated = original.replace(
+    needle,
+    "    await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});"
+  );
+  assert.notEqual(mutated, original, "the mutation must actually change the source");
+  await fs.writeFile(exporterPath, mutated, "utf8");
+  let observed;
+  try {
+    const { cResult, bLockPresentAfterAExit, root } = await runReleaseOwnershipScenario();
+    observed = { cStdout: cResult.stdout, bLockPresentAfterAExit };
+    await fs.rm(root, { recursive: true, force: true });
+  } finally {
+    await fs.writeFile(exporterPath, original, "utf8");
+  }
+  assert.equal(
+    observed.bLockPresentAfterAExit,
+    false,
+    `MUTATION CHECK: with the release ownership check removed, A's unconditional rm must WRONGLY delete B's still-live lock, proving the check (not something else) was what stopped this -- got present=${observed.bLockPresentAfterAExit}`
+  );
+  assert.doesNotMatch(
+    observed.cStdout,
+    /usage export busy/,
+    `MUTATION CHECK: with B's lock wrongly deleted, C must no longer be told busy (it should find the path clear and acquire) -- got: ${JSON.stringify(observed.cStdout)}`
+  );
+  console.log("MUTATION (release ownership check removed): A's unconditional rm deleted B's still-live lock and C no longer saw busy -- confirms the check is load-bearing. Reverted.");
 }
 
 // --- Thundering herd (Important 1): N processes against one pre-existing stale lock must -----
@@ -621,7 +909,13 @@ async function runHerdIteration({ vaultRoot, projectsRoot, piRoot, bbRoot, markD
       );
       assert.equal(result.code, 0, `an unremovable stale lock is the same as "busy" from the caller's perspective, must exit 0: ${JSON.stringify(result)}`);
       assert.match(result.stdout, /usage export busy/, "must report busy, the same as any other contended lock");
-      console.log(`hot-spin test: unremovable stale lock (read-only parent) exited cleanly in ${result.elapsedMs}ms (limit ${lockWaitMs}ms + margin), no watchdog kill needed`);
+      // M3 (Reviewer round 2): there is NO writer here at all (the lock is stale, its would-be
+      // steal was blocked by EACCES on the read-only parent) -- the message must say that, not
+      // claim "existing writer retained" as it used to unconditionally, which was flatly false
+      // in exactly this situation (status and snapshot both untouched, no process holds it).
+      assert.match(result.stdout, /stale lock exists but could not be (removed|recovered)/, `a stale-but-unremovable lock must name the REAL cause, not claim a live writer exists: ${JSON.stringify(result.stdout)}`);
+      assert.doesNotMatch(result.stdout, /existing writer retained/, `must not claim a writer exists when the real cause is a stuck stale lock: ${JSON.stringify(result.stdout)}`);
+      console.log(`hot-spin test: unremovable stale lock (read-only parent) exited cleanly in ${result.elapsedMs}ms (limit ${lockWaitMs}ms + margin), no watchdog kill needed, honest cause reported`);
     } finally {
       await fs.chmod(outDir, 0o755);
     }

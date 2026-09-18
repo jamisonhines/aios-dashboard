@@ -1185,7 +1185,26 @@ const LOCK_STALE_MS = Number(process.env.USAGE_EXPORT_TEST_LOCK_STALE_MS) || 120
 // test process (unset in production, no behavioral effect at 0).
 const TEST_WRITE_CHUNK_DELAY_MS = Number(process.env.USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS) || 0;
 
-async function writeJsonAtomic(filePath, data) {
+// M1 (Reviewer round 2, R2-M1), residual widened-gap case: skipping ONLY the catch-block
+// status write on lock loss (see the USAGE_EXPORT_LOCK_LOST branch in main()) closes the race
+// for THAT write, but the attempt-start status write (unconditional, happens the instant a
+// run acquires the lock, before it can know it will later lose it) is exposed to the exact
+// same class of race: writeStatusMonotonic reads the CURRENT status once, up front, then (with
+// USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS set) the actual disk write can take long enough for a
+// genuinely newer holder to steal the lock AND publish its own success in the interim -- the
+// slow write then lands on disk with an outcome computed from a now-stale read, silently
+// erasing the newer holder's real success. Measured: with only the catch-block skip in place,
+// 5/5 trials of the widened-gap harness (100ms hold, 150ms chunk delay, 80ms stale threshold)
+// still showed the winning holder B's genuine, confirmed success (`b.stdout` was a real export
+// success line, not busy) overwritten to `lastSuccessAt: null` by the losing holder A's
+// attempt-start write landing after B's.
+//
+// Closing this needs the ownership recheck to happen as close as possible to the actual
+// commit (fs.rename), not merely before the write is initiated -- an optional `beforeRename`
+// callback, invoked immediately before the rename and skipping the write entirely (removing
+// the temp file instead) if it resolves false. Every writeStatusMonotonic call in main() now
+// passes one that re-verifies ownership at that last possible moment.
+async function writeJsonAtomic(filePath, data, { beforeRename } = {}) {
   const dir = path.dirname(filePath);
   const tempFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
   try {
@@ -1206,7 +1225,12 @@ async function writeJsonAtomic(filePath, data) {
     } finally {
       await handle.close();
     }
+    if (beforeRename && !(await beforeRename())) {
+      await fs.rm(tempFile, { force: true }).catch(() => {});
+      return { skipped: true };
+    }
     await fs.rename(tempFile, filePath);
+    return { skipped: false };
   } catch (error) {
     await fs.rm(tempFile, { force: true }).catch(() => {});
     throw error;
@@ -1235,13 +1259,23 @@ async function readStatus(statusFile) {
 // recorded later ones, silently erasing the newer record. ISO 8601 timestamps of the same
 // fixed-width shape sort lexicographically exactly the same as chronologically, so string
 // comparison is enough here without parsing. Re-reads the CURRENT on-disk status immediately
-// before merging (not the value captured back at attempt-start) so this is correct even if
-// two processes are (against the lock's intent) both writing around the same instant --
-// belt-and-suspenders alongside the ownership check in main(), not a replacement for it.
+// before merging (not the value captured back at attempt-start).
+//
+// CORRECTION (Reviewer round 2, M1/R2-M1): the read-merge-write here is NOT atomic across
+// processes, and the belt-and-suspenders claim that used to sit here was false -- measured
+// 3/3: a lock-lost run's failure-path write (see the USAGE_EXPORT_LOCK_LOST catch in main())
+// can still read the status file BEFORE a winning holder's own success write lands, then
+// write its own (older, failed) merged result AFTER, silently erasing the winner's clean
+// success. This function's own compare-then-write is correct in isolation, but two
+// *independent* writeStatusMonotonic calls from two different processes can still interleave
+// around each other's read. The actual fix is upstream in main(): a run that has lost
+// ownership of the lock now skips its failure-path status write entirely (see the
+// USAGE_EXPORT_LOCK_LOST branch below) rather than relying on this function to arbitrate a
+// race it structurally cannot see all of.
 function isNewer(a, b) {
   return !!a && (!b || a > b);
 }
-async function writeStatusMonotonic(statusFile, next) {
+async function writeStatusMonotonic(statusFile, next, { isStillOwner } = {}) {
   const current = await readStatus(statusFile);
   const attemptAdvances = isNewer(next.lastAttemptAt, current.lastAttemptAt);
   const merged = {
@@ -1252,7 +1286,12 @@ async function writeStatusMonotonic(statusFile, next) {
     // already on disk, so a slow/older run can never stomp a newer run's recorded outcome.
     lastError: attemptAdvances || next.lastAttemptAt === current.lastAttemptAt ? next.lastError : current.lastError,
   };
-  await writeJsonAtomic(statusFile, merged);
+  // M1 (Reviewer round 2, R2-M1): `current` above was read once, up front -- by the time the
+  // (possibly slow, chunk-delayed) write below actually commits, a different process may have
+  // become the sole legitimate writer. `beforeRename` re-verifies immediately before the
+  // commit, as close to it as this API allows, and skips the write (not just the merge
+  // decision) if ownership was lost in the interim.
+  await writeJsonAtomic(statusFile, merged, { beforeRename: isStillOwner });
 }
 
 // Owner token written inside the lock dir at acquisition. Release and the pre-publish
@@ -1336,6 +1375,11 @@ export async function main({
   let acquired = false;
   let ownerToken = null;
   const deadline = Date.now() + lockWaitMs;
+  // M3 (Reviewer round 2): tracks WHY the most recent iteration failed to acquire, so the
+  // eventual busy message can say what is actually blocking instead of always claiming "a
+  // live writer retained the lock" -- that was only ever true of one of several possible
+  // reasons a deadline can be hit. Set fresh at the top of every iteration below.
+  let lastBlockReason = "a live writer holds the lock and is producing an equally fresh snapshot";
   // Reviewer round 1, Important 2: every iteration that does NOT acquire the lock must go
   // through exactly one shared tail below (deadline check, then a single sleep) before looping
   // again -- no branch is allowed its own bare `continue`. The old code let a stale lock that
@@ -1346,7 +1390,29 @@ export async function main({
     try {
       await fs.mkdir(lockFile);
       ownerToken = makeOwnerToken();
-      await fs.writeFile(ownerFilePath(lockFile), JSON.stringify(ownerToken)).catch(() => {});
+      // M4 (Reviewer round 2): this write used to be swallowed (`.catch(() => {})`). A failed
+      // write here (e.g. disk full, EACCES) left this process holding the lock dir with NO
+      // owner.json -- isCurrentOwner/readOwnerToken then read that as "not us" for both the
+      // pre-publish recheck and the release, so the run silently could not release its own
+      // lock (blocking every other run for up to LOCK_STALE_MS/120s) and its real cause (the
+      // write failure) was never surfaced -- instead it later reported the misleading
+      // USAGE_EXPORT_LOCK_LOST "stolen after exceeding stale threshold" error, which is not
+      // what actually happened. Must fail loudly with the real cause instead: remove the lock
+      // dir we just created (so we do not leave an unowned lock behind) and rethrow.
+      try {
+        // Test-only failure injection, inert unless set (same pattern as
+        // USAGE_EXPORT_TEST_FORCE_FAIL): every real cause of this write failing (disk full,
+        // EACCES on a misconfigured Operations/usage dir) is awkward to reproduce
+        // deterministically from outside a real filesystem race, so a test can force it here
+        // to exercise the catch below with a real thrown error.
+        if (process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL) {
+          throw new Error(`synthetic owner-token write failure requested via USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL=${process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL}`);
+        }
+        await fs.writeFile(ownerFilePath(lockFile), JSON.stringify(ownerToken));
+      } catch (ownerWriteError) {
+        await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});
+        throw new Error(`usage export: failed to write lock owner token: ${ownerWriteError?.message || ownerWriteError}`, { cause: ownerWriteError });
+      }
       acquired = true;
       break;
     } catch (error) {
@@ -1358,6 +1424,12 @@ export async function main({
         // Lock vanished between our EEXIST and this stat (released or stolen by someone
         // else in that instant). Nothing to steal; fall through to the shared tail and try
         // mkdir again next iteration.
+        lastBlockReason = "the lock briefly vanished and reappeared between attempts (contended by other writers)";
+      }
+      if (stat) {
+        lastBlockReason = Date.now() - stat.mtimeMs > LOCK_STALE_MS
+          ? "a stale lock exists but has not yet been recovered"
+          : "a live writer holds the lock and is producing an equally fresh snapshot";
       }
       if (stat && Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
         // Reviewer round 1, Important 1, round 2 residual: a first version of this steal used
@@ -1417,29 +1489,41 @@ export async function main({
               try {
                 await fs.rename(lockFile, tombstone);
                 await fs.rm(tombstone, { recursive: true, force: true }).catch(() => {});
-              } catch {
+              } catch (renameError) {
                 // ENOENT: released in between (should not happen while nothing else can mkdir
                 // over the old entry, but defensive). Any other error (e.g. EACCES: the lock
                 // dir sits under a read-only parent) must NOT throw here -- Reviewer round 1,
                 // Important 2's exact reproduction. Both fall through to the shared tail below.
+                if (renameError?.code !== "ENOENT") {
+                  // M3 (Reviewer round 2): this IS the honest cause when it drives us all the
+                  // way to a busy exit -- no writer exists, the lock is just stale AND stuck.
+                  lastBlockReason = `a stale lock exists but could not be removed (${renameError?.code || renameError?.message || renameError})`;
+                }
               }
             }
           } finally {
             await fs.rm(stealCoordDir, { recursive: true, force: true }).catch(() => {});
           }
-        } catch {
+        } catch (stealCoordError) {
           // EEXIST: someone else is already the exclusive stealer for this stale generation.
           // Any OTHER error (e.g. EACCES: outDir itself sits under a read-only parent) must
           // NOT throw here either, for the same reason as the rename catch above (Reviewer
           // round 1, Important 2) -- both cases fall through to the shared wait tail and
           // re-evaluate next iteration rather than hanging or crash-looping.
+          lastBlockReason = stealCoordError?.code === "EEXIST"
+            ? "another process is already recovering the same stale lock"
+            : `a stale lock exists but could not be recovered (${stealCoordError?.code || stealCoordError?.message || stealCoordError})`;
         }
       }
       // Shared tail for every non-acquiring path above: respect the deadline, then sleep once.
       if (Date.now() >= deadline) {
-        // Not stale -- a live writer holds it and is producing an equally fresh
-        // snapshot. This is not a failure: the CLI entry point below exits 0 for it.
-        const busy = new Error("usage export busy; existing writer retained");
+        // M3 (Reviewer round 2): the message used to unconditionally claim "existing writer
+        // retained" even when the real, measured cause was a stale-but-unremovable lock or a
+        // crashed steal-coordination lock -- situations where NO writer actually exists
+        // (status and snapshot both untouched). lastBlockReason is set at every fall-through
+        // point above and names the real cause; this is not a failure either way (the CLI
+        // entry point below exits 0 for it), only the wording changes.
+        const busy = new Error(`usage export busy; ${lastBlockReason}`);
         busy.code = "USAGE_EXPORT_BUSY";
         throw busy;
       }
@@ -1466,7 +1550,11 @@ export async function main({
   // before this attempt's own outcome is known. writeStatusMonotonic still re-reads current
   // on-disk state itself, so a slow/older run's attempt-start write correctly fails to
   // advance anything if a newer run has already recorded a later lastAttemptAt.
-  await writeStatusMonotonic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: priorStatus.lastSuccessAt, lastError: priorStatus.lastError }).catch(() => {});
+  await writeStatusMonotonic(
+    statusFile,
+    { lastAttemptAt: attemptIso, lastSuccessAt: priorStatus.lastSuccessAt, lastError: priorStatus.lastError },
+    { isStillOwner: () => isCurrentOwner(lockFile, ownerToken) }
+  ).catch(() => {});
   try {
   // Test-only failure injection: every real failure mode this exporter can hit in practice
   // (disk full, permissions, a genuinely malformed transcript tripping a bug) is awkward to
@@ -1704,7 +1792,11 @@ export async function main({
     `usage-stats: ${canonicalTranscripts.length} transcript(s), ${totalMessages} message(s), ` +
       `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText}${topAgentText} -> ${outFile}`
   );
-  await writeStatusMonotonic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: now.toISOString(), lastError: null }).catch(() => {});
+  await writeStatusMonotonic(
+    statusFile,
+    { lastAttemptAt: attemptIso, lastSuccessAt: now.toISOString(), lastError: null },
+    { isStillOwner: () => isCurrentOwner(lockFile, ownerToken) }
+  ).catch(() => {});
   // Minor 10 (half): sweep orphaned temp files / stale rename-tombstones on a successful run.
   // Best-effort and never throws; a sweep failure must never turn a successful export into a
   // failed one.
@@ -1713,11 +1805,23 @@ export async function main({
     // The previous valid usage-stats.json is untouched (writeJsonAtomic never renamed
     // over it), but the status sidecar must record the failure so the reader can warn
     // instead of silently showing an aging snapshot as if the pipeline were healthy.
-    // writeStatusMonotonic re-reads current on-disk status and refuses to move
-    // lastAttemptAt/lastSuccessAt backwards or adopt this error over a newer run's own
-    // recorded outcome, so this is safe to call even from a run that has lost ownership of
-    // the lock (e.g. the USAGE_EXPORT_LOCK_LOST throw above) -- worst case it is a no-op.
-    await writeStatusMonotonic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: null, lastError: String(error?.message || error) }).catch(() => {});
+    //
+    // M1 (Reviewer round 2, R2-M1): a run that has lost ownership of the lock (see the
+    // USAGE_EXPORT_LOCK_LOST throw above) must NOT write the status file at all. Only the
+    // lock holder writes status. writeStatusMonotonic's own read-merge-write is not atomic
+    // across processes (see the corrected comment above it), so this run's write can still
+    // land AFTER a winning holder's own success write reads the file but BEFORE that
+    // winner's write completes, silently erasing a clean success with this run's own stale
+    // failure -- measured 3/3 by the Reviewer. Skipping the write here removes this run from
+    // the race entirely: only the process that actually still owns the lock (and is
+    // therefore the only legitimate writer of this attempt's outcome) ever writes status.
+    if (error?.code !== "USAGE_EXPORT_LOCK_LOST") {
+      await writeStatusMonotonic(
+        statusFile,
+        { lastAttemptAt: attemptIso, lastSuccessAt: null, lastError: String(error?.message || error) },
+        { isStillOwner: () => isCurrentOwner(lockFile, ownerToken) }
+      ).catch(() => {});
+    }
     throw error;
   } finally {
     if (testMarkFile) await fs.rm(testMarkFile, { force: true }).catch(() => {});

@@ -177,6 +177,23 @@ function buildStubbedBundle(exportLine) {
 // through (tiles, SVG chart, legend, models table, workflows, skills, projects, footer) without
 // throwing. Broader than usageTokenTableRender.test.mjs's stub because that file only exercises
 // one isolated table renderer; this one runs the whole tab.
+// Module-level creation log (reset per test with resetCreationLog()): records {cls, tag, text}
+// at the EXACT INSTANT each element is created, before any later .setText() mutates it in
+// place. Needed because renderUsageTab's own auto-refresh-on-stale-load path
+// (`if (stale && !refreshTriggeredForThisLoad) void doRefresh();`) runs SYNCHRONOUSLY inside
+// the same draw() call that creates refreshStatus: doRefresh's first lines
+// (`refreshStatus.setText("Refreshing usage snapshot...")`) execute before draw() even
+// returns, so by the time any test can inspect the settled tree, a stale snapshot's
+// "Generated ... (stale)" text has ALREADY been overwritten -- not a test race, a genuine
+// synchronous same-tick overwrite in the real code path. The creation log sidesteps this by
+// capturing what draw() actually COMPUTED and rendered at creation time, which is the
+// structural property R2-I1 is about (were these elements created/populated correctly on
+// every redraw, not wiped) rather than "did a fake stubbed refresh network call happen to
+// lose a race," which is not what this task is testing.
+let creationLog = [];
+function resetCreationLog() {
+  creationLog = [];
+}
 function fakeEl(tag = "div", options = {}) {
   const node = {
     tag,
@@ -190,9 +207,9 @@ function fakeEl(tag = "div", options = {}) {
     clientHeight: 0,
     style: {},
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-    createDiv(o = {}) { const c = fakeEl("div", o); c.parent = this; this.children.push(c); return c; },
-    createSpan(o = {}) { const c = fakeEl("span", o); c.parent = this; this.children.push(c); return c; },
-    createEl(name, o = {}) { const c = fakeEl(name, o); c.parent = this; this.children.push(c); return c; },
+    createDiv(o = {}) { const c = fakeEl("div", o); c.parent = this; this.children.push(c); creationLog.push({ tag: "div", cls: c.cls, text: c.text }); return c; },
+    createSpan(o = {}) { const c = fakeEl("span", o); c.parent = this; this.children.push(c); creationLog.push({ tag: "span", cls: c.cls, text: c.text }); return c; },
+    createEl(name, o = {}) { const c = fakeEl(name, o); c.parent = this; this.children.push(c); creationLog.push({ tag: name, cls: c.cls, text: c.text }); return c; },
     appendChild(c) { c.parent = this; this.children.push(c); return c; },
     addEventListener() {},
     removeEventListener() {},
@@ -219,7 +236,8 @@ function findByClass(node, cls) {
   return undefined;
 }
 
-async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-stats.json", statusJson = null } = {}) {
+async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-stats.json", statusJson = null, generatedAt = null } = {}) {
+  resetCreationLog();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage-run-warnings-wiring-"));
   const stub = path.join(dir, "obsidian.mjs");
   const entryName = ".usage-run-warnings-wiring-entry.ts";
@@ -257,7 +275,7 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
       alias: { obsidian: stub },
     });
     const { renderUsageTab } = await import(pathToFileURL(out).href);
-    const statsJson = JSON.stringify({ generatedAt: new Date().toISOString(), days: [], projects: [], windowDays: 35 });
+    const statsJson = JSON.stringify({ generatedAt: generatedAt ?? new Date().toISOString(), days: [], projects: [], windowDays: 35 });
     const app = {
       vault: {
         adapter: {
@@ -301,6 +319,46 @@ async function renderUsageTabToCompletion({ statsPath = "Operations/usage/usage-
   assert.ok(warnNode, "a real, full renderUsageTab render with a failed run-status must produce a warning div somewhere in the rendered tree");
   assert.match(warnNode.text, /The last export attempt failed: boom: disk full/, "the rendered warning names the specific failure (GL-009 rule 3), not just that something is wrong");
   console.log("wiring: a real full renderUsageTab render shows the run-health warning exactly when the signals say it should, and not otherwise");
+}
+
+{
+  // R2-I1 (Reviewer round 2): a 2-hour-old snapshot must show the Generated/age text and the
+  // stale indicator, and the Refresh button must exist -- and must survive every redraw,
+  // including the very first one, because draw() unconditionally empties `body` on every call.
+  //
+  // This asserts on the CREATION-TIME log rather than the settled tree on purpose. The real
+  // code auto-triggers a refresh when stale (`if (stale && !refreshTriggeredForThisLoad) void
+  // doRefresh();`), and doRefresh's own synchronous prefix
+  // (`refreshStatus.setText("Refreshing usage snapshot...")`) overwrites the text before
+  // draw() itself returns -- a genuine same-tick overwrite in the real code path, not a test
+  // race. Inspecting the settled tree could never observe "Generated ... (stale)" for a
+  // genuinely stale snapshot even on a fully correct implementation, so it is not the right
+  // assertion for R2-I1's requirement. The creation log captures what draw() actually
+  // computed and rendered the INSTANT it created the element, which is exactly the structural
+  // property R2-I1 is about: was refreshStatus (re)created with the right stale text on this
+  // draw(), not wiped or skipped.
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const finalTree = await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo });
+
+  const refreshStatusEntries = creationLog.filter((e) => e.cls === "aios-usage-refresh-status");
+  assert.ok(refreshStatusEntries.length > 0, "R2-I1: renderUsageTab must create a refresh-status element on every draw(), including the first");
+  const firstRefreshStatus = refreshStatusEntries[0];
+  assert.match(firstRefreshStatus.text, /Generated/, "R2-I1: a 2-hour-old snapshot's refresh-status text must show the Generated/age text at creation time");
+  assert.match(firstRefreshStatus.text, /\(stale\)/, "R2-I1: a 2-hour-old snapshot's refresh-status text must show the stale indicator at creation time");
+
+  const refreshButtonEntries = creationLog.filter((e) => e.cls === "aios-refresh");
+  assert.ok(refreshButtonEntries.length > 0, "R2-I1: the Refresh button must exist (be created) on every draw(), including the first");
+
+  // The creation-log checks above prove draw() computed the right text at creation time, but
+  // NOT that the elements are still attached anywhere by the time everything settles -- that
+  // is precisely what the original R2-I1 bug got wrong: refreshStatus/refresh were created
+  // once, outside/before draw(), and then draw()'s own body.empty() (running for the very
+  // first time right after) permanently dropped them out of the tree with nothing left to
+  // ever re-add them. A creation-log-only test cannot see that regression (the elements WERE
+  // created, with correct text, before being wiped), so this checks the SETTLED tree too.
+  assert.ok(findByClass(finalTree, "aios-usage-refresh-status"), "R2-I1: the refresh-status element must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
+  assert.ok(findByClass(finalTree, "aios-refresh"), "R2-I1: the Refresh button must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
+  console.log("R2-I1: a 2-hour-old snapshot shows Generated/age + stale text and a Refresh button, at creation time, surviving draw()'s body.empty()");
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");

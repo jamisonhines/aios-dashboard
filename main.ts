@@ -3452,7 +3452,6 @@ function renderUsageTab(
 
     const periodbar = periodbarHost.createDiv({ cls: "aios-usage-periodbar" });
     const body = wrap.createDiv({ cls: "aios-usage-body" });
-    const generated = Date.parse(stats.generatedAt || "");
     // 15 minutes: the exporter is wired into the project SessionStart hook, which fires on
     // every session started with the vault as cwd, and this vault routinely runs 10-20
     // concurrent sessions -- in practice a fresh session (and therefore a fresh export) is
@@ -3460,45 +3459,25 @@ function renderUsageTab(
     // with nobody starting a session, while still catching the pipeline going stale for a
     // whole afternoon (the audit's own frozen finding was 5.03 hours stale).
     const STALE_THRESHOLD_MS = 15 * 60 * 1000;
-    const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
-    const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: Number.isFinite(generated) ? `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}` : "Snapshot generation time unavailable" });
-    const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
-    const doRefresh = () => {
-      refresh.disabled = true;
-      refreshStatus.setText("Refreshing usage snapshot...");
-      refreshUsageSnapshot(app)
-        .then((result) =>
-          Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(
-            ([fresh, freshRunStatus]) => ({ fresh, freshRunStatus, busy: result.busy })
-          )
-        )
-        .then(({ fresh, freshRunStatus, busy }) => {
-          if (!fresh) throw new Error("no valid snapshot after refresh");
-          stats = fresh;
-          // Refetched alongside stats (not left pointing at the pre-refresh sidecar) so the
-          // run-health warning (rendered inside draw(), below) reflects the just-refreshed
-          // status too, same as the data it accompanies.
-          runStatus = freshRunStatus;
-          const generatedNow = Date.parse(stats.generatedAt || "");
-          if (busy) {
-            // Minor 5 (round 2): busy now exits 0 (round 1's fix for the CLI/SessionStart
-            // hook), so a naive "exit 0 means fresh" read would silently drop the "(stale)"
-            // label and claim success even though nothing actually changed -- another writer
-            // was already producing an equally fresh snapshot and this call just re-read
-            // whatever was already on disk. Say so explicitly instead of pretending refresh
-            // ran to completion.
-            const stillStale = !Number.isFinite(generatedNow) || Date.now() - generatedNow > STALE_THRESHOLD_MS;
-            refreshStatus.setText(`Another export was already in progress; showing Generated ${Number.isFinite(generatedNow) ? new Date(generatedNow).toLocaleString() : "unknown"}${stillStale ? " (stale)" : ""}`);
-          } else {
-            refreshStatus.setText(`Generated ${new Date(generatedNow).toLocaleString()}`);
-          }
-          draw();
-        })
-        .catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot."))
-        .finally(() => { refresh.disabled = false; });
-    };
-    refresh.addEventListener("click", doRefresh);
-    if (stale) void doRefresh();
+    // R2-I1 (Reviewer round 2, promoted from the Coder's own round-2 side note): refreshStatus
+    // and the Refresh button used to be created HERE, once, before draw() ever ran -- but
+    // draw() unconditionally calls body.empty() on every invocation, including the very first,
+    // which silently wiped both out of the rendered tree before the user ever saw them. This
+    // was pre-existing at base (5bcc7aa), not introduced by this task, but it defeats this
+    // task's own success criterion ("staleness is visible to the reader") and requirement (4),
+    // so it is fixed here. Both are now created INSIDE draw() (same placement pattern as
+    // renderBudgetWarning/renderUsageRunWarnings just below), recreated on every redraw so they
+    // are never wiped, with a `refreshTriggeredForThisLoad` guard (outside draw(), persisting
+    // across redraws) so a stale snapshot only auto-triggers ONE refresh per tab load, not one
+    // per redraw (range/offset changes and ResizeObserver-triggered redraws call draw() too).
+    let refreshTriggeredForThisLoad = false;
+    // Set by doRefresh (inside draw(), below) when the exporter reported "busy" (found a live
+    // lock and did nothing) rather than genuinely refreshing. Read by draw()'s own text
+    // computation so that outcome survives the redraw doRefresh triggers right after setting
+    // it -- draw() unconditionally rebuilds refreshStatus's text every call, so anything set
+    // directly on the element by doRefresh would be overwritten by draw() before ever being
+    // seen. Cleared at the start of every doRefresh call.
+    let lastRefreshWasBusy = false;
 
     const draw = () => {
       // Scroll-position fix (defect 3, 2026-08, still applies under the new
@@ -3519,6 +3498,54 @@ function renderUsageTab(
 
       periodbar.empty();
       body.empty();
+
+      // R2-I1: recreated on every redraw so body.empty() above can never wipe them out of the
+      // rendered tree permanently -- they are re-added in the SAME call that just emptied
+      // `body`. `generated`/`stale` are recomputed from the CURRENT `stats` (not a value
+      // captured once before draw() existed), so a refresh that swaps `stats` is reflected the
+      // very next redraw, same as everything else draw() renders.
+      const generated = Date.parse(stats.generatedAt || "");
+      const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
+      const refreshStatusText = !Number.isFinite(generated)
+        ? "Snapshot generation time unavailable"
+        : lastRefreshWasBusy
+          ? `Another export was already in progress; showing Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
+          : `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`;
+      const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: refreshStatusText });
+      const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
+      const doRefresh = () => {
+        refresh.disabled = true;
+        lastRefreshWasBusy = false;
+        refreshStatus.setText("Refreshing usage snapshot...");
+        refreshUsageSnapshot(app)
+          .then((result) =>
+            Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(
+              ([fresh, freshRunStatus]) => ({ fresh, freshRunStatus, busy: result.busy })
+            )
+          )
+          .then(({ fresh, freshRunStatus, busy }) => {
+            if (!fresh) throw new Error("no valid snapshot after refresh");
+            stats = fresh;
+            // Refetched alongside stats (not left pointing at the pre-refresh sidecar) so the
+            // run-health warning below reflects the just-refreshed status too, same as the
+            // data it accompanies.
+            runStatus = freshRunStatus;
+            // Minor 5 (round 2): busy exits 0 now, so exit-code-0 alone can't tell "genuinely
+            // refreshed" from "found the lock held and did nothing" -- lastRefreshWasBusy
+            // carries that distinction through to draw()'s own text computation above, since
+            // draw() (called next) rebuilds refreshStatus's text unconditionally and would
+            // otherwise silently overwrite anything set directly on the element here.
+            lastRefreshWasBusy = busy;
+            draw();
+          })
+          .catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot."))
+          .finally(() => { refresh.disabled = false; });
+      };
+      refresh.addEventListener("click", doRefresh);
+      if (stale && !refreshTriggeredForThisLoad) {
+        refreshTriggeredForThisLoad = true;
+        void doRefresh();
+      }
 
       const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date(), stats.dayTimeZone);
       renderUsagePeriodBar(periodbar, win, viewState, draw);
