@@ -219,6 +219,31 @@ function questions(entries) {
 // --- empty inputs -> empty output ---
 assert.deepEqual(computeCoordinationView([], NOW), [], "no participating projects -> no views");
 
+// --- Reviewer round 2, Minor M-6: the fixture comment on the plugin's
+// synthetic fixture (Q-2026-01-01-05) claims the bold-colon-WITH-text form
+// "proves the READ side" for the plugin, but until now no plugin suite
+// actually exercised that claim -- mutation G (reverting extractAnswerText
+// to the old plain-only regex) stayed green in every plugin test file, only
+// the vault suite caught it. This is the real end-to-end plugin read path
+// (computeCoordinationView -> parseQuestionsOpen -> isCoordinationQuestionAnswered,
+// the exact chain that drives the "answered" pill in main.ts), not a
+// hand-built {answer: "..."} object like Q_ANSWERED below. ---
+{
+  const QUESTIONS = questions([
+    "### Q-2026-09-05-01 Bold-colon Answer line WITH text",
+    "- Context: c",
+    "- **Answer:** partial info already recorded by hand",
+    "",
+  ]);
+  const views = computeCoordinationView(
+    [{ slug: "proj-a", ledgerContent: ledger([], []), questionsContent: QUESTIONS }],
+    NOW
+  );
+  const q = views[0].questions[0];
+  assert.equal(q.answer, "partial info already recorded by hand", "the bold-colon form's text is read through the real plugin path, not just the vault lib directly");
+  assert.equal(isCoordinationQuestionAnswered(q), true, "and it reads as ANSWERED through the exact predicate the pill uses");
+}
+
 // --- isCoordinationQuestionAnswered / filterCoordinationQuestions /
 // coordinationQuestionFilterCounts: the filter-chip data model, owner
 // feedback 2026-08-30 ("lets put a filtered tab (answered, unanswered,
