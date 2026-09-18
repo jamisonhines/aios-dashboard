@@ -1788,6 +1788,57 @@ export function budgetGuardrail(todayCostUsd, dailyBudgetUsd) {
 }
 
 // ---------------------------------------------------------------------------
+// Usage-tab run-health warnings (pure, tsk-2026-09-17-024 round 2, Important 3
+// and Minor 6). Extracted out of main.ts's renderUsageTab so the gating logic
+// itself -- not a hand-written mirror of it -- can be exercised by a plain
+// node test with no esbuild bundling and no Obsidian stub required, the same
+// way budgetGuardrail above is tested. renderUsageTab calls this and renders
+// the result the same way it already calls/renders budgetGuardrail.
+// ---------------------------------------------------------------------------
+
+/**
+ * `readState`: "absent" | "invalid" | "ok" | undefined, from main.ts's
+ * usageReadState map -- what the MOST RECENT attempt to read the live
+ * usage-stats.json off disk actually found, independent of whether a cached
+ * last-good snapshot is being shown instead.
+ * `runStatus`: the exporter's usage-stats.status.json sidecar (or null if
+ * absent/unreadable), `{ lastAttemptAt, lastSuccessAt, lastError }`.
+ * Returns the warning message strings to show, in a stable order; empty when
+ * nothing is wrong. Two independent conditions, either or both can fire:
+ *   - the file currently on disk could not be read as a valid snapshot
+ *     ("invalid") or does not exist at all ("absent") -- both cases mean
+ *     whatever IS being shown is a cached last-good snapshot from earlier in
+ *     this session, not what a fresh read just found. Before Minor 6,
+ *     "absent" was computed by the caller but never surfaced here, so a
+ *     deleted usage-stats.json with a cached snapshot still in memory showed
+ *     no warning at all.
+ *   - the exporter's most recent attempt recorded an error that is not older
+ *     than its most recent success (or there has never been a success) --
+ *     true even when the last GOOD snapshot still parses fine and looks
+ *     current, e.g. every run since some break has failed but the last good
+ *     run from before that is still sitting on disk.
+ * @param {"absent"|"invalid"|"ok"|undefined} readState
+ * @param {{ lastAttemptAt: string|null, lastSuccessAt: string|null, lastError: string|null }|null} runStatus
+ */
+export function usageRunWarnings(readState, runStatus) {
+  const messages = [];
+  if (readState === "invalid") {
+    messages.push("The snapshot file on disk is unreadable or invalid; showing the last known-good snapshot from this session.");
+  } else if (readState === "absent") {
+    messages.push("No snapshot file exists on disk yet; showing the last known-good snapshot from this session.");
+  }
+  const lastRunFailed = !!(
+    runStatus &&
+    runStatus.lastError &&
+    (!runStatus.lastSuccessAt || (runStatus.lastAttemptAt && runStatus.lastAttemptAt > runStatus.lastSuccessAt))
+  );
+  if (lastRunFailed) {
+    messages.push(`The last export attempt failed: ${runStatus?.lastError || "unknown error"}`);
+  }
+  return messages;
+}
+
+// ---------------------------------------------------------------------------
 // Workflow spend-spike detection (build 2.9 slice 3). Compares each
 // workflow's cost SHARE (of total workflow spend, not absolute dollars) over
 // the last 7 days against its share over the prior 28 days (days 8-35 ago --

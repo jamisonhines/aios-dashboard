@@ -48,6 +48,7 @@ import {
   resolveCaptureFileName,
   buildQuickCaptureContent,
   budgetGuardrail,
+  usageRunWarnings,
   computeUsageWindow,
   usageChartFromWindow,
   usageDayFamilyBars,
@@ -2669,7 +2670,7 @@ function renderAutomationSection(app: App, root: HTMLElement, settings: AiosDash
 type UsageReadState = "absent" | "invalid" | "ok";
 const usageLastGood = new Map<string, UsageStats>();
 const usageReadState = new Map<string, UsageReadState>();
-let usageRefreshInFlight: Promise<void> | null = null;
+let usageRefreshInFlight: Promise<{ busy: boolean }> | null = null;
 async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats | null> {
   try {
     if (!(await app.vault.adapter.exists(statsPath))) {
@@ -2707,14 +2708,26 @@ async function loadUsageRunStatus(app: App, statsPath: string): Promise<UsageRun
     return parsed as UsageRunStatus;
   } catch { return null; }
 }
-function refreshUsageSnapshot(app: App): Promise<void> {
+function refreshUsageSnapshot(app: App): Promise<{ busy: boolean }> {
   if (usageRefreshInFlight) return usageRefreshInFlight;
-  usageRefreshInFlight = new Promise<void>((resolve, reject) => {
+  usageRefreshInFlight = new Promise<{ busy: boolean }>((resolve, reject) => {
     try {
       const basePath = (app.vault.adapter as any).basePath;
       if (typeof basePath !== "string") throw new Error("vault path unavailable");
-      const child = require("child_process").spawn(process.execPath, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: "ignore" });
-      child.once("error", reject); child.once("exit", (code: number) => code === 0 ? resolve() : reject(new Error(`exporter exited ${code}`)));
+      let stdout = "";
+      const child = require("child_process").spawn(process.execPath, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "ignore"] });
+      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.once("error", reject);
+      child.once("exit", (code: number) => {
+        if (code !== 0) { reject(new Error(`exporter exited ${code}`)); return; }
+        // Round 1 made a live-lock encounter exit 0 (it is not a failure -- another writer is
+        // producing an equally fresh snapshot). That means exit-code-0 alone can no longer
+        // tell the caller "I actually refreshed" from "I found the lock held and did nothing";
+        // the busy path's one-line stdout message (unchanged since round 1) is the only signal
+        // left to tell them apart. Minor 5 (round 2): the caller uses this to avoid claiming a
+        // fresh refresh, and to keep the "(stale)" label, when nothing actually changed.
+        resolve({ busy: /usage export busy/.test(stdout) });
+      });
     } catch (error) { reject(error); }
   }).finally(() => { usageRefreshInFlight = null; });
   return usageRefreshInFlight;
@@ -3356,6 +3369,18 @@ function renderBudgetWarning(
   container.createDiv({ cls: "aios-budget-warn" }).setText(guardrail.message);
 }
 
+// Usage-tab run-health warning (tsk-2026-09-17-024 round 2, Important 3 + Minor 6). Renders
+// the OUTPUT of the pure usageRunWarnings (model.mjs) -- see that function's own doc comment
+// for what the two conditions mean. Deliberately called from inside draw() (same as
+// renderBudgetWarning just above), not once before it: draw() unconditionally empties `body`
+// on every call (range/offset changes, ResizeObserver-triggered redraws), so anything appended
+// to `body` only BEFORE draw() runs is wiped the instant draw() first executes and never
+// reappears. Renders nothing when there is nothing to warn about.
+function renderUsageRunWarnings(container: HTMLElement, messages: string[]) {
+  if (!messages.length) return;
+  container.createDiv({ cls: "aios-budget-warn" }).setText(messages.join(" "));
+}
+
 // Usage tab: async load + render. Renders a hint when the exporter has not
 // run yet (no usage-stats.json at settings.usageStatsPath).
 //
@@ -3438,24 +3463,42 @@ function renderUsageTab(
     const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
     const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: Number.isFinite(generated) ? `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}` : "Snapshot generation time unavailable" });
     const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
-    const doRefresh = () => { refresh.disabled = true; refreshStatus.setText("Refreshing usage snapshot..."); refreshUsageSnapshot(app).then(() => loadUsageStats(app, settings.usageStatsPath)).then((fresh) => { if (!fresh) throw new Error("no valid snapshot after refresh"); stats = fresh; refreshStatus.setText(`Generated ${new Date(stats.generatedAt).toLocaleString()}`); draw(); }).catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot.")).finally(() => { refresh.disabled = false; }); };
+    const doRefresh = () => {
+      refresh.disabled = true;
+      refreshStatus.setText("Refreshing usage snapshot...");
+      refreshUsageSnapshot(app)
+        .then((result) =>
+          Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(
+            ([fresh, freshRunStatus]) => ({ fresh, freshRunStatus, busy: result.busy })
+          )
+        )
+        .then(({ fresh, freshRunStatus, busy }) => {
+          if (!fresh) throw new Error("no valid snapshot after refresh");
+          stats = fresh;
+          // Refetched alongside stats (not left pointing at the pre-refresh sidecar) so the
+          // run-health warning (rendered inside draw(), below) reflects the just-refreshed
+          // status too, same as the data it accompanies.
+          runStatus = freshRunStatus;
+          const generatedNow = Date.parse(stats.generatedAt || "");
+          if (busy) {
+            // Minor 5 (round 2): busy now exits 0 (round 1's fix for the CLI/SessionStart
+            // hook), so a naive "exit 0 means fresh" read would silently drop the "(stale)"
+            // label and claim success even though nothing actually changed -- another writer
+            // was already producing an equally fresh snapshot and this call just re-read
+            // whatever was already on disk. Say so explicitly instead of pretending refresh
+            // ran to completion.
+            const stillStale = !Number.isFinite(generatedNow) || Date.now() - generatedNow > STALE_THRESHOLD_MS;
+            refreshStatus.setText(`Another export was already in progress; showing Generated ${Number.isFinite(generatedNow) ? new Date(generatedNow).toLocaleString() : "unknown"}${stillStale ? " (stale)" : ""}`);
+          } else {
+            refreshStatus.setText(`Generated ${new Date(generatedNow).toLocaleString()}`);
+          }
+          draw();
+        })
+        .catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot."))
+        .finally(() => { refresh.disabled = false; });
+    };
     refresh.addEventListener("click", doRefresh);
     if (stale) void doRefresh();
-
-    // Run-health warning: distinct from staleness above. usageReadState catches "the file on
-    // disk right now is unreadable/invalid, we are showing a cached last-good snapshot from
-    // memory" (would otherwise look identical to a healthy read). runStatus catches "the most
-    // recent exporter attempt threw," which can be true even while the LAST SUCCESSFUL
-    // snapshot still parses fine and looks current -- e.g. someone broke the exporter and every
-    // run since has failed, but the last good run from before that is still sitting there.
-    const readState = usageReadState.get(settings.usageStatsPath);
-    const lastRunFailed = !!(runStatus && runStatus.lastError && (!runStatus.lastSuccessAt || (runStatus.lastAttemptAt && runStatus.lastAttemptAt > runStatus.lastSuccessAt)));
-    if (readState === "invalid" || lastRunFailed) {
-      const parts: string[] = [];
-      if (readState === "invalid") parts.push("The snapshot file on disk is unreadable or invalid; showing the last known-good snapshot from this session.");
-      if (lastRunFailed) parts.push(`The last export attempt failed: ${runStatus?.lastError || "unknown error"}`);
-      body.createDiv({ cls: "aios-budget-warn", text: parts.join(" ") });
-    }
 
     const draw = () => {
       // Scroll-position fix (defect 3, 2026-08, still applies under the new
@@ -3486,6 +3529,10 @@ function renderUsageTab(
       const scopedLabel = usageScopedRangeLabel(win);
 
       renderBudgetWarning(body, budgetGuardrail(todayCostUsd, settings.dailyBudgetUsd));
+      // Run-health warning: distinct from the staleness suffix on refreshStatus above.
+      // usageReadState is read fresh here (not captured once outside draw()) so a refresh's
+      // side effect on that map is picked up on the very next redraw, same as `stats` itself.
+      renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus));
       renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
       renderUsageChartHost(body, win, viewState);
 
