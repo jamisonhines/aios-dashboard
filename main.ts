@@ -86,6 +86,7 @@ import {
   validateAgentSelection,
   safeFallbackCandidates,
   agentModelPickerState,
+  resolveExporterLaunch,
 } from "./model.mjs";
 import { readProjectAgentSettings, writeProjectAgentOverride } from "./agent-models-write.mjs";
 
@@ -2670,7 +2671,20 @@ function renderAutomationSection(app: App, root: HTMLElement, settings: AiosDash
 type UsageReadState = "absent" | "invalid" | "ok";
 const usageLastGood = new Map<string, UsageStats>();
 const usageReadState = new Map<string, UsageReadState>();
-let usageRefreshInFlight: Promise<{ busy: boolean }> | null = null;
+// tsk-2026-09-18-020, D-2026-09-18-02 "one button": module-level so BOTH the header refresh
+// icon and the Usage tab's own stale-triggered auto-refresh go through the exact same in-flight
+// promise -- whichever caller gets there first starts the exporter, every other concurrent
+// caller (a second click, a second tab instance, the header racing the tab's own auto-trigger)
+// joins the SAME promise instead of spawning a second exporter process.
+let usageRefreshInFlight: Promise<UsageRefreshResult> | null = null;
+// The most recently SETTLED outcome, across every caller -- module-level for the same reason as
+// usageRefreshInFlight: a run triggered from the header icon must still be visible on the Usage
+// tab's status line even though that tab's own doRefresh never called refreshUsageSnapshot for
+// this particular run. Set exactly once per run, synchronously at resolution (see the `settle`
+// helper inside refreshUsageSnapshot below), so every draw() that runs after a run finishes --
+// whether it was woken by this run's own header-triggered refresh(), or by an unrelated redraw
+// that just happens to run later -- sees the same, current answer.
+let lastUsageRefreshResult: UsageRefreshResult | null = null;
 async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats | null> {
   try {
     if (!(await app.vault.adapter.exists(statsPath))) {
@@ -2708,27 +2722,73 @@ async function loadUsageRunStatus(app: App, statsPath: string): Promise<UsageRun
     return parsed as UsageRunStatus;
   } catch { return null; }
 }
-function refreshUsageSnapshot(app: App): Promise<{ busy: boolean }> {
+// { busy, error }: never rejects. `error`, when set, is a short one-line reason (the first
+// non-blank stderr line, or the spawn/resolution failure's own message) -- tsk-2026-09-18-020
+// requirement 2, so a broken refresh names its own cause instead of a bare "failed".
+interface UsageRefreshResult {
+  busy: boolean;
+  error: string | null;
+}
+// Impure glue around resolveExporterLaunch (model.mjs, pure, unit-tested): the require()s must
+// stay lexically inside a try/catch, same reasoning as nextTaskId's requireFs above -- esbuild's
+// browser-platform bundle otherwise tries to statically resolve these at build time and fails.
+function resolveNodeForExporter(): { command: string | null; reason: string | null } {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const os = require("os");
+    return resolveExporterLaunch({
+      execPath: process.execPath,
+      env: process.env,
+      homedir: os.homedir(),
+      exists: (p: string) => { try { return fs.existsSync(p); } catch { return false; } },
+      readFile: (p: string) => { try { return fs.readFileSync(p, "utf8"); } catch { return null; } },
+      listNodeVersionDirs: (dir: string) => { try { return fs.readdirSync(dir); } catch { return []; } },
+    });
+  } catch (error: any) {
+    return { command: null, reason: error?.message || String(error) };
+  }
+}
+function refreshUsageSnapshot(app: App): Promise<UsageRefreshResult> {
   if (usageRefreshInFlight) return usageRefreshInFlight;
-  usageRefreshInFlight = new Promise<{ busy: boolean }>((resolve, reject) => {
+  usageRefreshInFlight = new Promise<UsageRefreshResult>((resolve) => {
+    // Every exit from this executor goes through `settle`, never `resolve` directly, so
+    // lastUsageRefreshResult is always updated in the SAME synchronous step as resolution --
+    // whichever draw() runs next (this tab's own, or a brand new one from the header's
+    // post-settle refresh()) sees the right answer immediately, not one redraw late.
+    const settle = (result: UsageRefreshResult) => { lastUsageRefreshResult = result; resolve(result); };
     try {
       const basePath = (app.vault.adapter as any).basePath;
-      if (typeof basePath !== "string") throw new Error("vault path unavailable");
+      if (typeof basePath !== "string") { settle({ busy: false, error: "vault path unavailable" }); return; }
+      // tsk-2026-09-18-020: process.execPath used to be spawned directly here. Measured inside
+      // Obsidian, that is the packaged Electron binary, not node, and it never ran the exporter
+      // (see resolveExporterLaunch's header comment in model.mjs for the exact evidence,
+      // including that ELECTRON_RUN_AS_NODE=1 did not help either). resolveExporterLaunch picks
+      // a real node binary instead.
+      const launch = resolveNodeForExporter();
+      if (!launch.command) { settle({ busy: false, error: launch.reason }); return; }
       let stdout = "";
-      const child = require("child_process").spawn(process.execPath, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "ignore"] });
+      let stderr = "";
+      const child = require("child_process").spawn(launch.command, ["Operations/scripts/export-usage-stats.mjs", basePath], { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-      child.once("error", reject);
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.once("error", (err: any) => { settle({ busy: false, error: err?.message || String(err) }); });
       child.once("exit", (code: number) => {
-        if (code !== 0) { reject(new Error(`exporter exited ${code}`)); return; }
+        if (code !== 0) {
+          const firstStderrLine = stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+          settle({ busy: false, error: firstStderrLine || `exporter exited ${code}` });
+          return;
+        }
         // Round 1 made a live-lock encounter exit 0 (it is not a failure -- another writer is
         // producing an equally fresh snapshot). That means exit-code-0 alone can no longer
         // tell the caller "I actually refreshed" from "I found the lock held and did nothing";
         // the busy path's one-line stdout message (unchanged since round 1) is the only signal
         // left to tell them apart. Minor 5 (round 2): the caller uses this to avoid claiming a
         // fresh refresh, and to keep the "(stale)" label, when nothing actually changed.
-        resolve({ busy: /usage export busy/.test(stdout) });
+        settle({ busy: /usage export busy/.test(stdout), error: null });
       });
-    } catch (error) { reject(error); }
+    } catch (error: any) { settle({ busy: false, error: error?.message || String(error) }); }
   }).finally(() => { usageRefreshInFlight = null; });
   return usageRefreshInFlight;
 }
@@ -3460,24 +3520,22 @@ function renderUsageTab(
     // whole afternoon (the audit's own frozen finding was 5.03 hours stale).
     const STALE_THRESHOLD_MS = 15 * 60 * 1000;
     // R2-I1 (Reviewer round 2, promoted from the Coder's own round-2 side note): refreshStatus
-    // and the Refresh button used to be created HERE, once, before draw() ever ran -- but
-    // draw() unconditionally calls body.empty() on every invocation, including the very first,
-    // which silently wiped both out of the rendered tree before the user ever saw them. This
-    // was pre-existing at base (5bcc7aa), not introduced by this task, but it defeats this
-    // task's own success criterion ("staleness is visible to the reader") and requirement (4),
-    // so it is fixed here. Both are now created INSIDE draw() (same placement pattern as
-    // renderBudgetWarning/renderUsageRunWarnings just below), recreated on every redraw so they
-    // are never wiped, with a `refreshTriggeredForThisLoad` guard (outside draw(), persisting
-    // across redraws) so a stale snapshot only auto-triggers ONE refresh per tab load, not one
-    // per redraw (range/offset changes and ResizeObserver-triggered redraws call draw() too).
+    // used to be created HERE, once, before draw() ever ran -- but draw() unconditionally calls
+    // body.empty() on every invocation, including the very first, which silently wiped it out
+    // of the rendered tree before the user ever saw it. This was pre-existing at base
+    // (5bcc7aa), not introduced by this task, but it defeats this task's own success criterion
+    // ("staleness is visible to the reader") and requirement (4), so it is fixed here.
+    // refreshStatus is now created INSIDE draw() (same placement pattern as
+    // renderBudgetWarning/renderUsageRunWarnings just below), recreated on every redraw so it is
+    // never wiped, with a `refreshTriggeredForThisLoad` guard (outside draw(), persisting across
+    // redraws) so a stale snapshot only auto-triggers ONE refresh per tab load, not one per
+    // redraw (range/offset changes and ResizeObserver-triggered redraws call draw() too).
+    //
+    // tsk-2026-09-18-020, D-2026-09-18-02 "one button": the Usage tab's own Refresh button is
+    // removed. The header refresh icon (renderDashboard, below) now runs the exporter too, and
+    // this tab's stale-triggered auto-refresh below calls the SAME shared refreshUsageSnapshot,
+    // so there is exactly one code path that launches the exporter, whichever UI triggers it.
     let refreshTriggeredForThisLoad = false;
-    // Set by doRefresh (inside draw(), below) when the exporter reported "busy" (found a live
-    // lock and did nothing) rather than genuinely refreshing. Read by draw()'s own text
-    // computation so that outcome survives the redraw doRefresh triggers right after setting
-    // it -- draw() unconditionally rebuilds refreshStatus's text every call, so anything set
-    // directly on the element by doRefresh would be overwritten by draw() before ever being
-    // seen. Cleared at the start of every doRefresh call.
-    let lastRefreshWasBusy = false;
 
     const draw = () => {
       // Scroll-position fix (defect 3, 2026-08, still applies under the new
@@ -3506,55 +3564,58 @@ function renderUsageTab(
       // very next redraw, same as everything else draw() renders.
       const generated = Date.parse(stats.generatedAt || "");
       const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
+      // tsk-2026-09-18-020, D-2026-09-18-02 "one button": reads MODULE-LEVEL state
+      // (usageRefreshInFlight / lastUsageRefreshResult), not a per-tab-instance flag -- a run
+      // triggered by the header icon must be visible here even though this tab's own doRefresh
+      // never called refreshUsageSnapshot for that particular run. lastUsageRefreshResult's
+      // error, when set, carries the SPECIFIC reason the last attempt failed (GL-009 rule 3 --
+      // name the failure, not just that one occurred), and takes priority over the busy suffix
+      // since a failure is more actionable.
+      const refreshing = usageRefreshInFlight !== null;
       const refreshStatusText = !Number.isFinite(generated)
         ? "Snapshot generation time unavailable"
-        : lastRefreshWasBusy
-          ? `Another export was already in progress; showing Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
-          : `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`;
+        : refreshing
+          ? `Refreshing usage snapshot... (showing Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""})`
+          : lastUsageRefreshResult?.error
+            ? `Refresh failed (${lastUsageRefreshResult.error}); showing last valid snapshot: Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
+            : lastUsageRefreshResult?.busy
+              ? `Another export was already in progress; showing Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
+              : `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`;
       const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: refreshStatusText });
-      const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
+      // tsk-2026-09-18-020, D-2026-09-18-02: no button here any more -- this only fires from the
+      // stale-triggered auto-refresh below, through the SAME shared refreshUsageSnapshot the
+      // header icon uses (module-level usageRefreshInFlight dedupes a concurrent header click).
       const doRefresh = () => {
-        refresh.disabled = true;
-        lastRefreshWasBusy = false;
+        // Immediate, synchronous feedback for THIS draw() (the one that just decided to
+        // auto-trigger): refreshStatusText above was already computed and rendered before
+        // usageRefreshInFlight got set a few lines down inside refreshUsageSnapshot, so without
+        // this direct setText the stale "Generated ... (stale)" text would sit unchanged for the
+        // whole exporter run. A header-triggered run does not need this: refresh() rebuilds the
+        // tab from scratch AFTER usageRefreshInFlight is already set, so its refreshStatusText
+        // computation sees `refreshing` correctly from the start.
         refreshStatus.setText("Refreshing usage snapshot...");
         refreshUsageSnapshot(app)
           .then((result) =>
             Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(
-              ([fresh, freshRunStatus]) => ({ fresh, freshRunStatus, busy: result.busy })
+              ([fresh, freshRunStatus]) => ({ fresh, freshRunStatus, result })
             )
           )
-          .then(({ fresh, freshRunStatus, busy }) => {
-            if (!fresh) throw new Error("no valid snapshot after refresh");
-            stats = fresh;
+          .then(({ fresh, freshRunStatus, result }) => {
+            if (fresh) stats = fresh;
             // Refetched alongside stats (not left pointing at the pre-refresh sidecar) so the
             // run-health warning below reflects the just-refreshed status too, same as the
             // data it accompanies.
             runStatus = freshRunStatus;
-            // Minor 5 (round 2): busy exits 0 now, so exit-code-0 alone can't tell "genuinely
-            // refreshed" from "found the lock held and did nothing" -- lastRefreshWasBusy
-            // carries that distinction through to draw()'s own text computation above, since
-            // draw() (called next) rebuilds refreshStatus's text unconditionally and would
-            // otherwise silently overwrite anything set directly on the element here.
-            lastRefreshWasBusy = busy;
+            // refreshUsageSnapshot itself never rejects any more (requirement 2): a launch or
+            // spawn failure comes back as result.error, already recorded into the module-level
+            // lastUsageRefreshResult by refreshUsageSnapshot's own settle() at the moment it
+            // resolved. The one failure mode it cannot see from inside itself is "the exporter
+            // exited 0 but the file still didn't parse" -- covered here as a fallback so that
+            // case is never silently indistinguishable from success.
+            if (!fresh && !result.error) lastUsageRefreshResult = { busy: result.busy, error: "exporter completed but produced no readable snapshot" };
             draw();
-          })
-          .catch(() => {
-            // R3-M2 (Reviewer round 3): this used to drop the age/stale suffix entirely on a
-            // failed refresh, right when it matters most -- the auto-refresh that triggered
-            // this call fires BECAUSE the snapshot is stale, so a stale-and-broken pipeline
-            // showed a failure line with no age at all until the next unrelated redraw
-            // happened to restore it. `generated`/`stale` are already in scope from this same
-            // draw() call (computed above, before doRefresh was even defined), so this can
-            // reference them directly rather than waiting for a redraw to recompute them.
-            refreshStatus.setText(
-              Number.isFinite(generated)
-                ? `Refresh failed; showing last valid snapshot: Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`
-                : "Refresh failed; showing last valid snapshot."
-            );
-          })
-          .finally(() => { refresh.disabled = false; });
+          });
       };
-      refresh.addEventListener("click", doRefresh);
       if (stale && !refreshTriggeredForThisLoad) {
         refreshTriggeredForThisLoad = true;
         void doRefresh();
@@ -5329,10 +5390,37 @@ function renderDashboard(
     refresh();
   });
 
+  // tsk-2026-09-18-020, D-2026-09-18-02 "one button": this icon now does both jobs the Usage
+  // tab used to split across two controls -- it re-reads the vault immediately (as it always
+  // did) AND, on desktop, re-runs the usage exporter through the exact same shared
+  // refreshUsageSnapshot the Usage tab's own stale-triggered auto-refresh uses (module-level
+  // usageRefreshInFlight dedupes the two if they race). Mobile has no Node child_process, so
+  // there the icon just re-reads, same as before this task.
   const refreshBtn = actions.createEl("button", { cls: "aios-refresh aios-icon-btn" });
   refreshBtn.setAttr("aria-label", "Refresh");
   setIcon(refreshBtn, "rotate-cw");
-  refreshBtn.addEventListener("click", () => refresh());
+  // Every render checks CURRENT module state (not a value captured once) so a run started
+  // elsewhere (the Usage tab's own auto-refresh, or a previous click whose settle-redraw hasn't
+  // rebuilt this button yet) is still reflected on this fresh button the instant it is created --
+  // refresh() below rebuilds the whole header, including this button, so any state kept on the
+  // PREVIOUS button instance would be lost the moment refresh() runs.
+  if (usageRefreshInFlight) {
+    refreshBtn.addClass("aios-refresh-spinning");
+    refreshBtn.disabled = true;
+  }
+  refreshBtn.addEventListener("click", () => {
+    if (Platform.isDesktop) {
+      // Ignore/coalesce repeat clicks while a run is already in flight: only the click that
+      // actually STARTS a new run schedules the "re-render once it finishes" continuation, so
+      // a burst of clicks during one run never queues up multiple redundant re-renders on
+      // settle, and refreshUsageSnapshot's own module-level dedupe guarantees it is never more
+      // than one live exporter process regardless of how many callers ask for it.
+      const alreadyRunning = usageRefreshInFlight !== null;
+      const runPromise = refreshUsageSnapshot(app);
+      if (!alreadyRunning) void runPromise.finally(() => refresh());
+    }
+    refresh();
+  });
 
   if (settings.actionsEnabled && Platform.isDesktop) {
     const askBtn = actions.createEl("button", { cls: "aios-ask-dispatch" });

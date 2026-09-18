@@ -226,16 +226,37 @@ function resetSpawnLog() {
 }
 function installFakeChildProcess(spawnOutcomeProvider) {
   globalThis.require = (id) => {
+    // tsk-2026-09-18-020: refreshUsageSnapshot resolves a real node binary (resolveNodeForExporter
+    // -> resolveExporterLaunch in model.mjs) BEFORE spawning. That resolution's own correctness
+    // is unit-tested directly against model.mjs elsewhere (pure function, no fs); here it only
+    // needs to succeed trivially so the fake child_process.spawn below is reached at all -- these
+    // tests are about the launcher's WIRING (one launch, dedup, immediate re-render, error
+    // surfacing), not about which real path gets picked on this machine.
+    if (id === "fs") {
+      return { existsSync: () => true, readFileSync: () => "24.14.1", readdirSync: () => ["v24.14.1"] };
+    }
+    if (id === "os") {
+      return { homedir: () => "/fake/home" };
+    }
     if (id === "child_process") {
       return {
         spawn() {
           const callIndex = spawnLog.length;
           spawnLog.push({ callIndex });
           const listeners = { data: [], error: [], exit: [] };
+          const errListeners = [];
           const child = {
             stdout: {
               on(event, cb) {
                 if (event === "data") listeners.data.push(cb);
+              },
+            },
+            // tsk-2026-09-18-020: real (not omitted) so a spawnOutcomeProvider can supply
+            // `stderr` and exercise refreshUsageSnapshot's real first-stderr-line extraction,
+            // same "test the real wiring" discipline as everything else in this stub.
+            stderr: {
+              on(event, cb) {
+                if (event === "data") errListeners.push(cb);
               },
             },
             once(event, cb) {
@@ -250,6 +271,7 @@ function installFakeChildProcess(spawnOutcomeProvider) {
           if (outcome) {
             queueMicrotask(() => {
               if (outcome.stdout) for (const cb of listeners.data) cb(Buffer.from(outcome.stdout));
+              if (outcome.stderr) for (const cb of errListeners) cb(Buffer.from(outcome.stderr));
               for (const cb of listeners.exit) cb(outcome.code);
             });
           }
@@ -273,12 +295,28 @@ function fakeEl(tag = "div", options = {}) {
     clientHeight: 0,
     style: {},
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    // tsk-2026-09-18-020: real (not no-op'd) so the header refresh icon's spinning-class
+    // toggling is actually observable by a test, same reasoning as click() above.
+    addClass(c) { const parts = new Set((this.cls || "").split(/\s+/).filter(Boolean)); parts.add(c); this.cls = [...parts].join(" "); },
+    removeClass(c) { this.cls = (this.cls || "").split(/\s+/).filter((x) => x && x !== c).join(" "); },
+    toggleClass(c, on) { if (on) this.addClass(c); else this.removeClass(c); },
+    hasClass(c) { return (this.cls || "").split(/\s+/).includes(c); },
     createDiv(o = {}) { const c = fakeEl("div", o); c.parent = this; this.children.push(c); creationLog.push({ tag: "div", cls: c.cls, text: c.text }); return c; },
     createSpan(o = {}) { const c = fakeEl("span", o); c.parent = this; this.children.push(c); creationLog.push({ tag: "span", cls: c.cls, text: c.text }); return c; },
     createEl(name, o = {}) { const c = fakeEl(name, o); c.parent = this; this.children.push(c); creationLog.push({ tag: name, cls: c.cls, text: c.text }); return c; },
     appendChild(c) { c.parent = this; this.children.push(c); return c; },
-    addEventListener() {},
-    removeEventListener() {},
+    // tsk-2026-09-18-020: unlike the rest of this stub, click listeners are actually stored (not
+    // no-op'd) so new tests below can simulate a real click on the header refresh icon rather
+    // than calling an internal handler function directly -- the same "test the real wiring, not
+    // a hand-copy of it" discipline as the rest of this file. Harmless to every earlier test:
+    // nothing before this task ever called element.click().
+    __listeners: {},
+    addEventListener(evt, cb) { (this.__listeners[evt] ||= []).push(cb); },
+    removeEventListener(evt, cb) {
+      if (!this.__listeners[evt]) return;
+      this.__listeners[evt] = this.__listeners[evt].filter((f) => f !== cb);
+    },
+    click() { for (const cb of this.__listeners.click || []) cb({ preventDefault() {} }); },
     hide() {}, show() {}, isShown() { return false; },
     empty() { this.children = []; },
     setText(t) { this.text = t; },
@@ -293,8 +331,14 @@ function fakeEl(tag = "div", options = {}) {
   };
   return node;
 }
+// Token match, not exact-string match: main.ts creates elements with MULTIPLE space-separated
+// classes (e.g. "aios-refresh aios-icon-btn"), same as a real DOM className. An exact-string
+// findByClass would silently never find those.
+function hasClass(node, cls) {
+  return (node.cls || "").split(/\s+/).includes(cls);
+}
 function findByClass(node, cls) {
-  if (node.cls === cls) return node;
+  if (hasClass(node, cls)) return node;
   for (const child of node.children) {
     const match = findByClass(child, cls);
     if (match) return match;
@@ -434,18 +478,20 @@ async function renderUsageTabToCompletion({
   assert.match(firstRefreshStatus.text, /Generated/, "R2-I1: a 2-hour-old snapshot's refresh-status text must show the Generated/age text at creation time");
   assert.match(firstRefreshStatus.text, /\(stale\)/, "R2-I1: a 2-hour-old snapshot's refresh-status text must show the stale indicator at creation time");
 
+  // tsk-2026-09-18-020, D-2026-09-18-02 "one button": the Usage tab's own Refresh button is
+  // gone. The header icon (tested separately below, renderDashboardToCompletion) is now the
+  // only control that launches the exporter.
   const refreshButtonEntries = creationLog.filter((e) => e.cls === "aios-refresh");
-  assert.ok(refreshButtonEntries.length > 0, "R2-I1: the Refresh button must exist (be created) on every draw(), including the first");
+  assert.equal(refreshButtonEntries.length, 0, "D-2026-09-18-02: the Usage tab must no longer create its own Refresh button");
 
   // The creation-log checks above prove draw() computed the right text at creation time, but
   // NOT that the elements are still attached anywhere by the time everything settles -- that
-  // is precisely what the original R2-I1 bug got wrong: refreshStatus/refresh were created
-  // once, outside/before draw(), and then draw()'s own body.empty() (running for the very
-  // first time right after) permanently dropped them out of the tree with nothing left to
-  // ever re-add them. A creation-log-only test cannot see that regression (the elements WERE
-  // created, with correct text, before being wiped), so this checks the SETTLED tree too.
+  // is precisely what the original R2-I1 bug got wrong: refreshStatus was created once,
+  // outside/before draw(), and then draw()'s own body.empty() (running for the very first time
+  // right after) permanently dropped it out of the tree with nothing left to ever re-add it. A
+  // creation-log-only test cannot see that regression (the element WAS created, with correct
+  // text, before being wiped), so this checks the SETTLED tree too.
   assert.ok(findByClass(finalTree, "aios-usage-refresh-status"), "R2-I1: the refresh-status element must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
-  assert.ok(findByClass(finalTree, "aios-refresh"), "R2-I1: the Refresh button must still be present in the rendered tree after everything settles, not just created-then-wiped by draw()'s body.empty()");
   console.log("R2-I1: a 2-hour-old snapshot shows Generated/age + stale text and a Refresh button, at creation time, surviving draw()'s body.empty()");
 }
 
@@ -503,24 +549,27 @@ async function renderUsageTabToCompletion({
 }
 
 {
-  // --- lastRefreshWasBusy: a busy outcome must still say so after the redraw it triggers, not
-  // --- silently look like a normal fresh Generated line. ----------------------------------
+  // --- lastUsageRefreshResult (module-level, tsk-2026-09-18-020): a busy outcome must still
+  // --- say so after the redraw it triggers, not silently look like a normal fresh Generated
+  // --- line. Module-level (not a per-tab flag any more) so this same mechanism is what the
+  // --- header-icon tests above rely on to surface a failure regardless of which control
+  // --- triggered the run. ----------------------------------------------------------------
   const BUSY_CAP = 1;
   const busyOnceProvider = (callIndex) => (callIndex < BUSY_CAP ? { code: 0, stdout: "usage export busy; a live writer holds the lock" } : null);
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   const finalTree = await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo, basePath: "/fake/vault", spawnOutcomeProvider: busyOnceProvider, settleMs: 200 });
   const refreshStatusNode = findByClass(finalTree, "aios-usage-refresh-status");
-  assert.ok(refreshStatusNode, "R3-M1: a refresh-status node must exist after the busy redraw settles");
-  assert.match(refreshStatusNode.text, /Another export was already in progress/, `R3-M1: with lastRefreshWasBusy intact, the settled text after a busy outcome must say another export was in progress -- got: ${JSON.stringify(refreshStatusNode.text)}`);
+  assert.ok(refreshStatusNode, "a refresh-status node must exist after the busy redraw settles");
+  assert.match(refreshStatusNode.text, /Another export was already in progress/, `with lastUsageRefreshResult intact, the settled text after a busy outcome must say another export was in progress -- got: ${JSON.stringify(refreshStatusNode.text)}`);
 
-  // --- MUTATION: remove the `lastRefreshWasBusy = busy;` assignment (main.ts source string
-  // --- transform, never the tracked file), rerun, capture the real RED. ----------------------
-  const removeBusyFlag = (source) => {
-    const needle = "            lastRefreshWasBusy = busy;\n";
-    assert.ok(source.includes(needle), "R3-M1: the lastRefreshWasBusy assignment must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "");
-    assert.notEqual(mutated, source, "R3-M1: the mutation must actually change the source");
+  // --- MUTATION: neutralize the busy branch of draw()'s refreshStatusText ternary (main.ts
+  // --- source string transform, never the tracked file), rerun, capture the real RED. --------
+  const removeBusyBranch = (source) => {
+    const needle = "            : lastUsageRefreshResult?.busy\n";
+    assert.ok(source.includes(needle), "the lastUsageRefreshResult?.busy branch must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "            : false\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
     return mutated;
   };
   const mutatedTree = await renderUsageTabToCompletion({
@@ -528,7 +577,7 @@ async function renderUsageTabToCompletion({
     generatedAt: twoHoursAgo,
     basePath: "/fake/vault",
     spawnOutcomeProvider: busyOnceProvider,
-    mutateSource: removeBusyFlag,
+    mutateSource: removeBusyBranch,
     settleMs: 200,
   });
   const mutatedNode = findByClass(mutatedTree, "aios-usage-refresh-status");
@@ -536,9 +585,264 @@ async function renderUsageTabToCompletion({
   assert.doesNotMatch(
     mutatedNode.text,
     /Another export was already in progress/,
-    `MUTATION CHECK: with lastRefreshWasBusy never set, the busy outcome's redraw must WRONGLY look like a normal fresh read, proving the flag (not something else) carries that distinction -- got: ${JSON.stringify(mutatedNode.text)}`
+    `MUTATION CHECK: with the busy branch neutralized, the busy outcome's redraw must WRONGLY look like a normal fresh read, proving that branch (not something else) carries the distinction -- got: ${JSON.stringify(mutatedNode.text)}`
   );
-  console.log(`R3-M1: lastRefreshWasBusy -- intact: busy text visible after redraw ("${refreshStatusNode.text}"). MUTATION (flag removed): busy text vanished ("${mutatedNode.text}"). Reverted (never touched the tracked file).`);
+  console.log(`lastUsageRefreshResult busy surfacing -- intact: busy text visible after redraw ("${refreshStatusNode.text}"). MUTATION (branch neutralized): busy text vanished ("${mutatedNode.text}"). Reverted (never touched the tracked file).`);
+}
+
+{
+  // --- lastUsageRefreshResult error surfacing, same mechanism, isolated at the Usage-tab level
+  // --- (the header-icon test above exercises this end-to-end through a real click; this proves
+  // --- the draw()-side error branch specifically, mutated independently of the busy branch). ---
+  const failOnceProvider = (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "" } : null);
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const finalTree = await renderUsageTabToCompletion({ statusJson: null, generatedAt: twoHoursAgo, basePath: "/fake/vault", spawnOutcomeProvider: failOnceProvider, settleMs: 200 });
+  const refreshStatusNode = findByClass(finalTree, "aios-usage-refresh-status");
+  assert.ok(refreshStatusNode, "a refresh-status node must exist after the failed redraw settles");
+  assert.match(refreshStatusNode.text, /Refresh failed \(exporter exited 1\)/, `a real (fake-spawned) exit-1 exporter must surface "exporter exited 1" -- got: ${JSON.stringify(refreshStatusNode.text)}`);
+
+  const removeErrorBranch = (source) => {
+    const needle = "          : lastUsageRefreshResult?.error\n";
+    assert.ok(source.includes(needle), "the lastUsageRefreshResult?.error branch must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "          : false\n");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const mutatedTree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: twoHoursAgo,
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: failOnceProvider,
+    mutateSource: removeErrorBranch,
+    settleMs: 200,
+  });
+  const mutatedNode = findByClass(mutatedTree, "aios-usage-refresh-status");
+  assert.ok(mutatedNode, "sanity: a refresh-status node must still exist under the mutation");
+  assert.doesNotMatch(
+    mutatedNode.text,
+    /Refresh failed/,
+    `MUTATION CHECK: with the error branch neutralized, a real exporter failure must go WRONGLY unreported, proving that branch (not something else) surfaces it -- got: ${JSON.stringify(mutatedNode.text)}`
+  );
+  console.log(`lastUsageRefreshResult error surfacing -- intact: "${refreshStatusNode.text}". MUTATION (branch neutralized): "${mutatedNode.text}". Reverted (never touched the tracked file).`);
+}
+
+// --- 5. Header refresh icon (main.ts renderDashboard): tsk-2026-09-18-020, D-2026-09-18-02 ---
+// "one button" -- a real, full renderDashboard render (not a hand-simulated click handler),
+// same discipline as the Usage-tab wiring tests above. Exercises: exactly one exporter launch
+// plus an immediate re-render on click, a second click while running not launching a second
+// exporter, and the spinning-icon indicator.
+async function renderDashboardToCompletion({
+  spawnOutcomeProvider = null,
+  mutateSource = null,
+} = {}) {
+  resetCreationLog();
+  resetSpawnLog();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-header-refresh-"));
+  const stub = path.join(dir, "obsidian.mjs");
+  const entryName = ".dashboard-header-refresh-entry.ts";
+  const entry = path.join(root, entryName);
+  const out = path.join(dir, "out.mjs");
+  fs.writeFileSync(
+    stub,
+    [
+      "export class App {}", "export class ItemView {}", "export class Menu {}", "export class Modal {}", "export class Notice {}",
+      "export const Platform = { isDesktop: true };", "export class Plugin {}", "export class PluginSettingTab {}", "export class Scope {}",
+      "export class Setting {}", "export class TFile {}", "export class TFolder {}", "export class WorkspaceLeaf {}",
+      "export const normalizePath = (p) => p;", "export const setIcon = () => {};",
+    ].join("\n")
+  );
+  const mainSource = fs.readFileSync(path.join(root, "main.ts"), "utf8");
+  fs.writeFileSync(
+    entry,
+    (mutateSource ? mutateSource(mainSource) : mainSource) +
+      "\nexport { renderDashboard as __renderDashboard, DEFAULT_SETTINGS as __DEFAULT_SETTINGS };\n"
+  );
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.getComputedStyle = () => ({ overflowY: "visible" });
+  // renderDashboard's captureCoordinationFocus checks `instanceof HTMLTextAreaElement` on
+  // document.activeElement -- undefined in plain Node, unlike renderUsageTab's narrower stub
+  // which never reaches that code path.
+  globalThis.HTMLTextAreaElement = class {};
+  const docEl = fakeEl();
+  globalThis.document = {
+    body: docEl,
+    documentElement: docEl,
+    scrollingElement: docEl,
+    activeElement: docEl,
+    createElementNS(_ns, tag) { return fakeEl(tag); },
+    createElement(tag) { return fakeEl(tag); },
+  };
+  installFakeChildProcess(spawnOutcomeProvider);
+  try {
+    esbuild.buildSync({
+      absWorkingDir: root,
+      entryPoints: [entryName],
+      bundle: true,
+      format: "esm",
+      outfile: out,
+      treeShaking: false,
+      external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "node:os", "fs", "os", "@codemirror/*", "@lezer/*"],
+      alias: { obsidian: stub },
+    });
+    const { __renderDashboard: renderDashboard, __DEFAULT_SETTINGS: DEFAULT_SETTINGS } = await import(pathToFileURL(out).href);
+    const statsJson = JSON.stringify({ generatedAt: new Date().toISOString(), days: [], projects: [], windowDays: 35 });
+    const app = {
+      vault: {
+        getMarkdownFiles() { return []; },
+        getAbstractFileByPath() { return null; },
+        adapter: {
+          basePath: "/fake/vault",
+          async exists(p) { return p.endsWith("usage-stats.json"); },
+          async read(_p) { return statsJson; },
+        },
+      },
+      metadataCache: { getFileCache() { return undefined; }, unresolvedLinks: {} },
+      workspace: { openLinkText() {} },
+    };
+    const settings = { ...DEFAULT_SETTINGS, showHealthStrip: false, actionsEnabled: false };
+    const viewState = {
+      activeTab: "usage", activeStatus: null, activeCategory: "all", expanded: new Set(), openOff: new Set(),
+      completeOn: new Set(), usageRange: "7d", usageOffset: 0, systemsOpen: false, systemSkillsFilter: "",
+      systemSkillsExpandedGroups: new Set(), systemActiveSubTab: "agents", coordinationDrafts: new Map(),
+      coordinationQuestionFilter: new Map(), scrollTops: new Map(),
+    };
+    const rootEl = fakeEl();
+    let refreshCount = 0;
+    const refresh = () => {
+      refreshCount++;
+      renderDashboard(app, rootEl, refresh, viewState, settings, {}, true);
+    };
+    renderDashboard(app, rootEl, refresh, viewState, settings, {}, true);
+    await new Promise((r) => setTimeout(r, 150));
+    return {
+      getRoot: () => rootEl,
+      getRefreshBtn: () => findByClass(rootEl, "aios-refresh"),
+      getRefreshCount: () => refreshCount,
+      settle: (ms = 150) => new Promise((r) => setTimeout(r, ms)),
+    };
+  } finally {
+    fs.rmSync(entry, { force: true });
+  }
+}
+
+{
+  const BUSY_CAP = 0; // never busy: a normal successful run
+  const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider });
+  const btn = h.getRefreshBtn();
+  assert.ok(btn, "the header must render a refresh icon button (cls aios-refresh)");
+  assert.equal(spawnLog.length, 0, "sanity: no exporter launch before any click");
+
+  const countBefore = h.getRefreshCount();
+  btn.click();
+  assert.equal(h.getRefreshCount(), countBefore + 1, "a click must trigger an immediate re-render (the vault re-read), synchronously, not waiting on the exporter");
+  assert.equal(spawnLog.length, 1, "a click must launch exactly one exporter process");
+
+  // Second click while the (still in-flight, since the fake spawn resolves on a microtask that
+  // hasn't run yet) run is active must NOT launch a second exporter.
+  h.getRoot(); // (no-op access, keeps this block symmetric with the one below)
+  const refreshBtnAfterFirstClick = h.getRefreshBtn(); // refresh() rebuilt the header; get the CURRENT button
+  refreshBtnAfterFirstClick.click();
+  assert.equal(spawnLog.length, 1, `a second click while a run is already in flight must not launch a second exporter -- got ${spawnLog.length} spawns`);
+
+  await h.settle(150);
+  assert.equal(spawnLog.length, 1, "settling must not have launched any further exporter runs on its own");
+  console.log(`header refresh icon: 1 click -> 1 immediate re-render + 1 exporter launch; a second click while running -> still 1 launch (${spawnLog.length} total spawns)`);
+}
+
+{
+  // MUTATION PROOF (GL-009 rule 4): the guard that ACTUALLY prevents a second exporter process
+  // is refreshUsageSnapshot's own `if (usageRefreshInFlight) return usageRefreshInFlight;`
+  // dedupe, not the header click handler's `alreadyRunning` check (that one only avoids
+  // attaching a redundant extra "redraw on settle" continuation -- refreshUsageSnapshot is
+  // idempotent either way, so mutating the click handler's own check would NOT actually
+  // increase spawnLog.length, and would be a false proof). This mutates the REAL guard, in
+  // isolation, against the same two-click fixture used above (already confirmed to clear every
+  // guard ahead of it -- the fixture is unchanged from the intact run above).
+  const removeDedupeGuard = (source) => {
+    const needle = "  if (usageRefreshInFlight) return usageRefreshInFlight;\n";
+    assert.ok(source.includes(needle), "the refreshUsageSnapshot dedupe guard must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removeDedupeGuard });
+  const btn = h.getRefreshBtn();
+  btn.click();
+  assert.equal(spawnLog.length, 1, "sanity: first click still launches exactly one exporter under the mutation");
+  const btnAfterFirstClick = h.getRefreshBtn();
+  btnAfterFirstClick.click();
+  assert.equal(
+    spawnLog.length,
+    2,
+    `MUTATION CHECK: with refreshUsageSnapshot's own dedupe guard removed, a second click while the first run is still in flight must WRONGLY launch a second exporter process, proving THAT guard (not the click handler's own alreadyRunning check) is what stops it -- got ${spawnLog.length} spawns`
+  );
+  console.log(`header refresh icon dedupe: intact -- 2 clicks -> 1 spawn. MUTATION (refreshUsageSnapshot's own guard removed) -- 2 clicks -> ${spawnLog.length} spawns. Reverted (never touched the tracked file).`);
+}
+
+{
+  // MUTATION PROOF: the immediate re-render (the vault re-read that must not wait on the
+  // ~9s exporter) is the trailing, unconditional `refresh();` in the click handler, run
+  // regardless of Platform.isDesktop or in-flight state. Removing it must leave the click
+  // with NO visible effect until the exporter settles seconds later.
+  const removeImmediateRefresh = (source) => {
+    const needle = "      if (!alreadyRunning) void runPromise.finally(() => refresh());\n    }\n    refresh();\n  });";
+    assert.ok(source.includes(needle), "the click handler's trailing refresh() call must be present verbatim before mutating it (fixture drift guard)");
+    const mutated = source.replace(needle, "      if (!alreadyRunning) void runPromise.finally(() => refresh());\n    }\n  });");
+    assert.notEqual(mutated, source, "the mutation must actually change the source");
+    return mutated;
+  };
+  const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removeImmediateRefresh });
+  const countBefore = h.getRefreshCount();
+  const btn = h.getRefreshBtn();
+  btn.click();
+  assert.equal(
+    h.getRefreshCount(),
+    countBefore,
+    `MUTATION CHECK: with the click handler's immediate refresh() call removed, a click must WRONGLY produce no visible re-render until the exporter settles later, proving that call (not the exporter's own eventual redraw) is what makes the re-read immediate -- got refreshCount ${h.getRefreshCount()} vs before ${countBefore}`
+  );
+  console.log(`header refresh icon immediate re-render: intact -- click bumps refreshCount synchronously. MUTATION (trailing refresh() removed) -- refreshCount unchanged (${h.getRefreshCount()}) right after the click. Reverted (never touched the tracked file).`);
+}
+
+{
+  // Spinning-icon indicator: present while in flight (a spawn outcome provider that never
+  // resolves for call 0 -- `null` -- keeps the promise pending deterministically, no timing
+  // race), absent once settled.
+  const neverResolveProvider = () => null;
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: neverResolveProvider });
+  const btn = h.getRefreshBtn();
+  assert.ok(!hasClass(btn, "aios-refresh-spinning"), "the icon must not be spinning before any click");
+  btn.click();
+  const btnAfterClick = h.getRefreshBtn(); // refresh() rebuilt the header synchronously
+  assert.ok(hasClass(btnAfterClick, "aios-refresh-spinning"), "the icon must show it is spinning immediately after the click that started a run (the immediate re-render must reflect in-flight state)");
+  assert.equal(btnAfterClick.disabled, true, "the button must be disabled while a run is in flight, so rapid re-clicks cannot pile up new listeners");
+  console.log("header refresh icon: spinning class + disabled present immediately after a click starts a run (never resolves, by design, to prove this without a timing race)");
+}
+
+{
+  // Real failure reason (GL-009 rule 3): a launch failure must surface a specific message, not
+  // just "failed" -- driven all the way through a real exit-1 exporter with stderr, through
+  // refreshUsageSnapshot, into the header's triggered run AND the Usage tab's status line (both
+  // consumers of the same shared refreshUsageSnapshot result).
+  const failProvider = () => ({
+    code: 1,
+    stdout: "",
+    stderr: "no Node.js binary found (checked /usr/local/bin, /opt/homebrew/bin, and nvm); install Node.js or add it to PATH",
+  });
+  const h = await renderDashboardToCompletion({ spawnOutcomeProvider: failProvider });
+  const btn = h.getRefreshBtn();
+  btn.click();
+  await h.settle(150);
+  const statusNode = findByClass(h.getRoot(), "aios-usage-refresh-status");
+  assert.ok(statusNode, "the Usage tab status line must exist after a header-triggered refresh settles");
+  assert.match(
+    statusNode.text,
+    /Refresh failed \(no Node\.js binary found/,
+    `the status line must name the SPECIFIC failure reason (GL-009 rule 3), not a bare "failed" -- got: ${JSON.stringify(statusNode.text)}`
+  );
+  console.log(`header-triggered refresh failure: Usage tab status line names the real cause -- "${statusNode.text}"`);
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");

@@ -2678,6 +2678,86 @@ export function agentModelPickerState(catalog, primary, fallbacks, snapshotCurre
   return { disabled: !snapshotCurrent || !selection.valid, reason: snapshotCurrent ? selection.reason : "Configuration changed on disk, refresh and retry." };
 }
 
+// tsk-2026-09-18-020: which Node binary should launch the usage exporter.
+//
+// Measured (real machine, real Obsidian.app, real fixture vault -- see the task's build log):
+// - `process.execPath` alone, spawned with no special env, is Obsidian's own packaged Electron
+//   binary, not node. It ran the FULL Obsidian app / its own CLI-relay path (observed error:
+//   "Command line interface is not enabled. Please turn it on in Settings > General >
+//   Advanced."), never our script.
+// - `ELECTRON_RUN_AS_NODE=1` set on that same spawn did NOT make it behave as plain node either
+//   (same message). Packaged Electron apps can ship with the "runAsNode" fuse disabled as a
+//   security hardening measure (it is a known arbitrary-code-execution vector), and that is
+//   consistent with what was measured here. This was tried and rejected, not skipped.
+// - A real system `node` binary run directly against the same fixture vault worked
+//   immediately and produced a normal snapshot. This machine has no node on a fixed system
+//   path (no /usr/local/bin/node, no /opt/homebrew/bin/node) -- the only node install is nvm's,
+//   at a version-specific path resolved from nvm's own `alias/default` file. Obsidian's GUI
+//   process does not inherit a login shell's PATH (no nvm init runs), so plain "node" cannot be
+//   assumed to resolve even if a shell on this machine would find it.
+//
+// Fallback chain, pure and unit-tested (all fs/env access is injected so this needs no real
+// filesystem):
+//   1. If the running executable is ALREADY a real node binary (non-Electron host: the test
+//      suite, a future non-Obsidian caller, or a from-source Obsidian dev build that happens to
+//      run under a shell with node's env already inherited), use it as-is. This is also exactly
+//      what runs the exporter correctly in every test in this repo, since node runs the tests.
+//   2. A short list of common fixed system install locations.
+//   3. nvm's aliased default version (`<nvmDir>/alias/default` -> `<nvmDir>/versions/node/v<ver>/bin/node`).
+//   4. If nvm has no alias but does have installed versions, the highest-versioned one
+//      (`listNodeVersionDirs`, injected so this needs no real directory listing to test).
+// Returns `{ command, reason }`: exactly one of the two is non-null. `reason` is a short,
+// specific, one-line explanation for why no launch was found, meant to be shown verbatim to the
+// user (GL-009 rule 3: name the failure, not just that one occurred).
+export function resolveExporterLaunch({
+  execPath,
+  env = {},
+  homedir = "",
+  exists = (_p) => false,
+  readFile = (_p) => null,
+  listNodeVersionDirs = (_dir) => [],
+}) {
+  const basename = (p) => (p || "").split(/[/\\]/).pop() || "";
+  if (/^node(\.exe)?$/i.test(basename(execPath))) {
+    return { command: execPath, reason: null };
+  }
+
+  const fixedCandidates = ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/opt/homebrew/opt/node/bin/node"];
+  for (const candidate of fixedCandidates) {
+    if (exists(candidate)) return { command: candidate, reason: null };
+  }
+
+  const nvmDir = env.NVM_DIR || (homedir ? `${homedir}/.nvm` : "");
+  if (nvmDir) {
+    const alias = readFile(`${nvmDir}/alias/default`);
+    if (alias) {
+      const trimmed = alias.trim();
+      if (trimmed) {
+        const versioned = trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+        const nodePath = `${nvmDir}/versions/node/${versioned}/bin/node`;
+        if (exists(nodePath)) return { command: nodePath, reason: null };
+      }
+    }
+    const installed = listNodeVersionDirs(`${nvmDir}/versions/node`).filter((v) => /^v\d+\.\d+\.\d+$/.test(v));
+    if (installed.length) {
+      const parseVer = (v) => v.slice(1).split(".").map(Number);
+      const cmp = (a, b) => {
+        const [a1, a2, a3] = parseVer(a);
+        const [b1, b2, b3] = parseVer(b);
+        return a1 - b1 || a2 - b2 || a3 - b3;
+      };
+      const highest = [...installed].sort(cmp).at(-1);
+      const nodePath = `${nvmDir}/versions/node/${highest}/bin/node`;
+      if (exists(nodePath)) return { command: nodePath, reason: null };
+    }
+  }
+
+  return {
+    command: null,
+    reason: "no Node.js binary found (checked /usr/local/bin, /opt/homebrew/bin, and nvm); install Node.js or add it to PATH",
+  };
+}
+
 export function resolveAgentConfiguration(agent, frontmatter = {}, userSettings = {}, projectSettings = {}) {
   const user = userSettings?.subagents || userSettings || {}; const project = projectSettings?.subagents || projectSettings || {};
   const userOverride = user.agentOverrides?.[agent]; const projectOverride = project.agentOverrides?.[agent];
