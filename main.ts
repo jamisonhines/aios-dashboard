@@ -2658,16 +2658,54 @@ function renderAutomationSection(app: App, root: HTMLElement, settings: AiosDash
 // Reads and defensively parses usage-stats.json off the vault adapter. Returns
 // null on any failure (missing file, malformed JSON, unexpected shape) so the
 // caller can fall back to the "no usage data yet" hint instead of throwing.
+//
+// usageReadState is a companion signal (tsk-2026-09-17-024): "absent" (no file has ever been
+// seen at this path), "invalid" (a file exists but failed to read/parse/shape-check on the
+// MOST RECENT attempt -- the returned value, if any, is a cached last-good snapshot, not what
+// is currently on disk), or "ok" (the most recent attempt read a valid snapshot). Kept as a
+// side map, not a change to loadUsageStats's return shape, so the tab's other callers (compact
+// stat row, System browser) that only want the data keep working unchanged; only the Usage tab
+// render reads this to decide whether to warn.
+type UsageReadState = "absent" | "invalid" | "ok";
 const usageLastGood = new Map<string, UsageStats>();
+const usageReadState = new Map<string, UsageReadState>();
 let usageRefreshInFlight: Promise<void> | null = null;
 async function loadUsageStats(app: App, statsPath: string): Promise<UsageStats | null> {
   try {
-    if (!(await app.vault.adapter.exists(statsPath))) return usageLastGood.get(statsPath) || null;
+    if (!(await app.vault.adapter.exists(statsPath))) {
+      usageReadState.set(statsPath, "absent");
+      return usageLastGood.get(statsPath) || null;
+    }
     const parsed = JSON.parse(await app.vault.adapter.read(statsPath));
     if (!parsed || !Array.isArray(parsed.days) || !Array.isArray(parsed.projects)) throw new Error("invalid usage snapshot");
     usageLastGood.set(statsPath, parsed as UsageStats);
+    usageReadState.set(statsPath, "ok");
     return parsed as UsageStats;
-  } catch { return usageLastGood.get(statsPath) || null; }
+  } catch {
+    usageReadState.set(statsPath, "invalid");
+    return usageLastGood.get(statsPath) || null;
+  }
+}
+
+// Sidecar path convention: `usage-stats.json` -> `usage-stats.status.json`, written by the
+// exporter the same atomic way, next to the data file. Never throws; absent/unreadable/invalid
+// status is treated as "nothing known" (null), distinct from a recorded failure.
+interface UsageRunStatus {
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+}
+function usageStatusPathFor(statsPath: string): string {
+  return statsPath.replace(/\.json$/, ".status.json");
+}
+async function loadUsageRunStatus(app: App, statsPath: string): Promise<UsageRunStatus | null> {
+  try {
+    const p = usageStatusPathFor(statsPath);
+    if (!(await app.vault.adapter.exists(p))) return null;
+    const parsed = JSON.parse(await app.vault.adapter.read(p));
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as UsageRunStatus;
+  } catch { return null; }
 }
 function refreshUsageSnapshot(app: App): Promise<void> {
   if (usageRefreshInFlight) return usageRefreshInFlight;
@@ -3366,7 +3404,7 @@ function renderUsageTab(
 ) {
   const wrap = container.createDiv({ cls: "aios-usage-tab" });
   wrap.createDiv({ cls: "aios-empty", text: "Loading usage data..." });
-  loadUsageStats(app, settings.usageStatsPath).then((stats) => {
+  Promise.all([loadUsageStats(app, settings.usageStatsPath), loadUsageRunStatus(app, settings.usageStatsPath)]).then(([stats, runStatus]) => {
     wrap.empty();
     periodbarHost.empty();
     if (!stats) {
@@ -3390,12 +3428,34 @@ function renderUsageTab(
     const periodbar = periodbarHost.createDiv({ cls: "aios-usage-periodbar" });
     const body = wrap.createDiv({ cls: "aios-usage-body" });
     const generated = Date.parse(stats.generatedAt || "");
-    const stale = !Number.isFinite(generated) || Date.now() - generated > 15 * 60 * 1000;
+    // 15 minutes: the exporter is wired into the project SessionStart hook, which fires on
+    // every session started with the vault as cwd, and this vault routinely runs 10-20
+    // concurrent sessions -- in practice a fresh session (and therefore a fresh export) is
+    // rarely more than a few minutes away. 15 minutes is long enough to absorb a quiet stretch
+    // with nobody starting a session, while still catching the pipeline going stale for a
+    // whole afternoon (the audit's own frozen finding was 5.03 hours stale).
+    const STALE_THRESHOLD_MS = 15 * 60 * 1000;
+    const stale = !Number.isFinite(generated) || Date.now() - generated > STALE_THRESHOLD_MS;
     const refreshStatus = body.createDiv({ cls: "aios-usage-refresh-status", text: Number.isFinite(generated) ? `Generated ${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}` : "Snapshot generation time unavailable" });
     const refresh = body.createEl("button", { cls: "aios-refresh", text: "Refresh" });
     const doRefresh = () => { refresh.disabled = true; refreshStatus.setText("Refreshing usage snapshot..."); refreshUsageSnapshot(app).then(() => loadUsageStats(app, settings.usageStatsPath)).then((fresh) => { if (!fresh) throw new Error("no valid snapshot after refresh"); stats = fresh; refreshStatus.setText(`Generated ${new Date(stats.generatedAt).toLocaleString()}`); draw(); }).catch(() => refreshStatus.setText("Refresh failed; showing last valid snapshot.")).finally(() => { refresh.disabled = false; }); };
     refresh.addEventListener("click", doRefresh);
     if (stale) void doRefresh();
+
+    // Run-health warning: distinct from staleness above. usageReadState catches "the file on
+    // disk right now is unreadable/invalid, we are showing a cached last-good snapshot from
+    // memory" (would otherwise look identical to a healthy read). runStatus catches "the most
+    // recent exporter attempt threw," which can be true even while the LAST SUCCESSFUL
+    // snapshot still parses fine and looks current -- e.g. someone broke the exporter and every
+    // run since has failed, but the last good run from before that is still sitting there.
+    const readState = usageReadState.get(settings.usageStatsPath);
+    const lastRunFailed = !!(runStatus && runStatus.lastError && (!runStatus.lastSuccessAt || (runStatus.lastAttemptAt && runStatus.lastAttemptAt > runStatus.lastSuccessAt)));
+    if (readState === "invalid" || lastRunFailed) {
+      const parts: string[] = [];
+      if (readState === "invalid") parts.push("The snapshot file on disk is unreadable or invalid; showing the last known-good snapshot from this session.");
+      if (lastRunFailed) parts.push(`The last export attempt failed: ${runStatus?.lastError || "unknown error"}`);
+      body.createDiv({ cls: "aios-budget-warn", text: parts.join(" ") });
+    }
 
     const draw = () => {
       // Scroll-position fix (defect 3, 2026-08, still applies under the new

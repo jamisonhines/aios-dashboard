@@ -20,11 +20,14 @@ import { createHash } from "node:crypto";
 // System-browser range toggle, 2026-08-04): the Usage tab's "All" range
 // option shows every day this export already scanned rather than triggering
 // a wider scan. Scanning is proportional to how many days of transcripts get
-// opened, and this exporter runs on every Claude Code SessionStart hook --
-// widening WINDOW_DAYS to "unbounded history" would make every session
-// start slower forever, not just the one time someone clicks "All". If a
-// genuinely unbounded history view is wanted later, it should be a separate
-// opt-in export path, not the hook-triggered default.
+// opened, and this exporter is wired into the PROJECT-level SessionStart
+// hook (`~/AIOS/.claude/settings.json`, not the global `~/.claude/settings.json`),
+// as `node rebuild-task-index.mjs && node export-usage-stats.mjs`, so it fires
+// on every session whose cwd is the vault -- widening WINDOW_DAYS to
+// "unbounded history" would make every one of those session starts slower
+// forever, not just the one time someone clicks "All". If a genuinely
+// unbounded history view is wanted later, it should be a separate opt-in
+// export path, not the hook-triggered default.
 const WINDOW_DAYS = 35;
 export const USAGE_DAY_TIME_ZONE = "Asia/Tbilisi";
 
@@ -1150,25 +1153,152 @@ function createResponseDiagnostics() {
   };
 }
 
+// Directory-based lock, same primitive as Operations/scripts/mint-task-id.mjs's atomic
+// claim: fs.mkdir on a leaf path is atomic at the filesystem level, so two concurrent
+// exporter runs racing to mkdir the same lock path have exactly one winner. Unlike the
+// minter, this lock IS released (in a finally, below) because the exporter is a
+// repeatable single-writer critical section, not a never-released id claim.
+//
+// Stale-lock recovery: a crashed holder (killed mid-run, OOM, host restart) leaves its
+// lock directory behind forever with nothing to release it. A lock dir older than
+// LOCK_STALE_MS is treated as abandoned and removed so later runs are not blocked
+// permanently. Measured one real run against the live AIOS vault (~1,600 transcripts,
+// 73.7k retained messages, 2026-09-18): 8.6s wall time. This vault routinely runs
+// 10-20 concurrent Claude Code sessions, and a SessionStart hook firing across that many
+// sessions can mean real contention for CPU/disk while a run is in flight, so the stale
+// threshold is set to roughly 14x that single measured run rather than a tight multiple.
+const LOCK_STALE_MS = 120_000;
+
+// Atomic publish for any small JSON artifact in `dir`: write to a uniquely named temp
+// file (pid + timestamp, so two concurrent writers never collide on the temp name
+// itself), fsync it, then rename over the target. A reader can only ever observe the
+// prior complete file or the new complete file, never a partial write -- `rename(2)` is
+// atomic on the same filesystem, and both usage-stats.json and its status sidecar live
+// in the same directory as their temp files by construction.
+// Test-only knob: a real fixture-sized usage-stats.json can write fast enough that no test
+// process ever observes an in-progress write, which would make a concurrent-writer test
+// unable to go red under a reverted (non-atomic) write. When set, the temp-file write is
+// split into chunks with a delay between them, widening the window. Never read outside a
+// test process (unset in production, no behavioral effect at 0).
+const TEST_WRITE_CHUNK_DELAY_MS = Number(process.env.USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS) || 0;
+
+async function writeJsonAtomic(filePath, data) {
+  const dir = path.dirname(filePath);
+  const tempFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    const handle = await fs.open(tempFile, "wx");
+    try {
+      const json = JSON.stringify(data, null, 2) + "\n";
+      if (TEST_WRITE_CHUNK_DELAY_MS > 0) {
+        const chunkCount = 8;
+        const chunkSize = Math.ceil(json.length / chunkCount) || 1;
+        for (let i = 0; i < json.length; i += chunkSize) {
+          await handle.write(json.slice(i, i + chunkSize), null, "utf8");
+          await new Promise((resolve) => setTimeout(resolve, TEST_WRITE_CHUNK_DELAY_MS));
+        }
+      } else {
+        await handle.writeFile(json, "utf8");
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(tempFile, filePath);
+  } catch (error) {
+    await fs.rm(tempFile, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+// Status sidecar path: `usage-stats.json` -> `usage-stats.status.json`, same directory,
+// so it publishes atomically the same way and a reader can locate it from the data path.
+function statusPathFor(outFile) {
+  return outFile.replace(/\.json$/, ".status.json");
+}
+
+async function readStatus(statusFile) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(statusFile, "utf8"));
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {
+    // absent, unreadable, or invalid -- callers treat this the same as "no prior status"
+  }
+  return { lastAttemptAt: null, lastSuccessAt: null, lastError: null };
+}
+
 export async function main({
   vaultRoot = process.argv[2] || process.cwd(),
-  projectsRoot = path.join(os.homedir(), ".claude", "projects"),
-  piRoot = path.join(os.homedir(), ".pi", "agent", "sessions"),
-  bbRoot = path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
+  // Env overrides exist only so a CLI-spawned test process (real `node export-usage-stats.mjs
+  // <vault>`, no way to pass programmatic options) can point at an isolated fixture instead of
+  // the real ~/.claude/projects etc. Unset in production; the defaults below are unchanged.
+  projectsRoot = process.env.USAGE_EXPORT_TEST_PROJECTS_ROOT || path.join(os.homedir(), ".claude", "projects"),
+  piRoot = process.env.USAGE_EXPORT_TEST_PI_ROOT || path.join(os.homedir(), ".pi", "agent", "sessions"),
+  bbRoot = process.env.USAGE_EXPORT_TEST_BB_ROOT || path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
   now = new Date(),
-  lockWaitMs = 1000,
+  lockWaitMs = Number(process.env.USAGE_EXPORT_TEST_LOCK_WAIT_MS) || 1000,
 } = {}) {
   const outDir = path.join(vaultRoot, "Operations", "usage");
   const outFile = path.join(outDir, "usage-stats.json");
+  const statusFile = statusPathFor(outFile);
   const scanStartedAt = now.toISOString();
   const cutoffMs = now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const upperBoundMs = now.getTime();
   const lockFile = `${outFile}.lock`;
   await fs.mkdir(outDir, { recursive: true });
-  let lock;
+  let acquired = false;
   const deadline = Date.now() + lockWaitMs;
-  while (!lock) { try { lock = await fs.open(lockFile, "wx"); } catch (error) { if (error?.code !== "EEXIST" || Date.now() >= deadline) { const busy = new Error("usage export busy; existing writer retained"); busy.code = "USAGE_EXPORT_BUSY"; throw busy; } await new Promise((resolve) => setTimeout(resolve, 25)); } }
+  while (!acquired) {
+    try {
+      await fs.mkdir(lockFile);
+      acquired = true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      // Stale-lock check: age the lock dir out from under a crashed holder.
+      let stat;
+      try {
+        stat = await fs.stat(lockFile);
+      } catch {
+        continue; // lock disappeared between EEXIST and stat; retry mkdir immediately
+      }
+      if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+        await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {});
+        continue; // retry mkdir immediately, no sleep
+      }
+      if (Date.now() >= deadline) {
+        // Not stale -- a live writer holds it and is producing an equally fresh
+        // snapshot. This is not a failure: the CLI entry point below exits 0 for it.
+        const busy = new Error("usage export busy; existing writer retained");
+        busy.code = "USAGE_EXPORT_BUSY";
+        throw busy;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  // Test-only knobs: neither has any effect unless a test sets the env var. Together they
+  // let a test prove the lock is the thing serializing the critical section, independent
+  // of the atomic-rename write (which alone would hide a disabled lock -- see the mutation
+  // test in exportUsageAtomicWrite.test.mjs for why both are needed). USAGE_EXPORT_TEST_MARK_DIR:
+  // drop a marker file for the duration this process holds the lock, so a test can count how
+  // many exporter processes are inside the critical section at once. USAGE_EXPORT_TEST_HOLD_MS:
+  // sleep after acquiring the lock, widening that window long enough for a test's poll loop to
+  // reliably observe overlapping holders if the lock is not actually serializing.
+  const testMarkDir = process.env.USAGE_EXPORT_TEST_MARK_DIR || null;
+  const testHoldMs = Number(process.env.USAGE_EXPORT_TEST_HOLD_MS) || 0;
+  const testMarkFile = testMarkDir ? path.join(testMarkDir, `${process.pid}-${Date.now()}.active`) : null;
+  if (testMarkFile) await fs.writeFile(testMarkFile, "").catch(() => {});
+  if (testHoldMs > 0) await new Promise((resolve) => setTimeout(resolve, testHoldMs));
+  const priorStatus = await readStatus(statusFile);
+  const attemptIso = now.toISOString();
+  await writeJsonAtomic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: priorStatus.lastSuccessAt, lastError: priorStatus.lastError }).catch(() => {});
   try {
+  // Test-only failure injection: every real failure mode this exporter can hit in practice
+  // (disk full, permissions, a genuinely malformed transcript tripping a bug) is awkward to
+  // reproduce deterministically from outside. This lets a test exercise the catch/status-
+  // recording path with a real thrown error, at a real point inside the critical section,
+  // without faking any part of the code under test.
+  if (process.env.USAGE_EXPORT_TEST_FORCE_FAIL) {
+    throw new Error(`synthetic test failure requested via USAGE_EXPORT_TEST_FORCE_FAIL=${process.env.USAGE_EXPORT_TEST_FORCE_FAIL}`);
+  }
   const transcripts = [
     ...(await findTranscripts(projectsRoot, cutoffMs)),
     ...(await findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs)),
@@ -1363,8 +1493,7 @@ export async function main({
     totals: { last7DaysCostUsd, last30DaysCostUsd, todayCostUsd },
   };
 
-  const tempFile = path.join(outDir, `.usage-stats.${process.pid}.${Date.now()}.tmp`);
-  try { const handle = await fs.open(tempFile, "wx"); try { await handle.writeFile(JSON.stringify(output, null, 2) + "\n", "utf8"); await handle.sync(); } finally { await handle.close(); } await fs.rename(tempFile, outFile); } catch (error) { await fs.rm(tempFile, { force: true }).catch(() => {}); throw error; }
+  await writeJsonAtomic(outFile, output);
 
   const totalMessages = dayList.reduce(
     (sum, d) => sum + Object.values(d.models).reduce((s, m) => s + m.messages, 0),
@@ -1386,7 +1515,14 @@ export async function main({
     `usage-stats: ${canonicalTranscripts.length} transcript(s), ${totalMessages} message(s), ` +
       `today $${todayCostUsd.toFixed(2)}, 7d $${last7DaysCostUsd.toFixed(2)}, 30d $${last30DaysCostUsd.toFixed(2)}${topWorkflowText}${topSkillText}${topAgentText} -> ${outFile}`
   );
-  } finally { await lock?.close(); await fs.rm(lockFile, { force: true }).catch(() => {}); }
+  await writeJsonAtomic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: now.toISOString(), lastError: null }).catch(() => {});
+  } catch (error) {
+    // The previous valid usage-stats.json is untouched (writeJsonAtomic never renamed
+    // over it), but the status sidecar must record the failure so the reader can warn
+    // instead of silently showing an aging snapshot as if the pipeline were healthy.
+    await writeJsonAtomic(statusFile, { lastAttemptAt: attemptIso, lastSuccessAt: priorStatus.lastSuccessAt, lastError: String(error?.message || error) }).catch(() => {});
+    throw error;
+  } finally { if (testMarkFile) await fs.rm(testMarkFile, { force: true }).catch(() => {}); await fs.rm(lockFile, { recursive: true, force: true }).catch(() => {}); }
 }
 
 // Run only on direct execution (node export-usage-stats.mjs ...), never on import.
@@ -1394,6 +1530,13 @@ const isDirectRun =
   process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isDirectRun) {
   main().catch((e) => {
+    if (e?.code === "USAGE_EXPORT_BUSY") {
+      // Not a failure: another writer holds the lock and is producing an equally fresh
+      // snapshot. Exit 0 so the SessionStart hook (`&&`-chained after the task-index
+      // rebuild) does not read this as a broken step.
+      console.log(`usage-stats: ${e.message}`);
+      return;
+    }
     console.error("usage-stats: export failed:", e?.message || e);
     process.exitCode = 1;
   });
