@@ -547,9 +547,13 @@ function applyLedgerReadFailureNotice(
 // setTaskStatus pattern (read contentBefore, compute new content with a pure
 // function, write, return the before/after pair so the caller can record an
 // undo entry). Returns null -- and fires a Notice, never a write -- when
-// questions.md cannot be found or spliceAnswer cannot locate the question or
-// its Answer line (a stale card: the question was filed/removed since this
-// render loaded).
+// questions.md cannot be found, or spliceAnswer cannot locate the "## Open"
+// section or the question's own "### Q-<id>" heading at all (a stale card:
+// the question was filed/removed since this render loaded, or the file's
+// "## Open" heading was renamed/deleted). spliceAnswer no longer returns
+// null for a missing Answer LINE specifically -- since Reviewer round 2's
+// I-1 fix it inserts one instead, so a missing Answer field is never this
+// failure path.
 async function saveCoordinationAnswer(
   app: App,
   projectsRoot: string,
@@ -566,7 +570,7 @@ async function saveCoordinationAnswer(
   const contentBefore = await app.vault.read(file);
   const contentAfter = spliceAnswer(contentBefore, qid, text, isoDate());
   if (contentAfter == null) {
-    new Notice(`AIOS: could not locate ${qid}'s Answer line in ${path}`);
+    new Notice(`AIOS: could not locate ${qid}'s heading (or the '## Open' section) in ${path}`);
     return null;
   }
   await app.vault.modify(file, contentAfter);
