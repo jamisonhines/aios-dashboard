@@ -24,13 +24,14 @@ function lostLockError() {
   return error;
 }
 
-export async function writeJsonAtomic(filePath, value, { beforeRename } = {}) {
+export async function writeJsonAtomic(filePath, value, { beforeRename, onTempOpen } = {}) {
   const dir = path.dirname(filePath);
   const tempPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${randomBytes(4).toString("hex")}.tmp`);
   try {
     const json = JSON.stringify(value, null, 2) + "\n";
     const handle = await fs.open(tempPath, "wx");
     try {
+      await onTempOpen?.();
       const delay = chunkDelayMs();
       if (delay > 0) {
         const width = Math.max(1, Math.ceil(json.length / 8));
