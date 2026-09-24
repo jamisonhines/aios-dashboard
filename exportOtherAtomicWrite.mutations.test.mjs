@@ -8,7 +8,7 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "other-exporters-mutation-"));
 const copy = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "other-exporters-mutation-copy-")));
 const helper = await fs.readFile(path.join(here, "vault-scripts/export-json-atomic.mjs"), "utf8");
-const needle = "  await fs.rename(tempPath, filePath);";
+const needle = "  try { await fs.rename(tempPath, filePath); }\n  catch (error) { await fs.rm(tempPath, { force: true }).catch(() => {}); throw error; }";
 assert.ok(helper.includes(needle), "mutation anchor must be executable atomic rename");
 await fs.writeFile(path.join(copy, "export-json-atomic.mjs"), helper.replace(needle, "  await fs.writeFile(filePath, \"\");\n  for (let start = 0; start < json.length; start += 64) { await fs.appendFile(filePath, json.slice(start, start + 64)); await sleep(10); }"));
 const source = await fs.readFile(path.join(here, "vault-scripts/export-ops-map.mjs"), "utf8"); await fs.writeFile(path.join(copy, "export-ops-map.mjs"), source);
