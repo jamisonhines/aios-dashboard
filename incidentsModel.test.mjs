@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the incidents-strip data model: computeIncidents (pure). Imports
 // the SAME module main.ts bundles (model.mjs). Run: node incidentsModel.test.mjs
 import assert from "node:assert";

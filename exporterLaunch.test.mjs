@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // tsk-2026-09-18-020: pure unit tests for resolveExporterLaunch (model.mjs), the launcher that
 // replaced spawning process.execPath directly. All fs/env/homedir access is injected, so this
 // needs no real filesystem -- the real-machine evidence (Obsidian's packaged binary is not

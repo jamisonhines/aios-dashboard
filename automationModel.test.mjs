@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the Automations strip view model (build 2.6 m2): prefix
 // stripping, relative time, per-job Dispatch prompt, red-first tile ordering,
 // and the counts-by-state summary milestone 3 consumes. Imports the SAME

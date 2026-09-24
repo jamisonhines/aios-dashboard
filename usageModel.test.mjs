@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the Usage-tab data model: computeUsageView, computeWorkflowsView,
 // usageWorkflowColorIndex, and formatCompactNumber (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Run: node usageModel.test.mjs

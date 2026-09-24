@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the dashboard view-model helpers (pure): statusChipsFromGroups, splitProjectTasks,
 // categoryChipsFromTasks, tagForTask, filterStandaloneByCategory, visiblePhaseTasks.
 // Imports the SAME module main.ts bundles (model.mjs). Run: node viewModel.test.mjs

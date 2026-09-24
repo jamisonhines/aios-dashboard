@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the ops-map view model (build 2.5 m2): computeOpsMapLayout.
 // Imports the SAME module main.ts bundles (model.mjs).
 // Run: node opsMapModel.test.mjs

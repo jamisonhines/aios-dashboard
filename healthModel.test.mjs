@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the health-strip data model: computeHealth (pure). Imports the
 // SAME module main.ts bundles (model.mjs). Run: node healthModel.test.mjs
 import assert from "node:assert";

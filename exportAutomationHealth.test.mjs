@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the automation-health exporter's pure parts (build 2.6 m2):
 // launchctl parse, schedule description, next-occurrence math, overdue
 // period, state derivation, and red-first sorting. Imports the REAL functions

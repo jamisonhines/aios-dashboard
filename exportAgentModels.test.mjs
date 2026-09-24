@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 import assert from "node:assert";
 import { promises as fs } from "node:fs";
 import os from "node:os";

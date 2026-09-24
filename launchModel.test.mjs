@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the Dispatch-launch command builder: buildLaunchCommand (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Run: node launchModel.test.mjs
 import assert from "node:assert";

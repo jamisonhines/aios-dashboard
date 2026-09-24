@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Render-contract coverage for the Coordination panel's TWO render functions
 // in main.ts: renderCoordinationPills (the always-visible card-head pills)
 // and renderCoordinationBody (the expanded card body). tsk-2026-09-03-002

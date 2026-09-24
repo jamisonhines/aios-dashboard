@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the System tab's Skills-section view-model (build 2026-08-04).
 // Pure functions imported from model.mjs; no Obsidian deps.
 // Run: node systemSkillsModel.test.mjs

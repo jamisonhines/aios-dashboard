@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for taskIdClaim.mjs (tsk-2026-09-17-021): the dashboard quick-add id-claim path.
 // Proves the plugin's fs-available path can never hand out a tsk-id number the real CLI
 // (Operations/scripts/mint-task-id.mjs, tsk-2026-09-17-010) has already claimed for the same

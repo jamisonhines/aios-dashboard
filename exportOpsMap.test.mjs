@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the ops-map exporter's pure parts (build 2.5 m2): token
 // extraction, agent/skill refs, and edge dedupe. Imports the REAL functions
 // from the repo-canonical exporter (vault-scripts/, deployed to the vault by

@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the Coordination-panel data model: computeCoordinationView (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Mirrors the exact
 // definitions in Operations/scripts/coordination-report.mjs: active = row

@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Focused contract coverage for Usage token transparency. Run: node usageTokenTransparency.test.mjs
 import assert from "node:assert";
 import { readFileSync } from "node:fs";

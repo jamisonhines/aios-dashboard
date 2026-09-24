@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the Today-tab data model (pure): topTasks, intakeBacklogCount,
 // automationSummaryText, quickCaptureFileStem, resolveCaptureFileName,
 // buildQuickCaptureContent, budgetGuardrail. Imports the SAME module main.ts

@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Behavioral render contract for token transparency and System Skills widths.
 // Bundles the shipped main.ts with test-only exports; no renderer is copied.
 import assert from "node:assert";

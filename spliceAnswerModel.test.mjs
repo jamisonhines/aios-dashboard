@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for spliceAnswer (Operations/scripts/lib/coordination-parse.mjs,
 // vault-canonical, re-exported by model.mjs -- imported here through
 // model.mjs, the SAME import site main.ts's saveCoordinationAnswer uses, so

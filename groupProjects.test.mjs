@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the project status-sectioning engine: resolveStatusSections (frontmatter
 // override + fallback) and groupProjectsByStatus (fixed order, hide-empty, drift -> Other).
 // Imports the SAME module main.ts bundles (model.mjs). Run: node groupProjects.test.mjs

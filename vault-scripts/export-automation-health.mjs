@@ -18,6 +18,7 @@ import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { withOwnedExportLock, writeJsonAtomic } from "./export-json-atomic.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -311,8 +312,11 @@ async function main() {
     jobs: sortJobsRedFirst(jobs),
   };
 
-  await fs.mkdir(outDir, { recursive: true });
-  await fs.writeFile(outFile, JSON.stringify(output, null, 2) + "\n", "utf8");
+  const lockResult = await withOwnedExportLock(outFile, () => writeJsonAtomic(outFile, output));
+  if (lockResult.busy) {
+    console.log(`automation-health export busy; another writer holds ${outFile}.lock`);
+    return;
+  }
 
   const counts = {};
   for (const j of output.jobs) counts[j.state] = (counts[j.state] || 0) + 1;

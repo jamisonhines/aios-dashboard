@@ -16,6 +16,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
+import { withOwnedExportLock, writeJsonAtomic } from "./export-json-atomic.mjs";
 
 const MAX_READ_BYTES = 40 * 1024;
 
@@ -566,8 +567,11 @@ async function main() {
     availableHires,
   };
 
-  await fs.mkdir(outDir, { recursive: true });
-  await fs.writeFile(outFile, JSON.stringify(output, null, 2) + "\n", "utf8");
+  const lockResult = await withOwnedExportLock(outFile, () => writeJsonAtomic(outFile, output));
+  if (lockResult.busy) {
+    console.log(`ops-map export busy; another writer holds ${outFile}.lock`);
+    return;
+  }
 
   const counts = {};
   for (const n of outNodes) counts[n.type] = (counts[n.type] || 0) + 1;

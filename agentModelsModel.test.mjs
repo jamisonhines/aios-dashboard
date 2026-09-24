@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 import assert from "node:assert";
 import {
   catalogCandidates,

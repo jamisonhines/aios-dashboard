@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the System tab's Agents-section view-model (Phase 3, 2026-08-05).
 // Pure functions imported from model.mjs; no Obsidian deps.
 // Run: node systemAgentsModel.test.mjs

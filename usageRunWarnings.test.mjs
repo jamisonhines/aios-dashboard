@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // tsk-2026-09-17-024 round 2, Important 3: the Usage tab's run-health warning (invalid/absent
 // snapshot, last-export-failed) had no test at all -- Reviewer round 1 measured that mutating
 // the gating condition at main.ts:3452 (`if (readState === "invalid" || lastRunFailed) {` ->

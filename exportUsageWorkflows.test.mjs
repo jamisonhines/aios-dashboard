@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Tests for the exporter's workflow classifier (build 2.5 m1). Imports the
 // REAL functions from the repo-canonical exporter (vault-scripts/, deployed
 // to the vault by deploy.sh). Importing the exporter never starts a scan

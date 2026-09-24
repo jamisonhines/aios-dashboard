@@ -1,3 +1,4 @@
+import "./testFileTimeout.mjs";
 // Minimal test: resolveBuckets falls back when frontmatter is absent/invalid,
 // and uses declared buckets when present. Imports the SAME module main.ts
 // bundles (model.mjs). Run with: node resolveBuckets.test.mjs
