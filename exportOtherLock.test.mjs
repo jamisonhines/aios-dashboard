@@ -6,15 +6,30 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 const here = path.dirname(new URL(import.meta.url).pathname);
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "other-exporters-lock-"));
-const helper = path.join(here, "vault-scripts", "export-json-atomic.mjs");
+const helper = process.env.AIOS_EXPORT_TEST_HELPER || path.join(here, "vault-scripts", "export-json-atomic.mjs");
 const worker = path.join(root, "worker.mjs");
-await fs.writeFile(worker, `import { withOwnedExportLock, writeJsonAtomic } from ${JSON.stringify(new URL(`file://${helper}`).href)}; import path from "node:path"; const [out, marker] = process.argv.slice(2); try { const r = await withOwnedExportLock(out, ({isOwner}) => writeJsonAtomic(out, {marker, payload:"x".repeat(50000)}, {beforeRename:isOwner}), {waitMs:3000}); console.log(JSON.stringify(r)); } catch (e) { console.error(e.code+":"+e.message); process.exitCode=1; }`);
-const run = (out, marker, env = {}) => new Promise((resolve) => { const c = spawn(process.execPath, [worker, out, marker], {env:{...process.env,...env},stdio:["ignore","pipe","pipe"]}); let stdout="",stderr=""; c.stdout.on("data",d=>stdout+=d);c.stderr.on("data",d=>stderr+=d);c.once("exit",code=>resolve({code,stdout,stderr})); });
+await fs.writeFile(worker, `import { withOwnedExportLock, writeJsonAtomic } from ${JSON.stringify(new URL(`file://${helper}`).href)}; import { promises as fs } from "node:fs"; const [out, marker, started, delayRaw, waitRaw] = process.argv.slice(2); const sleep = ms => new Promise(resolve => setTimeout(resolve, ms)); try { const result = await withOwnedExportLock(out, async ({isOwner}) => { await fs.writeFile(started, marker); await sleep(Number(delayRaw)); await writeJsonAtomic(out, {marker, payload:"x".repeat(50000)}, {beforeRename:isOwner}); }, {waitMs:Number(waitRaw)}); console.log(JSON.stringify(result)); } catch (error) { console.error(error.code+":"+error.message); process.exitCode=1; }`);
+const run = (out, marker, { started = path.join(root, `${marker}.started`), delay = 0, wait = 1000, env = {} } = {}) => new Promise((resolve) => { const c = spawn(process.execPath, [worker, out, marker, started, String(delay), String(wait)], {env:{...process.env,...env},stdio:["ignore","pipe","pipe"]}); let stdout="",stderr=""; c.stdout.on("data",d=>stdout+=d); c.stderr.on("data",d=>stderr+=d); c.once("exit",code=>resolve({code,stdout,stderr,started})); });
+const waitFor = async (file, message) => { const deadline = Date.now() + 2000; while (!existsSync(file) && Date.now() < deadline) await new Promise(r => setTimeout(r, 5)); assert.ok(existsSync(file), message); };
+const result = (child) => JSON.parse(child.stdout.trim());
 try {
- const out=path.join(root,"publish.json");
- const a=run(out,"old-A",{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60",AIOS_EXPORT_TEST_WRITE_CHUNK_DELAY_MS:"40"});
- await new Promise(r=>setTimeout(r,100)); const b=await run(out,"new-B",{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60"}); const ar=await a;
- assert.equal(b.code,0,`I1 B must publish: ${JSON.stringify(b)}`); assert.notEqual(ar.code,0,`I1 old holder must fail specifically after steal: ${JSON.stringify(ar)}`); assert.match(ar.stderr,/AIOS_EXPORT_LOCK_LOST/,"I1 must name lock ownership loss"); assert.equal(JSON.parse(await fs.readFile(out,"utf8")).marker,"new-B","I1 old holder must not overwrite B");
- const recover=path.join(root,"recover.json"), lock=`${recover}.lock`,coord=`${lock}.steal-coord`; await fs.mkdir(lock,{recursive:true}); await fs.mkdir(coord); const old=new Date(Date.now()-600000); await fs.utimes(lock,old,old); await fs.utimes(coord,old,old); const rr=await run(recover,"recovered",{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60"}); assert.equal(rr.code,0,`I2 orphaned coord must be reclaimed: ${JSON.stringify(rr)}`); assert.equal(JSON.parse(await fs.readFile(recover,"utf8")).marker,"recovered"); assert.equal(existsSync(coord),false,"I2 stale coordination directory must be removed");
- console.log("other-exporter locks: stolen holder fenced and orphaned steal-coord recovered");
+ const serialize=path.join(root,"serialize.json"), aStarted=path.join(root,"serialize-a.started");
+ const a=run(serialize,"serialize-A",{started:aStarted,delay:250,wait:1000}); await waitFor(aStarted,"serialization fixture must observe A inside locked work before starting B");
+ const b=await run(serialize,"serialize-B",{wait:75}); const ar=await a;
+ assert.equal(ar.code,0,`serialization A must finish: ${JSON.stringify(ar)}`); assert.equal(b.code,0,`serialization B must return cleanly busy: ${JSON.stringify(b)}`); assert.equal(result(b).busy,true,"serialization: B must specifically report busy while A owns the lock"); assert.equal(JSON.parse(await fs.readFile(serialize,"utf8")).marker,"serialize-A","serialization: busy B must not publish");
+
+ const stolen=path.join(root,"stolen.json"), oldStarted=path.join(root,"old-A.started"), newStarted=path.join(root,"new-B.started");
+ const oldA=run(stolen,"old-A",{started:oldStarted,delay:0,wait:1500,env:{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60",AIOS_EXPORT_TEST_HOLD_MS:"250"}});
+ await waitFor(`${stolen}.lock/owner.json`,"stale-holder fixture must observe A ownership before starting B");
+ const newB=run(stolen,"new-B",{started:newStarted,delay:350,wait:1500,env:{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60"}}); await waitFor(newStarted,"stale-holder fixture must observe B holding the stolen lock"); const oldResult=await oldA;
+ assert.notEqual(oldResult.code,0,`I1 old holder must fail specifically before work after steal: ${JSON.stringify(oldResult)}`); assert.match(oldResult.stderr,/AIOS_EXPORT_LOCK_LOST/,"I1 pre-work guard must name lock ownership loss"); const newResult=await newB; assert.equal(newResult.code,0,`I1 replacement holder must publish: ${JSON.stringify(newResult)}`); assert.equal(JSON.parse(await fs.readFile(stolen,"utf8")).marker,"new-B","I1 old holder must not overwrite B");
+
+ const release=path.join(root,"release.json"), releaseAStarted=path.join(root,"release-A.started"), releaseBStarted=path.join(root,"release-B.started");
+ const releaseA=run(release,"release-A",{started:releaseAStarted,delay:0,wait:1500,env:{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60",AIOS_EXPORT_TEST_HOLD_MS:"250"}});
+ await waitFor(`${release}.lock/owner.json`,"release fixture must observe A ownership before B starts");
+ const releaseB=run(release,"release-B",{started:releaseBStarted,delay:500,wait:1500,env:{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60"}}); await waitFor(releaseBStarted,"release fixture must observe B holding replacement lock before A exits"); const releaseAR=await releaseA;
+ assert.match(releaseAR.stderr,/AIOS_EXPORT_LOCK_LOST/,"release fixture requires A to lose ownership before cleanup"); const releaseC=await run(release,"release-C",{wait:80}); assert.equal(result(releaseC).busy,true,"I3 release guard: C must specifically stay busy while replacement B owns the lock"); const releaseBR=await releaseB; assert.equal(releaseBR.code,0,`release B must finish: ${JSON.stringify(releaseBR)}`); assert.equal(JSON.parse(await fs.readFile(release,"utf8")).marker,"release-B","release fixture must preserve replacement owner publication");
+
+ const recover=path.join(root,"recover.json"), lock=`${recover}.lock`,coord=`${lock}.steal-coord`; await fs.mkdir(lock,{recursive:true}); await fs.mkdir(coord); const old=new Date(Date.now()-600000); await fs.utimes(lock,old,old); await fs.utimes(coord,old,old); const rr=await run(recover,"recovered",{env:{AIOS_EXPORT_TEST_LOCK_STALE_MS:"60"}}); assert.equal(rr.code,0,`I2 orphaned coord must be reclaimed: ${JSON.stringify(rr)}`); assert.equal(JSON.parse(await fs.readFile(recover,"utf8")).marker,"recovered"); assert.equal(existsSync(coord),false,"I2 stale coordination directory must be removed");
+ console.log("other-exporter locks: serialization, stale-holder fencing, guarded release, and orphaned steal-coord recovery passed");
 } finally { await fs.rm(root,{recursive:true,force:true}); }
