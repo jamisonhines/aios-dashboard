@@ -634,8 +634,11 @@ async function renderUsageTabToCompletion({
       conditionNeedle,
       '      if (stale && !mutatedRenderScopeGuard) {\n        mutatedRenderScopeGuard = true;\n        if (!refreshing) void doRefresh();\n      }'
     );
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedContainer = await renderUsageTabToCompletion({
     statusJson: null,
@@ -683,8 +686,11 @@ async function renderUsageTabToCompletion({
     const needle = "          : effectiveResult?.busy\n";
     assert.ok(source.includes(needle), "the effectiveResult?.busy branch must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "          : false\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
     statusJson: null,
@@ -719,8 +725,11 @@ async function renderUsageTabToCompletion({
     const needle = "        : effectiveResult?.error\n";
     assert.ok(source.includes(needle), "the effectiveResult?.error branch must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "        : false\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
     statusJson: null,
@@ -910,8 +919,11 @@ async function renderDashboardToCompletion({
     const needle = "  if (usageRefreshInFlight) return usageRefreshInFlight;\n";
     assert.ok(source.includes(needle), "the refreshUsageSnapshot dedupe guard must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
   const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removeDedupeGuard });
@@ -937,8 +949,11 @@ async function renderDashboardToCompletion({
     const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n    refresh();\n  });";
     assert.ok(source.includes(needle), "the click handler's trailing refresh() call must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n  });");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
   const h = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removeImmediateRefresh });
@@ -1098,8 +1113,11 @@ async function renderDashboardToCompletion({
     const needle = "const USAGE_EXPORT_TIMEOUT_MS = 60_000;";
     assert.ok(source.includes(needle), "the timeout constant must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "const USAGE_EXPORT_TIMEOUT_MS = 50;");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   // Must be set BEFORE renderDashboardToCompletion's dynamic import() runs, not after: esbuild's
   // bare `require(...)` shim resolves globalThis.require ONCE at module-eval time (measured --
@@ -1205,8 +1223,11 @@ async function renderDashboardToCompletion({
       '      const effectiveResult =\n        lastUsageRefreshResult !== null && (stats.generatedAt || "") !== lastUsageRefreshResultForGeneratedAt\n          ? null\n          : lastUsageRefreshResult;';
     assert.ok(source.includes(needle), "the effectiveResult computation must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      const effectiveResult = lastUsageRefreshResult;");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
     statusJson: null,
@@ -1260,8 +1281,11 @@ async function renderDashboardToCompletion({
     const needle = "    const STALE_THRESHOLD_MS = 15 * 60 * 1000;\n";
     assert.ok(source.includes(needle), "the STALE_THRESHOLD_MS declaration must be present verbatim (fixture drift guard)");
     const mutated = source.replace(needle, "    const STALE_THRESHOLD_MS = 80;\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   async function oneClickOnAgedStaleSnapshot({ spawnOutcomeProvider, mutateSource }) {
     // generatedAt defaults to "now" (fresh at mount, so the FIRST post-load draw -- which
@@ -1297,8 +1321,11 @@ async function renderDashboardToCompletion({
       needle,
       '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        void doRefresh();\n      }'
     );
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedFailingSpawns = await oneClickOnAgedStaleSnapshot({
     spawnOutcomeProvider: (callIndex) => (callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null),
@@ -1339,8 +1366,11 @@ async function renderDashboardToCompletion({
     const needle = "      const refreshStatusText = refreshing\n";
     assert.ok(source.includes(needle), "the refreshStatusText ternary must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, '      const refreshStatusText = !generatedText\n        ? "Snapshot generation time unavailable"\n        : refreshing\n');
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
     statusJson: null,
@@ -1379,8 +1409,11 @@ async function renderDashboardToCompletion({
     const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n";
     assert.ok(source.includes(needle), "the post-settle continuation must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath);\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removePostSettleRefresh });
   hMutated.getRefreshBtn().click();
@@ -1409,8 +1442,11 @@ async function renderDashboardToCompletion({
     const needle = "  refreshBtn.addEventListener(\"click\", () => {\n    if (Platform.isDesktop) {\n";
     assert.ok(source.includes(needle), "the mobile gate must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "  refreshBtn.addEventListener(\"click\", () => {\n    if (true) {\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, isDesktop: false, mutateSource: removeMobileGate });
   hMutated.getRefreshBtn().click();
@@ -1453,7 +1489,7 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
   let usingModelOverride = false;
   if (mutateModelSource) {
     const isUsageExporterOutputPathSource =
-      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
+      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if ((rel.startsWith(`.${base}.`) || rel.startsWith(`.${statusName}.`)) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
     const mutatedFn = mutateModelSource(isUsageExporterOutputPathSource);
     fs.writeFileSync(modelOverride, `export * from "./model.mjs";\n${mutatedFn}\n`);
     usingModelOverride = true;
@@ -1567,6 +1603,7 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
     ["steal-coord mkdir-lock", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/usage-stats.json.lock.steal-coord" })],
     ["stale-lock rename-tombstone", () => 0, async (h) => h.fireVault("rename", { path: "Operations/usage/usage-stats.json.lock.stale-12345-abcd1234" }, "Operations/usage/usage-stats.json.lock")],
     ["exporter's own atomic-write temp file", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/.usage-stats.json.12345.999.tmp" })],
+    ["status sidecar atomic-write temp file", () => 0, async (h) => h.fireVault("create", { path: "Operations/usage/.usage-stats.status.json.12345.999.tmp" })],
   ];
   for (const [desc, expected, fire] of cases) {
     const h = await renderOnloadListeners();
@@ -1579,14 +1616,17 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
   // --- WRONGLY stop reaching the dashboard. --------------------------------------------------
   const restoreWholeFolderFilter = (source) => {
     const needle =
-      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
+      'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  const base = usageStatsPath.split("/").pop();\n  if (!folder || !base) return false;\n  if (!(path === folder || path.startsWith(folder + "/"))) return false;\n  const rel = path === folder ? "" : path.slice(folder.length + 1);\n  if (!rel) return false;\n  const statusName = base.replace(/\\.json$/, ".status.json");\n  const lockBase = `${base}.lock`;\n  if (rel === statusName) return true;\n  if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;\n  if ((rel.startsWith(`.${base}.`) || rel.startsWith(`.${statusName}.`)) && rel.endsWith(".tmp")) return true;\n  return false;\n}';
     assert.ok(source.includes(needle), "the narrowed isUsageExporterOutputPath must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(
       needle,
       'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  if (!folder) return false;\n  return path === folder || path.startsWith(folder + "/");\n}'
     );
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const hMutatedA = await renderOnloadListeners({ mutateModelSource: restoreWholeFolderFilter });
   await hMutatedA.fireVault("modify", { path: "Operations/usage/usage-stats.json" });
@@ -1610,8 +1650,11 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
     const needle = "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n";
     assert.ok(source.includes(needle), "the isUsageExporterOutputPath entry must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  return false;\n  if (!path || !usageStatsPath) return false;\n");
-    assert.notEqual(mutated, source, "the mutation must actually change the source");
-    return mutated;
+    const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
+    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
+    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    return differential;
   };
   const hMutatedB = await renderOnloadListeners({ mutateModelSource: disableFilterEntirely });
   await hMutatedB.fireVault("modify", { path: "Operations/usage/usage-stats.status.json" });
