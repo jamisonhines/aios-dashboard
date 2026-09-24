@@ -634,10 +634,14 @@ async function renderUsageTabToCompletion({
       conditionNeedle,
       '      if (stale && !mutatedRenderScopeGuard) {\n        mutatedRenderScopeGuard = true;\n        if (!refreshing) void doRefresh();\n      }'
     );
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedContainer = await renderUsageTabToCompletion({
@@ -686,10 +690,14 @@ async function renderUsageTabToCompletion({
     const needle = "          : effectiveResult?.busy\n";
     assert.ok(source.includes(needle), "the effectiveResult?.busy branch must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "          : false\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
@@ -725,10 +733,14 @@ async function renderUsageTabToCompletion({
     const needle = "        : effectiveResult?.error\n";
     assert.ok(source.includes(needle), "the effectiveResult?.error branch must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "        : false\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
@@ -919,10 +931,14 @@ async function renderDashboardToCompletion({
     const needle = "  if (usageRefreshInFlight) return usageRefreshInFlight;\n";
     assert.ok(source.includes(needle), "the refreshUsageSnapshot dedupe guard must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
@@ -949,10 +965,14 @@ async function renderDashboardToCompletion({
     const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n    refresh();\n  });";
     assert.ok(source.includes(needle), "the click handler's trailing refresh() call must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n    }\n  });");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const successProvider = () => ({ code: 0, stdout: "usage-stats: 1 transcript(s) ..." });
@@ -1113,10 +1133,14 @@ async function renderDashboardToCompletion({
     const needle = "const USAGE_EXPORT_TIMEOUT_MS = 60_000;";
     assert.ok(source.includes(needle), "the timeout constant must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "const USAGE_EXPORT_TIMEOUT_MS = 50;");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   // Must be set BEFORE renderDashboardToCompletion's dynamic import() runs, not after: esbuild's
@@ -1223,10 +1247,14 @@ async function renderDashboardToCompletion({
       '      const effectiveResult =\n        lastUsageRefreshResult !== null && (stats.generatedAt || "") !== lastUsageRefreshResultForGeneratedAt\n          ? null\n          : lastUsageRefreshResult;';
     assert.ok(source.includes(needle), "the effectiveResult computation must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      const effectiveResult = lastUsageRefreshResult;");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
@@ -1281,10 +1309,14 @@ async function renderDashboardToCompletion({
     const needle = "    const STALE_THRESHOLD_MS = 15 * 60 * 1000;\n";
     assert.ok(source.includes(needle), "the STALE_THRESHOLD_MS declaration must be present verbatim (fixture drift guard)");
     const mutated = source.replace(needle, "    const STALE_THRESHOLD_MS = 80;\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   async function oneClickOnAgedStaleSnapshot({ spawnOutcomeProvider, mutateSource }) {
@@ -1321,10 +1353,14 @@ async function renderDashboardToCompletion({
       needle,
       '      const autoRefreshKey = `${settings.usageStatsPath}|${stats.generatedAt || ""}`;\n      if (stale && !refreshing && !usageAutoRefreshAttempted.has(autoRefreshKey)) {\n        usageAutoRefreshAttempted.add(autoRefreshKey);\n        void doRefresh();\n      }'
     );
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedFailingSpawns = await oneClickOnAgedStaleSnapshot({
@@ -1366,10 +1402,14 @@ async function renderDashboardToCompletion({
     const needle = "      const refreshStatusText = refreshing\n";
     assert.ok(source.includes(needle), "the refreshStatusText ternary must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, '      const refreshStatusText = !generatedText\n        ? "Snapshot generation time unavailable"\n        : refreshing\n');
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const mutatedTree = await renderUsageTabToCompletion({
@@ -1409,10 +1449,14 @@ async function renderDashboardToCompletion({
     const needle = "      void refreshUsageSnapshot(app, settings.usageStatsPath).finally(() => refresh());\n";
     assert.ok(source.includes(needle), "the post-settle continuation must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "      void refreshUsageSnapshot(app, settings.usageStatsPath);\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, mutateSource: removePostSettleRefresh });
@@ -1442,10 +1486,14 @@ async function renderDashboardToCompletion({
     const needle = "  refreshBtn.addEventListener(\"click\", () => {\n    if (Platform.isDesktop) {\n";
     assert.ok(source.includes(needle), "the mobile gate must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "  refreshBtn.addEventListener(\"click\", () => {\n    if (true) {\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const hMutated = await renderDashboardToCompletion({ spawnOutcomeProvider: successProvider, isDesktop: false, mutateSource: removeMobileGate });
@@ -1622,10 +1670,14 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
       needle,
       'export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n  const folder = usageStatsPath.split("/").slice(0, -1).join("/");\n  if (!folder) return false;\n  return path === folder || path.startsWith(folder + "/");\n}'
     );
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const hMutatedA = await renderOnloadListeners({ mutateModelSource: restoreWholeFolderFilter });
@@ -1650,10 +1702,14 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
     const needle = "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  if (!path || !usageStatsPath) return false;\n";
     assert.ok(source.includes(needle), "the isUsageExporterOutputPath entry must be present verbatim before mutating it (fixture drift guard)");
     const mutated = source.replace(needle, "export function isUsageExporterOutputPath(path, usageStatsPath) {\n  return false;\n  if (!path || !usageStatsPath) return false;\n");
+    // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
+    // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
+    // future fixture includes it, disable it together with the N2 mutation.
     const settleMark = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
-    assert.ok(mutated.includes(settleMark), "N2 differential mutation: the newer settle-time mark must be present before disabling it alongside the older guard");
-    const differential = mutated.replace(settleMark, "      // MUTATION: disable the newer settle-time mark so it cannot mask the old N2 guard mutation.");
-    assert.notEqual(differential, source, "the mutation must actually change executable source");
+    const differential = mutated.includes(settleMark)
+      ? mutated.replace(settleMark, "      // MUTATION: disable settle-time N5 mark with the downstream N2 guard.")
+      : mutated;
+    assert.notEqual(differential, source, "the N2 mutation must actually change executable source");
     return differential;
   };
   const hMutatedB = await renderOnloadListeners({ mutateModelSource: disableFilterEntirely });

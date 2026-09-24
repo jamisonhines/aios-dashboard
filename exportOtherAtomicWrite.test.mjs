@@ -6,13 +6,24 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "other-exporters-atomic-"));
+const fakeHome = path.join(root, "home");
+const fakeBin = path.join(root, "bin");
+await fs.mkdir(path.join(fakeHome, ".claude", "projects"), { recursive: true });
+await fs.mkdir(path.join(fakeHome, ".pi", "agent", "sessions"), { recursive: true });
+await fs.mkdir(path.join(fakeHome, "Library", "LaunchAgents"), { recursive: true });
+await fs.mkdir(fakeBin, { recursive: true });
+await fs.writeFile(path.join(fakeBin, "launchctl"), "#!/bin/sh\nprintf '123\t0\tcom.synthetic.fixture\n'\n");
+await fs.writeFile(path.join(fakeBin, "plutil"), "#!/bin/sh\nprintf '{\"Label\":\"com.synthetic.fixture\",\"StartInterval\":60}'\n");
+await fs.chmod(path.join(fakeBin, "launchctl"), 0o755); await fs.chmod(path.join(fakeBin, "plutil"), 0o755);
+await fs.writeFile(path.join(fakeHome, "Library", "LaunchAgents", "com.synthetic.fixture.plist"), "synthetic");
+const syntheticEnv = { HOME: fakeHome, PATH: fakeBin };
 const cases = [
   ["vault-scripts/export-ops-map.mjs", "ops-map.json", (json) => Array.isArray(json.nodes)],
   ["vault-scripts/export-automation-health.mjs", "automation-health.json", (json) => Array.isArray(json.jobs)],
   ["vault-scripts/export-agent-models.mjs", "agent-models.json", (json) => Array.isArray(json.agents)],
 ];
 const run = (script, vault, env = {}) => new Promise((resolve) => {
-  const child = spawn(process.execPath, [script, vault], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [script, vault], { env: { ...process.env, ...syntheticEnv, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   child.stdout.on("data", (d) => stdout += d); child.stderr.on("data", (d) => stderr += d);
   child.once("exit", (code) => resolve({ code, stdout, stderr }));
