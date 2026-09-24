@@ -25,6 +25,7 @@ import "./testFileTimeout.mjs";
 import assert from "node:assert";
 import { promises as fs, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import path from "node:path";
 import {
   makeFixtureRoot,
   outPaths,
@@ -329,15 +330,18 @@ import {
   const spawnHolder = (env) => spawn(process.execPath, [exporterCli, vaultRoot], {
     env: { ...process.env, AIOS_USAGE_EXPORT_TEST_MODE: "1", USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env }, stdio: ["ignore", "pipe", "pipe"],
   });
+  const children = new Set();
+  const spawnTracked = (env) => { const child = spawnHolder(env); children.add(child); child.once("exit", () => children.delete(child)); return child; };
+  const cleanupChildren = async () => { const pending = [...children]; for (const child of pending) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await Promise.all(pending.map((child) => new Promise((resolve) => child.once("exit", resolve)))); assert.equal(children.size, 0, "N6 mutation cleanup: no child exporter descendants may survive an assertion failure"); };
   try {
-    const a = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
+    const a = spawnTracked({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
     const aExit = new Promise((resolve) => a.once("exit", (code, signal) => resolve({ code, signal })));
     let aOwner = null;
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline && !aOwner) { try { aOwner = JSON.parse(await fs.readFile(`${lockFile}/owner.json`, "utf8")); } catch { await new Promise((resolve) => setTimeout(resolve, 20)); } }
     assert.ok(aOwner, "N6 mutation sanity: A acquired its lock");
     await new Promise((resolve) => setTimeout(resolve, 180));
-    const b = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
+    const b = spawnTracked({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
     const bExit = new Promise((resolve) => b.once("exit", (code, signal) => resolve({ code, signal })));
     let bOwner = null;
     while (Date.now() < deadline && !bOwner) { try { const candidate = JSON.parse(await fs.readFile(`${lockFile}/owner.json`, "utf8")); if (candidate.nonce !== aOwner.nonce) bOwner = candidate; } catch {} if (!bOwner) await new Promise((resolve) => setTimeout(resolve, 20)); }
@@ -349,9 +353,57 @@ import {
     b.kill("SIGTERM");
     await bExit;
   } finally {
+    await cleanupChildren();
     await fs.rm(root, { recursive: true, force: true });
     await cleanup();
   }
+}
+
+
+// --- MUTATION (M8): remove the injected pre-rename failure branch. The same forced fixture
+// must then wrongly rename over the named prior snapshot, proving the preservation assertion
+// depends on the executable branch rather than a generic exporter failure. -------------------
+{
+  const needle = '    if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") {';
+  const { exporterCli, changed, cleanup } = await makeMutatedExporterCopy((source) => {
+    assert.ok(source.includes(needle), "M8 mutation anchor must be the executable pre-rename injected-failure gate");
+    return source.replace(needle, '    if (false && usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") {');
+  });
+  assert.ok(changed, "M8 mutation must change executable source");
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile } = outPaths(vaultRoot);
+  try {
+    await fs.mkdir(path.dirname(outFile), { recursive: true });
+    await fs.writeFile(outFile, JSON.stringify({ marker: "prior-good-snapshot", days: [], projects: [] }) + "\n");
+    const result = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot, exporterCli, env: { USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL: "1" } });
+    assert.equal(result.code, 0, `M8 mutation sanity: removing only the injected pre-rename branch lets rename succeed, got ${JSON.stringify(result)}`);
+    assert.notEqual(JSON.parse(await fs.readFile(outFile, "utf8")).marker, "prior-good-snapshot", "MUTATION CHECK M8: without the pre-rename failure, forced fixture must WRONGLY replace the named prior snapshot");
+    console.log("M8 MUTATION (pre-rename failure branch removed): prior usage-stats.json WRONGLY replaced.");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await cleanup();
+  }
+}
+
+
+// --- MUTATION (R2-M5): remove the explicit production test-setting gate. ---------------------
+{
+  const needle = 'const usageTestEnv = (name) => process.env.AIOS_USAGE_EXPORT_TEST_MODE === "1" ? process.env[name] : undefined;';
+  const { exporterCli, changed, cleanup } = await makeMutatedExporterCopy((source) => {
+    assert.ok(source.includes(needle), "R2-M5 mutation anchor must be the executable usage test-setting gate");
+    return source.replace(needle, 'const usageTestEnv = (name) => process.env[name];');
+  });
+  assert.ok(changed, "R2-M5 mutation must change the executable production gate");
+  const { root, vaultRoot } = await makeFixtureRoot();
+  try {
+    const child = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [exporterCli, vaultRoot], { env: { ...process.env, HOME: path.join(root, "synthetic-production-home"), USAGE_EXPORT_TEST_FORCE_FAIL: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = ""; c.stderr.on("data", (chunk) => stderr += chunk); c.once("exit", (code) => resolve({ code, stderr }));
+    });
+    assert.equal(child.code, 1, `MUTATION CHECK R2-M5: without the explicit gate, a production child must WRONGLY honor USAGE_EXPORT_TEST_FORCE_FAIL, got ${JSON.stringify(child)}`);
+    assert.match(child.stderr, /synthetic test failure requested/, `MUTATION CHECK R2-M5: failure must specifically prove the inherited test setting was honored, got ${JSON.stringify(child)}`);
+    console.log("R2-M5 MUTATION (production test-setting gate removed): production child WRONGLY honored USAGE_EXPORT_TEST_FORCE_FAIL.");
+  } finally { await fs.rm(root, { recursive: true, force: true }); await cleanup(); }
 }
 
 console.log("exportUsageAtomicWrite.mutations: all mutation checks ran (see above for the probabilistic R3-I2 result)");

@@ -519,6 +519,19 @@ import {
     env: { ...process.env, AIOS_USAGE_EXPORT_TEST_MODE: "1", USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const children = new Set();
+  const spawnTracked = (env) => {
+    const child = spawnHolder(env);
+    children.add(child);
+    child.once("exit", () => children.delete(child));
+    return child;
+  };
+  const cleanupChildren = async () => {
+    const pending = [...children];
+    for (const child of pending) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await Promise.all(pending.map((child) => new Promise((resolve) => child.once("exit", resolve))));
+    assert.equal(children.size, 0, "N6 cleanup: no child exporter descendants may survive even when an assertion aborts the scenario");
+  };
   const waitForOwnerChange = async (oldOwner) => {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
@@ -531,7 +544,7 @@ import {
     return null;
   };
   try {
-    const a = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
+    const a = spawnTracked({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
     const aExit = new Promise((resolve) => a.once("exit", (code, signal) => resolve({ code, signal })));
     let aOwner = null;
     const ownerDeadline = Date.now() + 5000;
@@ -540,7 +553,7 @@ import {
     }
     assert.ok(aOwner, "N6 sanity: A must own the real lock before B can steal it");
     await new Promise((resolve) => setTimeout(resolve, 180));
-    const b = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
+    const b = spawnTracked({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
     const bExit = new Promise((resolve) => b.once("exit", (code, signal) => resolve({ code, signal })));
     const bOwner = await waitForOwnerChange(aOwner);
     assert.ok(bOwner, "N6 sanity: B must steal A's stale lock and install a distinct owner token");
@@ -553,6 +566,7 @@ import {
     b.kill("SIGTERM");
     await bExit;
   } finally {
+    await cleanupChildren();
     await fs.rm(root, { recursive: true, force: true });
   }
 }
@@ -599,7 +613,25 @@ console.log("exportUsageAtomicWrite: all assertions passed");
     assert.equal(JSON.parse(await fs.readFile(outFile, "utf8")).marker, "prior-good-snapshot", "M8: named usage-stats.json snapshot must remain the prior complete data after pre-rename failure");
     const status = JSON.parse(await fs.readFile(statusFile, "utf8"));
     assert.match(status.lastError, /synthetic snapshot publish failure requested/, `M8: named usage-stats.status.json must record the specific publish failure, got ${JSON.stringify(status)}`);
-    console.log("M8: mid-publish snapshot failure preserved usage-stats.json and wrote its specific error to usage-stats.status.json");
+    console.log("M8: injected pre-rename failure preserved usage-stats.json and wrote its specific error to usage-stats.status.json");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
+// M8 companion: this is a genuine filesystem rename failure, deliberately distinct from the
+// injected pre-rename branch above. A directory at the live snapshot resource makes rename(2)
+// fail after the temp file has been written and fsynced.
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile, statusFile } = outPaths(vaultRoot);
+  try {
+    await fs.mkdir(outFile, { recursive: true });
+    const result = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot });
+    assert.equal(result.code, 1, `M8 rename: a real rename failure must exit non-zero: ${JSON.stringify(result)}`);
+    assert.doesNotMatch(result.stderr, /synthetic snapshot publish failure requested/, `M8 rename: genuine filesystem failure must not be mistaken for injected pre-rename failure: ${JSON.stringify(result)}`);
+    assert.match(result.stderr, /EISDIR|ENOTDIR|rename/, `M8 rename: error must identify the real rename filesystem failure: ${JSON.stringify(result)}`);
+    const status = JSON.parse(await fs.readFile(statusFile, "utf8"));
+    assert.match(status.lastError, /EISDIR|ENOTDIR|rename/, `M8 rename: status sidecar must record the real rename failure, got ${JSON.stringify(status)}`);
+    console.log("M8: genuine filesystem rename failure is distinct from injected pre-rename failure and reaches the named sidecar");
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
