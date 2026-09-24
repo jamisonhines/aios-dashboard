@@ -1933,16 +1933,21 @@ export function budgetGuardrail(todayCostUsd, dailyBudgetUsd) {
  * @param {"absent"|"invalid"|"ok"|undefined} readState
  * @param {{ lastAttemptAt: string|null, lastSuccessAt: string|null, lastError: string|null }|null} runStatus
  */
-export function usageRunWarnings(readState, runStatus) {
+export function usageRunWarnings(readState, runStatus, snapshotGeneratedAt = null) {
   const messages = [];
   if (readState === "invalid") {
     messages.push("The snapshot file on disk is unreadable or invalid; showing the last known-good snapshot from this session.");
   } else if (readState === "absent") {
     messages.push("No snapshot file exists on disk yet; showing the last known-good snapshot from this session.");
   }
+  // A data snapshot published after the sidecar's failed attempt is authoritative evidence
+  // of a newer success. If the subsequent success-status write failed, retaining the older
+  // sidecar error must not falsely banner the newly published snapshot as failed.
+  const snapshotSupersedesStatus = !!(
+    snapshotGeneratedAt && runStatus?.lastAttemptAt && snapshotGeneratedAt > runStatus.lastAttemptAt
+  );
   const lastRunFailed = !!(
-    runStatus &&
-    runStatus.lastError &&
+    !snapshotSupersedesStatus && runStatus && runStatus.lastError &&
     (!runStatus.lastSuccessAt || (runStatus.lastAttemptAt && runStatus.lastAttemptAt > runStatus.lastSuccessAt))
   );
   if (lastRunFailed) {

@@ -87,6 +87,7 @@ export function runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot, env = {},
     const child = spawn(process.execPath, [exporterCli, vaultRoot], {
       env: {
         ...process.env,
+        AIOS_USAGE_EXPORT_TEST_MODE: "1",
         USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot,
         USAGE_EXPORT_TEST_PI_ROOT: piRoot,
         USAGE_EXPORT_TEST_BB_ROOT: bbRoot,

@@ -394,6 +394,9 @@ async function renderUsageTabToCompletion({
   // touching a tracked file (the same discipline as R3-I1's exporter fix, applied here to the
   // UI source).
   mutateSource = null,
+  // N5 support: settle a header-equivalent run before Usage renders, so this same module
+  // later opens Usage with the stale identity that settle() must already have marked.
+  preRenderRefresh = false,
   settleMs = 100,
 } = {}) {
   resetCreationLog();
@@ -413,7 +416,7 @@ async function renderUsageTabToCompletion({
     ].join("\n")
   );
   const mainSource = fs.readFileSync(path.join(root, "main.ts"), "utf8");
-  fs.writeFileSync(entry, (mutateSource ? mutateSource(mainSource) : mainSource) + "\nexport { renderUsageTab };\n");
+  fs.writeFileSync(entry, (mutateSource ? mutateSource(mainSource) : mainSource) + "\nexport { renderUsageTab, refreshUsageSnapshot };\n");
   globalThis.ResizeObserver = class { observe() {} disconnect() {} };
   globalThis.getComputedStyle = () => ({ overflowY: "visible" });
   const docEl = fakeEl();
@@ -436,7 +439,7 @@ async function renderUsageTabToCompletion({
       external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"],
       alias: { obsidian: stub },
     });
-    const { renderUsageTab } = await import(pathToFileURL(out).href);
+    const { renderUsageTab, refreshUsageSnapshot } = await import(pathToFileURL(out).href);
     const fixedStatsJson = JSON.stringify({ generatedAt: generatedAt ?? new Date().toISOString(), days: [], projects: [], windowDays: 35 });
     // Round 2 (M4 test support): each read of usage-stats.json advances one step through
     // generatedAtSequence when given, sticking on the last entry once exhausted; otherwise every
@@ -474,6 +477,7 @@ async function renderUsageTabToCompletion({
     const viewState = { expanded: new Set(), usageRange: "7d", usageOffset: 0 };
     const container = fakeEl();
     const periodbarHost = fakeEl();
+    if (preRenderRefresh) await refreshUsageSnapshot(app, statsPath);
     // Round 2, Minor M1: renderUsageTab now takes a `refresh` callback (threaded from the real
     // renderDashboard) that its own settle-triggered doRefresh calls instead of a purely local
     // draw(). This harness's equivalent: empty the container and re-render the whole tab in
@@ -505,8 +509,13 @@ async function renderUsageTabToCompletion({
   const healthy = await renderUsageTabToCompletion({ statusJson: null });
   assert.equal(findByClass(healthy, "aios-budget-warn"), undefined, "a healthy read with no run-status file renders no warning");
 
+  const failedAttemptAt = new Date().toISOString();
   const failed = await renderUsageTabToCompletion({
-    statusJson: JSON.stringify({ lastAttemptAt: new Date().toISOString(), lastSuccessAt: null, lastError: "boom: disk full" }),
+    // A sidecar failure belongs to the snapshot that existed before that attempt, not a
+    // later snapshot. Keep this temporal fixture real so M11's newer-snapshot suppression
+    // cannot mask the ordinary failed-sidecar warning.
+    generatedAt: new Date(Date.now() - 5000).toISOString(),
+    statusJson: JSON.stringify({ lastAttemptAt: failedAttemptAt, lastSuccessAt: null, lastError: "boom: disk full" }),
   });
   const warnNode = findByClass(failed, "aios-budget-warn");
   assert.ok(warnNode, "a real, full renderUsageTab render with a failed run-status must produce a warning div somewhere in the rendered tree");
@@ -1730,3 +1739,66 @@ async function renderOnloadListeners({ mutateSource = null, mutateModelSource = 
 }
 
 console.log("usageRunWarnings.test.mjs: all assertions passed");
+
+// --- R4-M1: after an auto-refresh settles failed, the settled status retains the stale Generated identity and names the failure. ---
+{
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const tree = await renderUsageTabToCompletion({
+    statusJson: null,
+    generatedAt: twoHoursAgo,
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: (callIndex) => callIndex === 0 ? { code: 1, stdout: "", stderr: "boom: disk full" } : null,
+    settleMs: 250,
+  });
+  const statusNode = findByClass(tree, "aios-usage-refresh-status");
+  assert.ok(statusNode, "R4-M1: failed refresh must leave a settled refresh-status node");
+  assert.match(statusNode.text, /Refresh failed \(boom: disk full\)/, `R4-M1: settled text must name the specific refresh failure, got ${JSON.stringify(statusNode.text)}`);
+  assert.match(statusNode.text, /Generated .*\(stale\)/, `R4-M1: settled failed refresh must preserve Generated ... (stale), got ${JSON.stringify(statusNode.text)}`);
+  console.log(`R4-M1: settled failed refresh retained stale Generated identity and specific error -- "${statusNode.text}"`);
+}
+
+// --- M11 UI half: a newer named snapshot suppresses a stale failed sidecar banner. -----------
+{
+  const warnings = usageRunWarnings(
+    "ok",
+    { lastAttemptAt: "2000-01-01T00:00:00.000Z", lastSuccessAt: null, lastError: "old failed banner" },
+    "2000-01-01T00:00:02.000Z"
+  );
+  assert.deepEqual(warnings, [], `M11: a snapshot generated after the failed sidecar attempt must not show a false failed banner, got ${JSON.stringify(warnings)}`);
+  console.log("M11: newer usage-stats.json generatedAt suppresses the stale sidecar failed banner");
+}
+
+// --- N5: a failed header-equivalent run settles off-tab, then opening Usage must not launch again. ---
+{
+  const removeSettleMark = (source) => {
+    const needle = '      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);';
+    assert.ok(source.includes(needle), "N5 fixture drift: main.ts settle-time mark must be present before mutation");
+    const mutated = source.replace(needle, "      // MUTATION: remove N5 settle-time mark.");
+    assert.notEqual(mutated, source, "N5 mutation must alter executable settle code");
+    return mutated;
+  };
+  const outcome = () => ({ code: 1, stdout: "", stderr: "off-tab disk full" });
+  const intact = await renderUsageTabToCompletion({
+    generatedAt: "",
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: outcome,
+    preRenderRefresh: true,
+    settleMs: 180,
+  });
+  assert.equal(spawnLog.length, 1, `N5: failed header-equivalent run settled before Usage opens must leave the empty stale identity marked, so Usage launches exactly once total -- got ${spawnLog.length}`);
+  const intactStatus = findByClass(intact, "aios-usage-refresh-status");
+  assert.match(intactStatus.text, /Refresh failed \(off-tab disk full\)/, `N5 sanity: the settled off-tab failure must be specific when Usage opens, got ${JSON.stringify(intactStatus.text)}`);
+
+  const mutated = await renderUsageTabToCompletion({
+    generatedAt: "",
+    basePath: "/fake/vault",
+    spawnOutcomeProvider: outcome,
+    preRenderRefresh: true,
+    mutateSource: removeSettleMark,
+    settleMs: 180,
+  });
+  assert.equal(spawnLog.length, 2, `MUTATION CHECK N5: removing main.ts settle-time mark must WRONGLY let opening Usage launch a second refresh for the same stale identity -- got ${spawnLog.length}`);
+  const mutatedStatus = findByClass(mutated, "aios-usage-refresh-status");
+  assert.match(mutatedStatus.text, /Refresh failed \(off-tab disk full\)/, `N5 mutation fixture must preserve the specific original failure, got ${JSON.stringify(mutatedStatus.text)}`);
+  console.log("N5: settled off-tab failed refresh blocks a second Usage auto-run. MUTATION (settle mark removed): 2 launches.");
+}

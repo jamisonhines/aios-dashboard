@@ -2,9 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
-const staleMs = () => Number(process.env.AIOS_EXPORT_TEST_LOCK_STALE_MS) || 120_000;
-const holdMs = () => Number(process.env.AIOS_EXPORT_TEST_HOLD_MS) || 0;
-const chunkDelayMs = () => Number(process.env.AIOS_EXPORT_TEST_WRITE_CHUNK_DELAY_MS) || 0;
+// Test timing knobs require an explicit fixture gate. Production ignores inherited
+// AIOS_EXPORT_TEST_* values, so a developer shell cannot shorten live lock leases.
+const exportTestEnv = (name) => process.env.AIOS_EXPORT_TEST_MODE === "1" ? process.env[name] : undefined;
+const staleMs = () => Number(exportTestEnv("AIOS_EXPORT_TEST_LOCK_STALE_MS")) || 120_000;
+const holdMs = () => Number(exportTestEnv("AIOS_EXPORT_TEST_HOLD_MS")) || 0;
+const chunkDelayMs = () => Number(exportTestEnv("AIOS_EXPORT_TEST_WRITE_CHUNK_DELAY_MS")) || 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ownerPath = (lockPath) => path.join(lockPath, "owner.json");
 

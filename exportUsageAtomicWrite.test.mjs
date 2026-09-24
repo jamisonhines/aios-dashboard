@@ -516,7 +516,7 @@ import {
   const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
   const { lockFile } = outPaths(vaultRoot);
   const spawnHolder = (env) => spawn(process.execPath, [TRACKED_EXPORTER_CLI, vaultRoot], {
-    env: { ...process.env, USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env },
+    env: { ...process.env, AIOS_USAGE_EXPORT_TEST_MODE: "1", USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const waitForOwnerChange = async (oldOwner) => {
@@ -558,3 +558,65 @@ import {
 }
 
 console.log("exportUsageAtomicWrite: all assertions passed");
+
+// --- R2-M5/M9: USAGE_EXPORT_TEST_* knobs are inert without the one explicit test gate. -----
+{
+  const { root, vaultRoot } = await makeFixtureRoot();
+  try {
+    const result = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [TRACKED_EXPORTER_CLI, vaultRoot], {
+        env: {
+          ...process.env,
+          HOME: path.join(root, "synthetic-production-home"),
+          USAGE_EXPORT_TEST_FORCE_FAIL: "1",
+          USAGE_EXPORT_TEST_PROJECTS_ROOT: path.join(root, "must-not-be-used"),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.once("exit", (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, `R2-M5: without AIOS_USAGE_EXPORT_TEST_MODE=1, a production child must ignore USAGE_EXPORT_TEST_FORCE_FAIL, got ${JSON.stringify(result)}`);
+    assert.doesNotMatch(result.stderr, /synthetic test failure requested/, `R2-M5: production must not honor USAGE_EXPORT_TEST_FORCE_FAIL: ${JSON.stringify(result)}`);
+    assert.ok(existsSync(outPaths(vaultRoot).outFile), "R2-M5: production child must publish the named usage-stats.json output despite inherited test knobs");
+    console.log("R2-M5: production child ignored USAGE_EXPORT_TEST_FORCE_FAIL without AIOS_USAGE_EXPORT_TEST_MODE=1 and published usage-stats.json");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
+// --- M8: a failure after the temporary snapshot is fsynced but before rename preserves stale data and records its named failure. ---
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile, statusFile } = outPaths(vaultRoot);
+  try {
+    await fs.mkdir(path.dirname(outFile), { recursive: true });
+    await fs.writeFile(outFile, JSON.stringify({ days: [], projects: [], marker: "prior-good-snapshot" }) + "\n");
+    const result = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot, env: { USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL: "1" } });
+    assert.equal(result.code, 1, `M8: forced mid-publish failure must exit non-zero: ${JSON.stringify(result)}`);
+    assert.match(result.stderr, /synthetic snapshot publish failure requested/, `M8: error must name the specific mid-publish failure: ${JSON.stringify(result)}`);
+    assert.equal(JSON.parse(await fs.readFile(outFile, "utf8")).marker, "prior-good-snapshot", "M8: named usage-stats.json snapshot must remain the prior complete data after pre-rename failure");
+    const status = JSON.parse(await fs.readFile(statusFile, "utf8"));
+    assert.match(status.lastError, /synthetic snapshot publish failure requested/, `M8: named usage-stats.status.json must record the specific publish failure, got ${JSON.stringify(status)}`);
+    console.log("M8: mid-publish snapshot failure preserved usage-stats.json and wrote its specific error to usage-stats.status.json");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
+// --- M11: a published newer snapshot suppresses an older failed sidecar if success-status write itself fails. ---
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { outFile, statusFile } = outPaths(vaultRoot);
+  try {
+    await fs.mkdir(path.dirname(outFile), { recursive: true });
+    const oldAttempt = "2000-01-01T00:00:00.000Z";
+    await fs.writeFile(statusFile, JSON.stringify({ lastAttemptAt: oldAttempt, lastSuccessAt: null, lastError: "old failed banner" }) + "\n");
+    const result = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot, env: { USAGE_EXPORT_TEST_FORCE_SUCCESS_STATUS_WRITE_FAIL: "1" } });
+    assert.equal(result.code, 0, `M11: snapshot publication remains successful when only success-status write fails: ${JSON.stringify(result)}`);
+    const snapshot = JSON.parse(await fs.readFile(outFile, "utf8"));
+    assert.ok(snapshot.generatedAt > oldAttempt, `M11: named usage-stats.json must be newer than old failed sidecar, got ${snapshot.generatedAt}`);
+    const staleStatus = JSON.parse(await fs.readFile(statusFile, "utf8"));
+    assert.equal(staleStatus.lastError, "old failed banner", "M11 sanity: injected success-status failure leaves the old named sidecar error in place");
+    console.log("M11: newer usage-stats.json survives injected success-status write failure; stale sidecar error is intentionally left for UI supersession coverage");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}

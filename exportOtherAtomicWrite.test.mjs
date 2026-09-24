@@ -26,7 +26,7 @@ const cases = [
   ["vault-scripts/export-agent-models.mjs", "agent-models.json", (json) => Array.isArray(json.agents) && json.agents.some((agent) => agent.name === "Synthetic Agent")],
 ];
 const run = (script, vault, env = {}) => new Promise((resolve) => {
-  const child = spawn(process.execPath, [script, vault], { env: { ...process.env, ...syntheticEnv, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [script, vault], { env: { ...process.env, AIOS_EXPORT_TEST_MODE: "1", ...syntheticEnv, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   child.stdout.on("data", (d) => stdout += d); child.stderr.on("data", (d) => stderr += d);
   child.once("exit", (code) => resolve({ code, stdout, stderr }));

@@ -1181,7 +1181,12 @@ function createResponseDiagnostics() {
 // Test-only override: a real fixture-vault test that wants to exercise stale-lock recovery,
 // the race-safe steal, or the thundering-herd/slow-holder scenarios cannot wait 120 real
 // seconds per case. Unset in production (falls back to the real 120_000 threshold above).
-const LOCK_STALE_MS = Number(process.env.USAGE_EXPORT_TEST_LOCK_STALE_MS) || 120_000;
+// All test-only overrides are inert unless this explicit gate is set by a synthetic
+// fixture process. This prevents inherited USAGE_EXPORT_TEST_* values from altering a
+// production SessionStart exporter, including failure injection and timing knobs.
+const usageTestEnv = (name) => process.env.AIOS_USAGE_EXPORT_TEST_MODE === "1" ? process.env[name] : undefined;
+const usageTestNumber = (name, fallback) => Number(usageTestEnv(name)) || fallback;
+const LOCK_STALE_MS = usageTestNumber("USAGE_EXPORT_TEST_LOCK_STALE_MS", 120_000);
 
 // Atomic publish for any small JSON artifact in `dir`: write to a uniquely named temp
 // file (pid + timestamp, so two concurrent writers never collide on the temp name
@@ -1194,7 +1199,7 @@ const LOCK_STALE_MS = Number(process.env.USAGE_EXPORT_TEST_LOCK_STALE_MS) || 120
 // unable to go red under a reverted (non-atomic) write. When set, the temp-file write is
 // split into chunks with a delay between them, widening the window. Never read outside a
 // test process (unset in production, no behavioral effect at 0).
-const TEST_WRITE_CHUNK_DELAY_MS = Number(process.env.USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS) || 0;
+const TEST_WRITE_CHUNK_DELAY_MS = usageTestNumber("USAGE_EXPORT_TEST_WRITE_CHUNK_DELAY_MS", 0);
 
 // M1 (Reviewer round 2, R2-M1), residual widened-gap case: skipping ONLY the catch-block
 // status write on lock loss (see the USAGE_EXPORT_LOCK_LOST branch in main()) closes the race
@@ -1239,6 +1244,12 @@ async function writeJsonAtomic(filePath, data, { beforeRename } = {}) {
     if (beforeRename && !(await beforeRename())) {
       await fs.rm(tempFile, { force: true }).catch(() => {});
       return { skipped: true };
+    }
+    if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") {
+      throw new Error("synthetic snapshot publish failure requested via USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL");
+    }
+    if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_SUCCESS_STATUS_WRITE_FAIL") && path.basename(filePath) === "usage-stats.status.json") {
+      throw new Error("synthetic success-status write failure requested via USAGE_EXPORT_TEST_FORCE_SUCCESS_STATUS_WRITE_FAIL");
     }
     await fs.rename(tempFile, filePath);
     return { skipped: false };
@@ -1369,11 +1380,11 @@ export async function main({
   // Env overrides exist only so a CLI-spawned test process (real `node export-usage-stats.mjs
   // <vault>`, no way to pass programmatic options) can point at an isolated fixture instead of
   // the real ~/.claude/projects etc. Unset in production; the defaults below are unchanged.
-  projectsRoot = process.env.USAGE_EXPORT_TEST_PROJECTS_ROOT || path.join(os.homedir(), ".claude", "projects"),
-  piRoot = process.env.USAGE_EXPORT_TEST_PI_ROOT || path.join(os.homedir(), ".pi", "agent", "sessions"),
-  bbRoot = process.env.USAGE_EXPORT_TEST_BB_ROOT || path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
+  projectsRoot = usageTestEnv("USAGE_EXPORT_TEST_PROJECTS_ROOT") || path.join(os.homedir(), ".claude", "projects"),
+  piRoot = usageTestEnv("USAGE_EXPORT_TEST_PI_ROOT") || path.join(os.homedir(), ".pi", "agent", "sessions"),
+  bbRoot = usageTestEnv("USAGE_EXPORT_TEST_BB_ROOT") || path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
   now = new Date(),
-  lockWaitMs = Number(process.env.USAGE_EXPORT_TEST_LOCK_WAIT_MS) || 1000,
+  lockWaitMs = usageTestNumber("USAGE_EXPORT_TEST_LOCK_WAIT_MS", 1000),
 } = {}) {
   const outDir = path.join(vaultRoot, "Operations", "usage");
   const outFile = path.join(outDir, "usage-stats.json");
@@ -1416,7 +1427,7 @@ export async function main({
         // EACCES on a misconfigured Operations/usage dir) is awkward to reproduce
         // deterministically from outside a real filesystem race, so a test can force it here
         // to exercise the catch below with a real thrown error.
-        if (process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL) {
+        if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL")) {
           throw new Error(`synthetic owner-token write failure requested via USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL=${process.env.USAGE_EXPORT_TEST_FORCE_OWNER_WRITE_FAIL}`);
         }
         await fs.writeFile(ownerFilePath(lockFile), JSON.stringify(ownerToken));
@@ -1550,8 +1561,8 @@ export async function main({
   // many exporter processes are inside the critical section at once. USAGE_EXPORT_TEST_HOLD_MS:
   // sleep after acquiring the lock, widening that window long enough for a test's poll loop to
   // reliably observe overlapping holders if the lock is not actually serializing.
-  const testMarkDir = process.env.USAGE_EXPORT_TEST_MARK_DIR || null;
-  const testHoldMs = Number(process.env.USAGE_EXPORT_TEST_HOLD_MS) || 0;
+  const testMarkDir = usageTestEnv("USAGE_EXPORT_TEST_MARK_DIR") || null;
+  const testHoldMs = usageTestNumber("USAGE_EXPORT_TEST_HOLD_MS", 0);
   const testMarkFile = testMarkDir ? path.join(testMarkDir, `${process.pid}-${Date.now()}.active`) : null;
   if (testMarkFile) await fs.writeFile(testMarkFile, "").catch(() => {});
   if (testHoldMs > 0) await new Promise((resolve) => setTimeout(resolve, testHoldMs));
@@ -1573,7 +1584,7 @@ export async function main({
   // reproduce deterministically from outside. This lets a test exercise the catch/status-
   // recording path with a real thrown error, at a real point inside the critical section,
   // without faking any part of the code under test.
-  if (process.env.USAGE_EXPORT_TEST_FORCE_FAIL) {
+  if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_FAIL")) {
     throw new Error(`synthetic test failure requested via USAGE_EXPORT_TEST_FORCE_FAIL=${process.env.USAGE_EXPORT_TEST_FORCE_FAIL}`);
   }
   const transcripts = [

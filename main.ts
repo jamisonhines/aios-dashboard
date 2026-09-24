@@ -3811,7 +3811,7 @@ function renderUsageTab(
       // Run-health warning: distinct from the staleness suffix on refreshStatus above.
       // usageReadState is read fresh here (not captured once outside draw()) so a refresh's
       // side effect on that map is picked up on the very next redraw, same as `stats` itself.
-      renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus));
+      renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus, stats.generatedAt || null));
       renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
       renderUsageChartHost(body, win, viewState);
 
