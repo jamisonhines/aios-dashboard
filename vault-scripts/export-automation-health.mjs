@@ -312,7 +312,7 @@ async function main() {
     jobs: sortJobsRedFirst(jobs),
   };
 
-  const lockResult = await withOwnedExportLock(outFile, () => writeJsonAtomic(outFile, output));
+  const lockResult = await withOwnedExportLock(outFile, ({ isOwner }) => writeJsonAtomic(outFile, output, { beforeRename: isOwner }));
   if (lockResult.busy) {
     console.log(`automation-health export busy; another writer holds ${outFile}.lock`);
     return;

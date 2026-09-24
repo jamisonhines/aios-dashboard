@@ -2857,6 +2857,9 @@ function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageRefresh
       lastUsageRefreshResult = result;
       lastUsageRefreshResultAt = Date.now();
       lastUsageRefreshResultForGeneratedAt = generatedAtWhenStarted;
+      // A header-triggered failure or busy outcome can settle while Usage is not rendered.
+      // Mark that exact stale identity here so opening Usage cannot launch a second attempt.
+      usageAutoRefreshAttempted.add(`${statsPath}|${generatedAtWhenStarted}`);
       resolve(result);
     };
     try {

@@ -2954,7 +2954,7 @@ export function isUsageExporterOutputPath(path, usageStatsPath) {
   const lockBase = `${base}.lock`;
   if (rel === statusName) return true;
   if (rel === lockBase || rel.startsWith(`${lockBase}.`) || rel.startsWith(`${lockBase}/`)) return true;
-  if (rel.startsWith(`.${base}.`) && rel.endsWith(".tmp")) return true;
+  if ((rel.startsWith(`.${base}.`) || rel.startsWith(`.${statusName}.`)) && rel.endsWith(".tmp")) return true;
   return false;
 }
 
