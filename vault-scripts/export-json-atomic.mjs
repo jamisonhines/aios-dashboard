@@ -31,7 +31,8 @@ export async function writeJsonAtomic(filePath, value) {
     } else await handle.writeFile(json, "utf8");
     await handle.sync();
   } finally { await handle.close(); }
-  await fs.rename(tempPath, filePath);
+  try { await fs.rename(tempPath, filePath); }
+  catch (error) { await fs.rm(tempPath, { force: true }).catch(() => {}); throw error; }
 }
 
 export async function withOwnedExportLock(filePath, work, { waitMs = 1000 } = {}) {
@@ -43,7 +44,8 @@ export async function withOwnedExportLock(filePath, work, { waitMs = 1000 } = {}
     try {
       await fs.mkdir(lockPath);
       token = { pid: process.pid, nonce: randomBytes(8).toString("hex") };
-      await fs.writeFile(ownerPath(lockPath), JSON.stringify(token));
+      try { await fs.writeFile(ownerPath(lockPath), JSON.stringify(token)); }
+      catch (ownerError) { await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {}); throw ownerError; }
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       try {
