@@ -2833,12 +2833,15 @@ function resolveNodeForExporter(): { command: string | null; reason: string | nu
 // failure well before the lock-recovery machinery would even consider a legitimately slow run
 // abandoned, and never races that mechanism's own recovery.
 const USAGE_EXPORT_TIMEOUT_MS = 60_000;
-function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageRefreshResult> {
+async function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageRefreshResult> {
   if (usageRefreshInFlight) return usageRefreshInFlight;
-  // Round 3, Reviewer Minor N3: captured ONCE, here, at the moment this call actually STARTS a
-  // new run (not when a later caller joins the in-flight promise above) -- the identity of the
-  // snapshot on disk right before we touch anything.
-  const generatedAtWhenStarted = usageLastGood.get(statsPath)?.generatedAt || "";
+  // Header refreshes can run before the Usage tab has populated usageLastGood. Read the
+  // on-disk snapshot first so a settled off-tab result marks the same dated identity that a
+  // later Usage render will use. loadUsageStats is deliberately non-throwing for this purpose.
+  const generatedAtWhenStarted = usageLastGood.get(statsPath)?.generatedAt || (await loadUsageStats(app, statsPath))?.generatedAt || "";
+  // The await above permits another caller to have started the shared run. Join it rather than
+  // creating a second child process.
+  if (usageRefreshInFlight) return usageRefreshInFlight;
   usageRefreshInFlight = new Promise<UsageRefreshResult>((resolve) => {
     // Round 2, I1: settled exactly once, however it happens (normal exit, spawn error, or the
     // timeout below racing an exit that arrives in the same tick) -- without this guard a

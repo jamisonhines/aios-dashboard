@@ -938,8 +938,11 @@ async function renderDashboardToCompletion({
   // guard ahead of it -- the fixture is unchanged from the intact run above).
   const removeDedupeGuard = (source) => {
     const needle = "  if (usageRefreshInFlight) return usageRefreshInFlight;\n";
-    assert.ok(source.includes(needle), "the refreshUsageSnapshot dedupe guard must be present verbatim before mutating it (fixture drift guard)");
-    const mutated = source.replace(needle, "");
+    const guardCount = source.split(needle).length - 1;
+    assert.equal(guardCount, 2, "the pre-load and post-load refreshUsageSnapshot dedupe guards must both be present before mutation");
+    // The post-load guard is deliberately required too: loading an uncached disk identity
+    // awaits before creating the shared promise, so either guard alone can mask this proof.
+    const mutated = source.replaceAll(needle, "");
     // This harness bundles the render fixture only, not refreshUsageSnapshot. The settle-time
     // N5 mark is therefore absent here, so it cannot mask this downstream N2 fixture. When a
     // future fixture includes it, disable it together with the N2 mutation.
@@ -1801,4 +1804,64 @@ console.log("usageRunWarnings.test.mjs: all assertions passed");
   const mutatedStatus = findByClass(mutated, "aios-usage-refresh-status");
   assert.match(mutatedStatus.text, /Refresh failed \(off-tab disk full\)/, `N5 mutation fixture must preserve the specific original failure, got ${JSON.stringify(mutatedStatus.text)}`);
   console.log("N5: settled off-tab failed refresh blocks a second Usage auto-run. MUTATION (settle mark removed): 2 launches.");
+}
+
+// --- Dedicated residual-minor proofs: rendered R4-M1/M11 and populated off-tab N5. ---
+{
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const dropSettledResult = (source) => {
+    const needle = "      lastUsageRefreshResult = result;";
+    assert.ok(source.includes(needle), "R4-M1 mutation anchor must be the executable settled-result assignment");
+    return source.replace(needle, "      lastUsageRefreshResult = null;");
+  };
+  const mutated = await renderUsageTabToCompletion({
+    generatedAt: twoHoursAgo, basePath: "/fake/vault", settleMs: 250,
+    spawnOutcomeProvider: () => ({ code: 1, stdout: "", stderr: "boom: disk full" }),
+    mutateSource: dropSettledResult,
+  });
+  const node = findByClass(mutated, "aios-usage-refresh-status");
+  assert.doesNotMatch(node.text, /Refresh failed \(boom: disk full\)/, `MUTATION CHECK R4-M1: removing the settled result must WRONGLY hide its specific failure, got ${JSON.stringify(node.text)}`);
+  console.log(`R4-M1 MUTATION (settled result removed): specific failure WRONGLY absent -- ${JSON.stringify(node.text)}`);
+}
+
+{
+  const oldAttempt = "2000-01-01T00:00:00.000Z";
+  const newerSnapshot = "2000-01-01T00:00:02.000Z";
+  const rendered = await renderUsageTabToCompletion({
+    generatedAt: newerSnapshot,
+    statusJson: JSON.stringify({ lastAttemptAt: oldAttempt, lastSuccessAt: null, lastError: "old failed banner" }),
+  });
+  assert.equal(findByClass(rendered, "aios-budget-warn"), undefined, "M11 rendered wiring: a newer snapshot must suppress the named stale sidecar failure");
+  const omitGeneratedAt = (source) => {
+    const needle = "usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus, stats.generatedAt || null)";
+    assert.ok(source.includes(needle), "M11 mutation anchor must be the rendered usageRunWarnings call with generatedAt");
+    return source.replace(needle, "usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus)");
+  };
+  const mutated = await renderUsageTabToCompletion({
+    generatedAt: newerSnapshot,
+    statusJson: JSON.stringify({ lastAttemptAt: oldAttempt, lastSuccessAt: null, lastError: "old failed banner" }),
+    mutateSource: omitGeneratedAt,
+  });
+  const warning = findByClass(mutated, "aios-budget-warn");
+  assert.ok(warning, "MUTATION CHECK M11: omitting generatedAt from the real render call must WRONGLY render the stale failure banner");
+  assert.match(warning.text, /old failed banner/, `MUTATION CHECK M11: rendered banner must name stale sidecar failure, got ${JSON.stringify(warning.text)}`);
+  console.log(`M11 MUTATION (generatedAt wiring removed): stale sidecar banner WRONGLY rendered -- ${JSON.stringify(warning.text)}`);
+}
+
+for (const [label, outcome, expected] of [
+  ["failed", () => ({ code: 1, stdout: "", stderr: "populated off-tab disk full" }), /Refresh failed \(populated off-tab disk full\)/],
+  ["busy", () => ({ code: 0, stdout: "usage export busy: a live writer holds the lock", stderr: "" }), /Another export was already in progress/],
+]) {
+  const dated = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const intact = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: outcome, preRenderRefresh: true, settleMs: 180 });
+  assert.equal(spawnLog.length, 1, `N5 ${label}: an off-tab run with dated disk data but no prepopulated usageLastGood must launch once total, got ${spawnLog.length}`);
+  assert.match(findByClass(intact, "aios-usage-refresh-status").text, expected, `N5 ${label}: settled off-tab result must retain its specific status`);
+  const restoreUncachedBug = (source) => {
+    const needle = '  const generatedAtWhenStarted = usageLastGood.get(statsPath)?.generatedAt || (await loadUsageStats(app, statsPath))?.generatedAt || "";';
+    assert.ok(source.includes(needle), "N5 mutation anchor must load the uncached on-disk snapshot before marking its identity");
+    return source.replace(needle, '  const generatedAtWhenStarted = usageLastGood.get(statsPath)?.generatedAt || "";');
+  };
+  const mutated = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: outcome, preRenderRefresh: true, mutateSource: restoreUncachedBug, settleMs: 180 });
+  assert.equal(spawnLog.length, 2, `MUTATION CHECK N5 ${label}: restoring empty uncached identity must WRONGLY launch again when Usage opens, got ${spawnLog.length}`);
+  console.log(`N5 ${label}: populated uncached off-tab run launched once. MUTATION (disk identity load removed): 2 launches.`);
 }
