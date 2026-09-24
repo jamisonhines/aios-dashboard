@@ -506,7 +506,16 @@ export function computeIncidents(input) {
 
     const detectedMs = typeof fm.detected === "string" ? Date.parse(fm.detected) : NaN;
     const hasDetected = !isNaN(detectedMs);
-    const ageDays = hasDetected ? Math.max(0, Math.floor((nowMs - detectedMs) / 86400000)) : 0;
+
+    // urgent-alert.py folds a repeat of a still-open problem into the same note
+    // as a `repeats:` list of timestamps. Unparsable entries are dropped.
+    const repeats = (Array.isArray(fm.repeats) ? fm.repeats : [])
+      .filter((r) => typeof r === "string" && !isNaN(Date.parse(r)));
+    const latestMs = Math.max(hasDetected ? detectedMs : -Infinity, ...repeats.map((r) => Date.parse(r)));
+    const hasLatest = latestMs !== -Infinity;
+    // Age of the most recent occurrence: "latest 1d ago" for a problem that
+    // is still happening, not the age of its first note.
+    const ageDays = hasLatest ? Math.max(0, Math.floor((nowMs - latestMs) / 86400000)) : 0;
 
     const rawPrompt = typeof fm.prompt === "string" ? fm.prompt.trim() : "";
     const prompt =
@@ -521,12 +530,116 @@ export function computeIncidents(input) {
       property,
       ageDays,
       prompt,
-      _sortMs: hasDetected ? detectedMs : -Infinity, // undated notes sink to the bottom, never lead
+      detected: hasDetected ? fm.detected : null,
+      repeats,
+      _sortMs: hasLatest ? latestMs : -Infinity, // undated notes sink to the bottom, never lead
     });
   }
 
   rows.sort((a, b) => b._sortMs - a._sortMs);
   return rows.map(({ _sortMs, ...row }) => row);
+}
+
+// ---------------------------------------------------------------------------
+// Incident grouping (pure). The alerter files a fresh note every time a
+// still-broken job fails again (one per day for a daily job), so five open
+// notes can be one problem. Rows with the same property + item (trimmed,
+// case-insensitive) collapse into one group that carries the count and every
+// occurrence date. Input must be computeIncidents output (newest first); the
+// groups keep that order, keyed on each group's newest occurrence, and each
+// group's occurrences stay newest first.
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{ path: string, detected: string | null }} IncidentOccurrence
+ * @typedef {{ key: string, item: string, summary: string, property: string, ageDays: number, count: number, path: string, prompt: string, occurrences: IncidentOccurrence[] }} IncidentGroup
+ */
+
+/**
+ * @param {ReturnType<typeof computeIncidents>} rows
+ * @returns {IncidentGroup[]}
+ */
+export function groupIncidents(rows) {
+  const groups = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = `${row.property.toLowerCase()}\u0000${row.item.toLowerCase()}`;
+    const rowOccurrences = [
+      { path: row.path, detected: row.detected ?? null },
+      ...(Array.isArray(row.repeats) ? row.repeats : []).map((r) => ({ path: row.path, detected: r })),
+    ];
+    const existing = groups.get(key);
+    if (existing) {
+      existing.occurrences.push(...rowOccurrences);
+      if (!existing.paths.includes(row.path)) existing.paths.push(row.path);
+      continue;
+    }
+    // First row seen for a key is its newest: summary, age, prompt and the
+    // "Open note" target all come from it.
+    groups.set(key, {
+      key,
+      item: row.item,
+      summary: row.summary,
+      property: row.property,
+      ageDays: row.ageDays,
+      path: row.path,
+      basePrompt: row.prompt,
+      paths: [row.path],
+      occurrences: rowOccurrences,
+    });
+  }
+
+  const ms = (o) => {
+    const t = typeof o.detected === "string" ? Date.parse(o.detected) : NaN;
+    return isNaN(t) ? -Infinity : t;
+  };
+  return [...groups.values()].map(({ basePrompt, paths, ...g }) => {
+    const occurrences = [...g.occurrences].sort((a, b) => ms(b) - ms(a));
+    const count = occurrences.length;
+    // Only mention other notes when there ARE several; repeats folded into one
+    // note are already in that note.
+    const prompt =
+      paths.length > 1
+        ? `${basePrompt} This same problem has ${paths.length} open incident notes: ${paths.join(
+            ", "
+          )}. Once it is fixed, resolve all of them, not just the newest.`
+        : basePrompt;
+    return { ...g, occurrences, count, prompt };
+  });
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// "Sep 19" from the date as WRITTEN in the note's `detected` string (the
+// alerter stamps local time with its offset), not re-projected through the
+// machine's timezone. Unparsable or missing dates come back as "undated".
+export function formatIncidentDate(detected) {
+  const m = typeof detected === "string" ? /^(\d{4})-(\d{2})-(\d{2})/.exec(detected.trim()) : null;
+  if (!m) return "undated";
+  const month = MONTHS[Number(m[2]) - 1];
+  return month ? `${month} ${Number(m[3])}` : "undated";
+}
+
+// One line listing when a repeated problem happened, oldest first so it
+// reads like a timeline. Long runs keep the newest `max` dates and say how
+// many earlier ones were left out.
+export function formatOccurrenceLine(occurrences, max = 8) {
+  const list = Array.isArray(occurrences) ? occurrences : [];
+  const shown = list.slice(0, max).map((o) => formatIncidentDate(o?.detected)).reverse();
+  const earlier = list.length - shown.length;
+  const dates = shown.join(", ");
+  return earlier > 0
+    ? `Happened ${list.length} times: ${earlier} earlier, then ${dates}`
+    : `Happened ${list.length} times: ${dates}`;
+}
+
+// The strip shows the first `limit` groups and folds the rest behind a
+// "Show N more" toggle so a pile-up can't push the dashboard off screen.
+export const INCIDENTS_VISIBLE_LIMIT = 2;
+
+export function splitVisibleIncidents(groups, expanded, limit = INCIDENTS_VISIBLE_LIMIT) {
+  const list = Array.isArray(groups) ? groups : [];
+  if (expanded || list.length <= limit) return { visible: list, hiddenCount: 0 };
+  return { visible: list.slice(0, limit), hiddenCount: list.length - limit };
 }
 
 // ---------------------------------------------------------------------------

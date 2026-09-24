@@ -2887,3 +2887,30 @@
 .aios-dashboard-root select { border: 1px solid var(--aios-border-hi); border-radius: 0; }
 .aios-dashboard-root option:disabled { color: var(--aios-faint); background-color: var(--aios-track); }
 .aios-dashboard-root button:focus-visible, .aios-dashboard-root select:focus-visible, .aios-dashboard-root summary:focus-visible, .aios-dashboard-root a:focus-visible { outline: 2px solid var(--aios-accent-hi); outline-offset: 2px; }
+
+/* Incidents strip: repeat count, occurrence dates, and the show-more toggle
+   (grouping, 2026-09-24). */
+.aios-dashboard-root .aios-incidents-count {
+  color: var(--aios-p1);
+  font-size: 11px;
+  font-weight: 700;
+}
+.aios-dashboard-root .aios-incidents-occurrences {
+  color: var(--aios-dim);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.aios-dashboard-root .aios-incidents-toggle {
+  background: rgba(249, 112, 102, 0.07);
+  color: var(--aios-dim);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-incidents-toggle:hover {
+  color: var(--aios-text);
+}

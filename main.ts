@@ -35,6 +35,10 @@ import {
   visiblePhaseTasks,
   computeHealth,
   computeIncidents,
+  groupIncidents,
+  formatOccurrenceLine,
+  splitVisibleIncidents,
+  INCIDENTS_VISIBLE_LIMIT,
   formatCompactNumber,
   computeUsageView,
   computeOpsMapLayout,
@@ -273,6 +277,9 @@ interface ViewState {
   // once at the end of renderDashboard's synchronous render to restore the
   // newly active tab's saved position (0 when absent).
   scrollTops: Map<string, number>;
+  // Incidents strip "Show N more" toggle. Survives the live re-render so a
+  // vault change doesn't snap an expanded list shut.
+  incidentsExpanded: boolean;
 }
 
 // Today is the default tab on every fresh render (new ViewState instance).
@@ -295,6 +302,7 @@ function makeViewState(): ViewState {
     coordinationDrafts: new Map(),
     coordinationQuestionFilter: new Map(),
     scrollTops: new Map(),
+    incidentsExpanded: false,
   };
 }
 
@@ -2437,13 +2445,21 @@ function renderHealthStrip(
 // priority thing on the page, not one more thing to click into.
 // ---------------------------------------------------------------------------
 
-interface IncidentRow {
+interface IncidentOccurrence {
   path: string;
+  detected: string | null;
+}
+
+interface IncidentGroup {
+  key: string;
   item: string;
   summary: string;
   property: string;
   ageDays: number;
+  count: number;
+  path: string;
   prompt: string;
+  occurrences: IncidentOccurrence[];
 }
 
 // Reads direct-child .md files of the incidents folder and hands their raw
@@ -2451,7 +2467,7 @@ interface IncidentRow {
 // which is defensive about every field. A missing incidents folder degrades
 // to "no notes" (directChildFiles already returns [] for that), same pattern
 // as intake/journal.
-function gatherIncidents(app: App, settings: AiosDashboardSettings): IncidentRow[] {
+function gatherIncidents(app: App, settings: AiosDashboardSettings): IncidentGroup[] {
   const files = directChildFiles(app, settings.incidentsFolder).filter(
     (f) => f.extension === "md"
   );
@@ -2459,31 +2475,50 @@ function gatherIncidents(app: App, settings: AiosDashboardSettings): IncidentRow
     path: f.path,
     frontmatter: app.metadataCache.getFileCache(f)?.frontmatter,
   }));
-  return computeIncidents({ notes, now: new Date() });
+  return groupIncidents(computeIncidents({ notes, now: new Date() }));
 }
 
 // Top-of-dashboard strip. Renders NOTHING (no wrapper element at all) when
 // there are zero open incidents, so a healthy vault shows no trace of this
-// feature. Each row: item / summary / property / age, plus "Work on this
-// with Dispatch" (desktop + actionsEnabled only, same gate as every other
-// launch button) and "Open note" (works everywhere).
+// feature. One row per PROBLEM, not per note: repeats of the same failure
+// (groupIncidents) show a count and the dates it happened. Only the first
+// INCIDENTS_VISIBLE_LIMIT rows show until "Show N more" is clicked, so a
+// pile-up can't push the rest of the dashboard off screen. Each row: item /
+// property / count / age / summary, plus "Work on this with Dispatch"
+// (desktop + actionsEnabled only, same gate as every other launch button)
+// and "Open note" (works everywhere, opens the newest note).
 function renderIncidentsStrip(
   app: App,
   root: HTMLElement,
-  incidents: IncidentRow[],
-  settings: AiosDashboardSettings
+  incidents: IncidentGroup[],
+  settings: AiosDashboardSettings,
+  viewState: ViewState,
+  refresh: () => void
 ) {
   if (incidents.length === 0) return;
   const section = root.createDiv({ cls: "aios-incidents-section" });
-  section.createDiv({ cls: "aios-incidents-eyebrow", text: "Urgent" });
-  for (const inc of incidents) {
+  const noteCount = incidents.reduce((n, g) => n + g.count, 0);
+  const problems = `${incidents.length} ${incidents.length === 1 ? "problem" : "problems"}`;
+  section.createDiv({
+    cls: "aios-incidents-eyebrow",
+    text: noteCount > incidents.length ? `Urgent · ${problems}, ${noteCount} notes` : `Urgent · ${problems}`,
+  });
+  const { visible, hiddenCount } = splitVisibleIncidents(incidents, viewState.incidentsExpanded);
+  for (const inc of visible) {
     const row = section.createDiv({ cls: "aios-incidents-row" });
     const main = row.createDiv({ cls: "aios-incidents-main" });
     const head = main.createDiv({ cls: "aios-incidents-head" });
     head.createSpan({ cls: "aios-incidents-item", text: inc.item });
     if (inc.property) head.createSpan({ cls: "aios-incidents-property", text: inc.property });
-    head.createSpan({ cls: "aios-incidents-age", text: `${inc.ageDays}d ago` });
+    if (inc.count > 1) head.createSpan({ cls: "aios-incidents-count", text: `${inc.count}×` });
+    head.createSpan({
+      cls: "aios-incidents-age",
+      text: inc.count > 1 ? `latest ${inc.ageDays}d ago` : `${inc.ageDays}d ago`,
+    });
     if (inc.summary) main.createDiv({ cls: "aios-incidents-summary", text: inc.summary });
+    if (inc.count > 1) {
+      main.createDiv({ cls: "aios-incidents-occurrences", text: formatOccurrenceLine(inc.occurrences) });
+    }
 
     const rowActions = row.createDiv({ cls: "aios-incidents-actions" });
     if (settings.actionsEnabled && Platform.isDesktop) {
@@ -2497,9 +2532,23 @@ function renderIncidentsStrip(
         launchDispatch(settings, base, inc.prompt);
       });
     }
-    const openBtn = rowActions.createEl("button", { cls: "aios-btn", text: "Open note" });
+    const openBtn = rowActions.createEl("button", {
+      cls: "aios-btn",
+      text: inc.count > 1 ? "Open latest note" : "Open note",
+    });
     openBtn.addEventListener("click", () => {
       app.workspace.openLinkText(inc.path, "", false);
+    });
+  }
+
+  if (incidents.length > INCIDENTS_VISIBLE_LIMIT) {
+    const toggle = section.createEl("button", {
+      cls: "aios-incidents-toggle",
+      text: viewState.incidentsExpanded ? "Show less" : `Show ${hiddenCount} more`,
+    });
+    toggle.addEventListener("click", () => {
+      viewState.incidentsExpanded = !viewState.incidentsExpanded;
+      refresh();
     });
   }
 }
@@ -5444,7 +5493,7 @@ function renderDashboard(
   // Incidents strip: the single highest-priority thing on the page when it
   // exists, so it renders first, above even the fixed chrome. Renders
   // nothing when there are zero open incidents.
-  renderIncidentsStrip(app, root, gatherIncidents(app, settings), settings);
+  renderIncidentsStrip(app, root, gatherIncidents(app, settings), settings, viewState, refresh);
 
   // Resolve config from the host note's frontmatter (config-driven per fork). No sourcePath
   // (standalone view or refresh re-render) falls back to the configured dashboard note.
