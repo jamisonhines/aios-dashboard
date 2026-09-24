@@ -314,4 +314,43 @@ import {
   }
 }
 
+// --- MUTATION (N6): remove the signal handler's owner check. The old holder A is stolen by B,
+// then receives SIGTERM. An unconditional release must wrongly delete B's live replacement.
+{
+  const needle = "    if (currentHeldLock && (await isCurrentOwner(currentHeldLock.lockFile, currentHeldLock.ownerToken))) {\n      await fs.rm(currentHeldLock.lockFile, { recursive: true, force: true }).catch(() => {});\n    }";
+  const { exporterCli, changed, cleanup } = await makeMutatedExporterCopy((original) => {
+    assert.ok(original.includes(needle), "N6 mutation anchor: signal-release owner check must be present in executable code");
+    return original.replace(needle, "    if (currentHeldLock) {\n      await fs.rm(currentHeldLock.lockFile, { recursive: true, force: true }).catch(() => {});\n    }");
+  });
+  assert.ok(changed, "N6 mutation must change the executable signal-release guard");
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { lockFile } = outPaths(vaultRoot);
+  const spawnHolder = (env) => spawn(process.execPath, [exporterCli, vaultRoot], {
+    env: { ...process.env, USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    const a = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
+    const aExit = new Promise((resolve) => a.once("exit", (code, signal) => resolve({ code, signal })));
+    let aOwner = null;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !aOwner) { try { aOwner = JSON.parse(await fs.readFile(`${lockFile}/owner.json`, "utf8")); } catch { await new Promise((resolve) => setTimeout(resolve, 20)); } }
+    assert.ok(aOwner, "N6 mutation sanity: A acquired its lock");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const b = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
+    const bExit = new Promise((resolve) => b.once("exit", (code, signal) => resolve({ code, signal })));
+    let bOwner = null;
+    while (Date.now() < deadline && !bOwner) { try { const candidate = JSON.parse(await fs.readFile(`${lockFile}/owner.json`, "utf8")); if (candidate.nonce !== aOwner.nonce) bOwner = candidate; } catch {} if (!bOwner) await new Promise((resolve) => setTimeout(resolve, 20)); }
+    assert.ok(bOwner, "N6 mutation sanity: B stole A's stale lock");
+    a.kill("SIGTERM");
+    await aExit;
+    assert.equal(existsSync(lockFile), false, "MUTATION CHECK N6: without the signal owner check, SIGTERM on A must WRONGLY delete B's live lock");
+    console.log("N6 MUTATION (signal owner check removed): old A's SIGTERM WRONGLY deleted B's live lock.");
+    b.kill("SIGTERM");
+    await bExit;
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await cleanup();
+  }
+}
+
 console.log("exportUsageAtomicWrite.mutations: all mutation checks ran (see above for the probabilistic R3-I2 result)");

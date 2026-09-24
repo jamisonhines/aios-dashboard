@@ -506,4 +506,54 @@ import {
   }
 }
 
+// --- N6: an old holder signalled after its lock was stolen must not delete the new holder. ---
+// This is deliberately a real three-process scenario: A owns the lock, B steals it after A
+// exceeds the stale threshold, then SIGTERM signals A while B is still holding. The signal
+// handler must use the same owner check as normal release. A generic "SIGTERM removes a lock"
+// test cannot distinguish A removing its own lock from A wrongly removing B's replacement.
+{
+  const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
+  const { lockFile } = outPaths(vaultRoot);
+  const spawnHolder = (env) => spawn(process.execPath, [TRACKED_EXPORTER_CLI, vaultRoot], {
+    env: { ...process.env, USAGE_EXPORT_TEST_PROJECTS_ROOT: projectsRoot, USAGE_EXPORT_TEST_PI_ROOT: piRoot, USAGE_EXPORT_TEST_BB_ROOT: bbRoot, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const waitForOwnerChange = async (oldOwner) => {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      try {
+        const owner = JSON.parse(await fs.readFile(path.join(lockFile, "owner.json"), "utf8"));
+        if (owner.nonce !== oldOwner.nonce) return owner;
+      } catch { /* lock not acquired/replaced yet */ }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return null;
+  };
+  try {
+    const a = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80" });
+    const aExit = new Promise((resolve) => a.once("exit", (code, signal) => resolve({ code, signal })));
+    let aOwner = null;
+    const ownerDeadline = Date.now() + 5000;
+    while (Date.now() < ownerDeadline && !aOwner) {
+      try { aOwner = JSON.parse(await fs.readFile(path.join(lockFile, "owner.json"), "utf8")); } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
+    }
+    assert.ok(aOwner, "N6 sanity: A must own the real lock before B can steal it");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const b = spawnHolder({ USAGE_EXPORT_TEST_HOLD_MS: "5000", USAGE_EXPORT_TEST_LOCK_STALE_MS: "80", USAGE_EXPORT_TEST_LOCK_WAIT_MS: "3000" });
+    const bExit = new Promise((resolve) => b.once("exit", (code, signal) => resolve({ code, signal })));
+    const bOwner = await waitForOwnerChange(aOwner);
+    assert.ok(bOwner, "N6 sanity: B must steal A's stale lock and install a distinct owner token");
+    a.kill("SIGTERM");
+    const aResult = await aExit;
+    assert.equal(aResult.code, 1, `N6: signalled old holder must run its handler and exit 1, got ${JSON.stringify(aResult)}`);
+    const survivingOwner = JSON.parse(await fs.readFile(path.join(lockFile, "owner.json"), "utf8"));
+    assert.equal(survivingOwner.nonce, bOwner.nonce, "N6: A's signal handler must not delete B's replacement lock");
+    console.log("N6: steal-then-SIGTERM left B's real lock owner token intact");
+    b.kill("SIGTERM");
+    await bExit;
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 console.log("exportUsageAtomicWrite: all assertions passed");
