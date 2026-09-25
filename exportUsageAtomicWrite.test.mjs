@@ -530,6 +530,7 @@ import {
     const pending = [...children];
     for (const child of pending) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     await Promise.all(pending.map((child) => new Promise((resolve) => child.once("exit", resolve))));
+    if (process.env.AIOS_N6_CLEANUP_MARKER) await fs.writeFile(process.env.AIOS_N6_CLEANUP_MARKER, JSON.stringify({ pids: pending.map((child) => child.pid), remaining: children.size }));
     assert.equal(children.size, 0, "N6 cleanup: no child exporter descendants may survive even when an assertion aborts the scenario");
   };
   const waitForOwnerChange = async (oldOwner) => {
@@ -557,6 +558,7 @@ import {
     const bExit = new Promise((resolve) => b.once("exit", (code, signal) => resolve({ code, signal })));
     const bOwner = await waitForOwnerChange(aOwner);
     assert.ok(bOwner, "N6 sanity: B must steal A's stale lock and install a distinct owner token");
+    if (process.env.AIOS_N6_FORCE_ASSERTION === "1") assert.fail("N6 forced assertion: verify finally kills A and B before this test process exits");
     a.kill("SIGTERM");
     const aResult = await aExit;
     assert.equal(aResult.code, 1, `N6: signalled old holder must run its handler and exit 1, got ${JSON.stringify(aResult)}`);

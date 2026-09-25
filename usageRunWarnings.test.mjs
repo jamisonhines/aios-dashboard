@@ -397,6 +397,7 @@ async function renderUsageTabToCompletion({
   // N5 support: settle a header-equivalent run before Usage renders, so this same module
   // later opens Usage with the stale identity that settle() must already have marked.
   preRenderRefresh = false,
+  preRenderRefreshCount = 1,
   settleMs = 100,
 } = {}) {
   resetCreationLog();
@@ -477,7 +478,7 @@ async function renderUsageTabToCompletion({
     const viewState = { expanded: new Set(), usageRange: "7d", usageOffset: 0 };
     const container = fakeEl();
     const periodbarHost = fakeEl();
-    if (preRenderRefresh) await refreshUsageSnapshot(app, statsPath);
+    if (preRenderRefresh) await Promise.all(Array.from({ length: preRenderRefreshCount }, () => refreshUsageSnapshot(app, statsPath)));
     // Round 2, Minor M1: renderUsageTab now takes a `refresh` callback (threaded from the real
     // renderDashboard) that its own settle-triggered doRefresh calls instead of a purely local
     // draw(). This harness's equivalent: empty the container and re-render the whole tab in
@@ -1792,6 +1793,7 @@ console.log("usageRunWarnings.test.mjs: all assertions passed");
   const intactStatus = findByClass(intact, "aios-usage-refresh-status");
   assert.match(intactStatus.text, /Refresh failed \(off-tab disk full\)/, `N5 sanity: the settled off-tab failure must be specific when Usage opens, got ${JSON.stringify(intactStatus.text)}`);
 
+  if (process.env.AIOS_USAGE_WARNINGS_MUTATIONS === "1") {
   const mutated = await renderUsageTabToCompletion({
     generatedAt: "",
     basePath: "/fake/vault",
@@ -1804,24 +1806,43 @@ console.log("usageRunWarnings.test.mjs: all assertions passed");
   const mutatedStatus = findByClass(mutated, "aios-usage-refresh-status");
   assert.match(mutatedStatus.text, /Refresh failed \(off-tab disk full\)/, `N5 mutation fixture must preserve the specific original failure, got ${JSON.stringify(mutatedStatus.text)}`);
   console.log("N5: settled off-tab failed refresh blocks a second Usage auto-run. MUTATION (settle mark removed): 2 launches.");
+  }
 }
 
+// Normal regression coverage retained outside the opt-in mutation runner.
+{
+  const oldAttempt = "2000-01-01T00:00:00.000Z";
+  const newerSnapshot = "2000-01-01T00:00:02.000Z";
+  const rendered = await renderUsageTabToCompletion({ generatedAt: newerSnapshot, statusJson: JSON.stringify({ lastAttemptAt: oldAttempt, lastSuccessAt: null, lastError: "old failed banner" }) });
+  assert.equal(findByClass(rendered, "aios-budget-warn"), undefined, "M11 rendered wiring: newer usage-stats.json must suppress the named stale sidecar failure");
+}
+for (const [label, outcome, expected] of [["failed", () => ({ code: 1, stdout: "", stderr: "populated off-tab disk full" }), /Refresh failed \(populated off-tab disk full\)/], ["busy", () => ({ code: 0, stdout: "usage export busy: a live writer holds the lock", stderr: "" }), /Another export was already in progress/]]) {
+  const dated = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const intact = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: outcome, preRenderRefresh: true, settleMs: 180 });
+  assert.equal(spawnLog.length, 1, `N5 ${label}: uncached dated disk identity must launch once total, got ${spawnLog.length}`);
+  assert.match(findByClass(intact, "aios-usage-refresh-status").text, expected, `N5 ${label}: settled off-tab status must remain specific`);
+}
+
+// --- Dedicated residual-minor mutations, only under npm run test:mutations. ---
+if (process.env.AIOS_USAGE_WARNINGS_MUTATIONS === "1") {
 // --- Dedicated residual-minor proofs: rendered R4-M1/M11 and populated off-tab N5. ---
 {
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-  const dropSettledResult = (source) => {
-    const needle = "      lastUsageRefreshResult = result;";
-    assert.ok(source.includes(needle), "R4-M1 mutation anchor must be the executable settled-result assignment");
-    return source.replace(needle, "      lastUsageRefreshResult = null;");
+  const removeStaleSuffix = (source) => {
+    const needle = '`${new Date(generated).toLocaleString()}${stale ? " (stale)" : ""}`';
+    assert.ok(source.includes(needle), "R4-M1 mutation anchor must be the executable Generated stale suffix");
+    return source.replace(needle, '`${new Date(generated).toLocaleString()}`');
   };
   const mutated = await renderUsageTabToCompletion({
     generatedAt: twoHoursAgo, basePath: "/fake/vault", settleMs: 250,
     spawnOutcomeProvider: () => ({ code: 1, stdout: "", stderr: "boom: disk full" }),
-    mutateSource: dropSettledResult,
+    mutateSource: removeStaleSuffix,
   });
   const node = findByClass(mutated, "aios-usage-refresh-status");
-  assert.doesNotMatch(node.text, /Refresh failed \(boom: disk full\)/, `MUTATION CHECK R4-M1: removing the settled result must WRONGLY hide its specific failure, got ${JSON.stringify(node.text)}`);
-  console.log(`R4-M1 MUTATION (settled result removed): specific failure WRONGLY absent -- ${JSON.stringify(node.text)}`);
+  assert.match(node.text, /Refresh failed \(boom: disk full\)/, `R4-M1 mutation fixture must retain the exact failure, got ${JSON.stringify(node.text)}`);
+  assert.match(node.text, /Generated/, `R4-M1 mutation fixture must retain Generated identity, got ${JSON.stringify(node.text)}`);
+  assert.doesNotMatch(node.text, /\(stale\)/, `MUTATION CHECK R4-M1: removing only the stale suffix must WRONGLY lose Generated stale retention, got ${JSON.stringify(node.text)}`);
+  console.log(`R4-M1 MUTATION (Generated stale suffix removed): stale retention WRONGLY absent -- ${JSON.stringify(node.text)}`);
 }
 
 {
@@ -1864,4 +1885,23 @@ for (const [label, outcome, expected] of [
   const mutated = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: outcome, preRenderRefresh: true, mutateSource: restoreUncachedBug, settleMs: 180 });
   assert.equal(spawnLog.length, 2, `MUTATION CHECK N5 ${label}: restoring empty uncached identity must WRONGLY launch again when Usage opens, got ${spawnLog.length}`);
   console.log(`N5 ${label}: populated uncached off-tab run launched once. MUTATION (disk identity load removed): 2 launches.`);
+}
+
+{
+  const dated = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const removePostAwaitGuard = (source) => {
+    const needle = "  if (usageRefreshInFlight) return usageRefreshInFlight;\n";
+    assert.equal(source.split(needle).length - 1, 2, "N5 race mutation requires both pre-load and post-load dedupe guards");
+    // Leave the first guard intact. Two calls both clear it before their uncached load; only
+    // the second, post-await guard can prevent the second process spawn.
+    const first = source.indexOf(needle);
+    const second = source.indexOf(needle, first + needle.length);
+    return source.slice(0, second) + source.slice(second + needle.length);
+  };
+  const intact = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: () => ({ code: 1, stdout: "", stderr: "race disk full" }), preRenderRefresh: true, preRenderRefreshCount: 2, settleMs: 180 });
+  assert.equal(spawnLog.length, 1, `N5 post-await guard: simultaneous uncached calls must share one exporter, got ${spawnLog.length}`);
+  const mutated = await renderUsageTabToCompletion({ generatedAt: dated, basePath: "/fake/vault", spawnOutcomeProvider: () => ({ code: 1, stdout: "", stderr: "race disk full" }), preRenderRefresh: true, preRenderRefreshCount: 2, mutateSource: removePostAwaitGuard, settleMs: 180 });
+  assert.equal(spawnLog.length, 2, `MUTATION CHECK N5 post-await guard: removing only the second guard must WRONGLY spawn two exporters, got ${spawnLog.length}`);
+  console.log("N5 MUTATION (post-await dedupe guard removed): simultaneous uncached calls WRONGLY spawned 2 exporters.");
+}
 }

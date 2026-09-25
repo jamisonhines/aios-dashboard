@@ -41,4 +41,28 @@ try {
     ["orphaned steal-coord recovery", "          if (Date.now() - coordStat.mtimeMs > staleMs()) await fs.rm(coordPath, { recursive: true, force: true });", "I2 orphaned coord must be reclaimed", (source) => source.replace("          if (Date.now() - coordStat.mtimeMs > staleMs()) await fs.rm(coordPath, { recursive: true, force: true });", "          if (Date.now() - coordStat.mtimeMs > staleMs()) {}")],
   ];
   for (const [label,needle,failure,mutate] of mutationCases) { assert.ok(helper.includes(needle),`${label} mutation anchor must exist`); const mutated=path.join(copy,`helper-${label.replaceAll(" ","-")}.mjs`); const source=mutate(helper); assert.notEqual(source,helper,`${label} mutation must change executable helper code`); await fs.writeFile(mutated,source); const child=await new Promise(resolve=>{const c=spawn(process.execPath,[path.join(here,"exportOtherLock.test.mjs")],{env:{...process.env,AIOS_EXPORT_TEST_MODE:"1",AIOS_EXPORT_TEST_HELPER:mutated},stdio:["ignore","pipe","pipe"]});let stdout="",stderr="";c.stdout.on("data",d=>stdout+=d);c.stderr.on("data",d=>stderr+=d);c.once("exit",code=>resolve({code,stdout,stderr}));}); assert.notEqual(child.code,0,`MUTATION CHECK ${label}: isolated helper mutation must make the real-process lock suite red`); assert.match(child.stderr,new RegExp(failure),`MUTATION CHECK ${label}: failure must specifically identify its own lock assertion, got ${JSON.stringify(child)}`); const failLine=child.stderr.split("\n").find((line)=>line.includes(failure)); console.log(`MUTATION FAIL (${label} removed): ${failLine}`); console.log(`MUTATION (${label} removed): ${failure}`); }
+
+  // R2-M9: production children must ignore AIOS_EXPORT_TEST_* unless the explicit gate is
+  // enabled. Clear every inherited AIOS_EXPORT_TEST_* key so this is deterministic even when
+  // the parent shell ran a fixture command earlier.
+  {
+    const gateNeedle = 'const exportTestEnv = (name) => process.env.AIOS_EXPORT_TEST_MODE === "1" ? process.env[name] : undefined;';
+    assert.ok(helper.includes(gateNeedle), "R2-M9 mutation anchor must be the executable other-exporter test-setting gate");
+    const gateMutated = helper.replace(gateNeedle, 'const exportTestEnv = (name) => process.env[name];');
+    assert.notEqual(gateMutated, helper, "R2-M9 mutation must alter executable gate code");
+    await fs.writeFile(path.join(copy, "export-json-atomic.mjs"), gateMutated);
+    const vault = path.join(root, "production-gate-vault");
+    await fs.mkdir(path.join(vault, ".claude", "agents"), { recursive: true });
+    await fs.writeFile(path.join(vault, ".claude", "agents", "synthetic.md"), "---\nname: Synthetic\n---\nfixture");
+    const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("AIOS_EXPORT_TEST_")));
+    const started = Date.now();
+    const child = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [path.join(copy, "export-ops-map.mjs"), vault], { env: { ...cleanEnv, ...env, AIOS_EXPORT_TEST_HOLD_MS: "350" }, stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = ""; c.stderr.on("data", d => stderr += d); c.once("exit", code => resolve({ code, stderr, elapsed: Date.now() - started }));
+    });
+    assert.equal(child.code, 0, `R2-M9 mutation sanity: mutated production exporter must still complete, got ${JSON.stringify(child)}`);
+    assert.ok(child.elapsed >= 300, `MUTATION CHECK R2-M9: without exportTestEnv gate, cleared production env must WRONGLY honor named hold knob, got ${JSON.stringify(child)}`);
+    assert.ok(await fs.stat(path.join(vault, "Operations", "ops-map.json")), "R2-M9 mutation must assert named ops-map.json resource");
+    console.log(`R2-M9 MUTATION (other production test-setting gate removed): production child WRONGLY honored AIOS_EXPORT_TEST_HOLD_MS for ${child.elapsed}ms.`);
+  }
 } finally { await fs.rm(root,{recursive:true,force:true}); await fs.rm(copy,{recursive:true,force:true}); }

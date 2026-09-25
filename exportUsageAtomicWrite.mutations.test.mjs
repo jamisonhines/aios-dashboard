@@ -360,6 +360,28 @@ import {
 }
 
 
+// --- N6 failure-path proof: force an assertion after both real children exist. The child
+// process must fail at that exact assertion, but its N6 finally writes both PIDs only after
+// awaiting their exits. The parent then proves neither descendant remains alive. -------------
+{
+  const marker = path.join("/tmp", `aios-n6-cleanup-${process.pid}-${Date.now()}.json`);
+  try {
+    const child = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [path.join(path.dirname(new URL(import.meta.url).pathname), "exportUsageAtomicWrite.test.mjs")], { env: { ...process.env, AIOS_N6_FORCE_ASSERTION: "1", AIOS_N6_CLEANUP_MARKER: marker }, stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = ""; c.stderr.on("data", d => stderr += d); c.once("exit", code => resolve({ code, stderr }));
+    });
+    assert.notEqual(child.code, 0, `N6 forced assertion subprocess must fail, got ${JSON.stringify(child)}`);
+    assert.match(child.stderr, /N6 forced assertion: verify finally kills A and B/, `N6 failure path must fail at its named assertion, got ${JSON.stringify(child)}`);
+    const cleanup = JSON.parse(await fs.readFile(marker, "utf8"));
+    assert.equal(cleanup.remaining, 0, `N6 cleanup marker must report no tracked children, got ${JSON.stringify(cleanup)}`);
+    for (const pid of cleanup.pids) {
+      let alive = true; try { process.kill(pid, 0); } catch (error) { alive = error.code !== "ESRCH"; }
+      assert.equal(alive, false, `N6 failure cleanup: descendant pid ${pid} must not survive the forced assertion`);
+    }
+    console.log(`N6 forced-assertion cleanup: subprocess failed at named assertion and no descendants survived (${cleanup.pids.join(",")}).`);
+  } finally { await fs.rm(marker, { force: true }); }
+}
+
 // --- MUTATION (M8): remove the injected pre-rename failure branch. The same forced fixture
 // must then wrongly rename over the named prior snapshot, proving the preservation assertion
 // depends on the executable branch rather than a generic exporter failure. -------------------
@@ -367,7 +389,10 @@ import {
   const needle = '    if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") {';
   const { exporterCli, changed, cleanup } = await makeMutatedExporterCopy((source) => {
     assert.ok(source.includes(needle), "M8 mutation anchor must be the executable pre-rename injected-failure gate");
-    return source.replace(needle, '    if (false && usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") {');
+    // Keep the named injected failure active, but publish first. This recreates exactly the
+    // broken preservation path: the command still fails with the same cause after replacing
+    // the live snapshot.
+    return source.replace(needle, '    if (usageTestEnv("USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL") && path.basename(filePath) === "usage-stats.json") { await fs.rename(tempFile, filePath);');
   });
   assert.ok(changed, "M8 mutation must change executable source");
   const { root, vaultRoot, projectsRoot, piRoot, bbRoot } = await makeFixtureRoot();
@@ -376,9 +401,10 @@ import {
     await fs.mkdir(path.dirname(outFile), { recursive: true });
     await fs.writeFile(outFile, JSON.stringify({ marker: "prior-good-snapshot", days: [], projects: [] }) + "\n");
     const result = await runExporter({ vaultRoot, projectsRoot, piRoot, bbRoot, exporterCli, env: { USAGE_EXPORT_TEST_FORCE_SNAPSHOT_PUBLISH_FAIL: "1" } });
-    assert.equal(result.code, 0, `M8 mutation sanity: removing only the injected pre-rename branch lets rename succeed, got ${JSON.stringify(result)}`);
-    assert.notEqual(JSON.parse(await fs.readFile(outFile, "utf8")).marker, "prior-good-snapshot", "MUTATION CHECK M8: without the pre-rename failure, forced fixture must WRONGLY replace the named prior snapshot");
-    console.log("M8 MUTATION (pre-rename failure branch removed): prior usage-stats.json WRONGLY replaced.");
+    assert.equal(result.code, 1, `M8 mutation sanity: the injected publish failure must still exit non-zero, got ${JSON.stringify(result)}`);
+    assert.match(result.stderr, /synthetic snapshot publish failure requested/, `M8 mutation sanity: failure must retain its named injected cause, got ${JSON.stringify(result)}`);
+    assert.notEqual(JSON.parse(await fs.readFile(outFile, "utf8")).marker, "prior-good-snapshot", "MUTATION CHECK M8: failure after premature rename must WRONGLY replace the named prior snapshot");
+    console.log("M8 MUTATION (failure moved after rename): failing export WRONGLY replaced prior usage-stats.json.");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await cleanup();
