@@ -365,9 +365,17 @@ import {
 // awaiting their exits. The parent then proves neither descendant remains alive. -------------
 {
   const marker = path.join("/tmp", `aios-n6-cleanup-${process.pid}-${Date.now()}.json`);
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const sourcePath = path.join(here, "exportUsageAtomicWrite.test.mjs");
+  const isolatedPath = path.join(here, `.n6-forced-cleanup-${process.pid}.mjs`);
+  const source = await fs.readFile(sourcePath, "utf8");
+  const importsEnd = source.indexOf("// --- Concurrent-writer test:");
+  const n6Start = source.indexOf("// --- N6:");
+  assert.ok(importsEnd > 0 && n6Start > importsEnd, "N6 forced cleanup harness must isolate the real N6 block after its real imports");
+  await fs.writeFile(isolatedPath, source.slice(0, importsEnd) + source.slice(n6Start));
   try {
     const child = await new Promise((resolve) => {
-      const c = spawn(process.execPath, [path.join(path.dirname(new URL(import.meta.url).pathname), "exportUsageAtomicWrite.test.mjs")], { env: { ...process.env, AIOS_N6_FORCE_ASSERTION: "1", AIOS_N6_CLEANUP_MARKER: marker }, stdio: ["ignore", "pipe", "pipe"] });
+      const c = spawn(process.execPath, [isolatedPath], { env: { ...process.env, AIOS_N6_FORCE_ASSERTION: "1", AIOS_N6_CLEANUP_MARKER: marker }, stdio: ["ignore", "pipe", "pipe"] });
       let stderr = ""; c.stderr.on("data", d => stderr += d); c.once("exit", code => resolve({ code, stderr }));
     });
     assert.notEqual(child.code, 0, `N6 forced assertion subprocess must fail, got ${JSON.stringify(child)}`);
@@ -379,7 +387,7 @@ import {
       assert.equal(alive, false, `N6 failure cleanup: descendant pid ${pid} must not survive the forced assertion`);
     }
     console.log(`N6 forced-assertion cleanup: subprocess failed at named assertion and no descendants survived (${cleanup.pids.join(",")}).`);
-  } finally { await fs.rm(marker, { force: true }); }
+  } finally { await fs.rm(marker, { force: true }); await fs.rm(isolatedPath, { force: true }); }
 }
 
 // --- MUTATION (M8): remove the injected pre-rename failure branch. The same forced fixture
