@@ -20,6 +20,7 @@ const req = [
   'REQ: the selected usage view persists across a re-render.',
   'REQ: two different models never share a colour, including two models of the same Claude family.',
   "REQ: a model with no explicit colour gets its own provider's next fallback colour, not the shared Other grey.",
+  'REQ: two models that appear on the same day are separated by normal-vision Delta E of at least 15.',
 ];
 const cases = [
   ...['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna'].map((model, i) => ({ requirement: req[0], description: `${model} base input rate -> 0`, file: exporter, from: [
@@ -35,12 +36,12 @@ const cases = [
   { requirement: req[5], description: 'Tokens metric -> dollar cost', file: 'model.mjs', from: 'return view === "tokens" ? usageTotalTokens(bucket) : bucket.costUsd;', to: 'return bucket.costUsd;' },
   { requirement: req[5], description: 'Tokens table total -> unpriced dollar cell', file: 'main.ts', from: 'view === "tokens" ? formatCompactNumber(usageTotalTokens(row)) : unpriced.includes(row.model)', to: 'false ? formatCompactNumber(usageTotalTokens(row)) : unpriced.includes(row.model)', test: 'usageTokenTableRender.test.mjs' },
   { requirement: req[5], description: 'both chart hosts ignore selected Tokens mode', edits: [
-    { file: 'main.ts', from: 'usageDayFamilyBars(win.days[0], view)', to: 'usageDayFamilyBars(win.days[0], "cost")' },
-    { file: 'main.ts', from: 'usageChartFromWindow(win.days, view)', to: 'usageChartFromWindow(win.days, "cost")' },
+    { file: 'main.ts', from: 'usageDayFamilyBars(win.days[0], view, colorPlan)', to: 'usageDayFamilyBars(win.days[0], "cost", colorPlan)' },
+    { file: 'main.ts', from: 'usageChartFromWindow(win.days, view, colorPlan)', to: 'usageChartFromWindow(win.days, "cost", colorPlan)' },
   ], test: 'usageTokenTableRender.test.mjs' },
   { requirement: req[6], description: 'reset saved usage choice to cost on every render', file: 'main.ts', from: 'const controls = container.createDiv({ cls: "aios-usage-range aios-usage-view-switch" });', to: 'settings.usageView = "cost"; const controls = container.createDiv({ cls: "aios-usage-range aios-usage-view-switch" });', test: 'usageTokenTableRender.test.mjs' },
-  { requirement: req[7], description: 'Opus 5.5 slot 2 -> Opus 5 slot 1', file: 'usagePalettes.mjs', from: '"claude-opus-5-5": {\n    "provider": "claude",\n    "slot": 2', to: '"claude-opus-5-5": {\n    "provider": "claude",\n    "slot": 1' },
-  { requirement: req[7], description: 'distinct model slot shares another slot hex', file: 'usagePalettes.mjs', from: '"#8f3600"', to: '"#fe77bd"', test: 'usageModel.test.mjs' },
+  { requirement: req[7], description: 'Opus 5.5 slot 2 -> Opus 5 slot 1', file: 'usagePalettes.mjs', from: "'claude-opus-5-5': { provider:'claude', slot:2 }", to: "'claude-opus-5-5': { provider:'claude', slot:1 }" },
+  { requirement: req[7], description: 'distinct model slot shares another slot hex', file: 'usagePalettes.mjs', from: "'#ff00cf'", to: "'#d1b200'", test: 'usageModel.test.mjs' },
   { requirement: req[8], description: 'fallback identity -> shared Other grey', file: 'model.mjs', from: 'return `${provider}-${slot}`;', to: 'if (!Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key)) return "other"; return `${provider}-${slot}`;' },
   { requirement: req[2], kind: 'identifier', description: 'USAGE_EXPORT_TEST_CODEX_ROOT -> USAGE_EXPORT_TEST_WRONG_CODEX_ROOT', file: exporter, from: 'usageTestEnv("USAGE_EXPORT_TEST_CODEX_ROOT")', to: 'usageTestEnv("USAGE_EXPORT_TEST_WRONG_CODEX_ROOT")' },
   { requirement: req[2], kind: 'guard', description: 'disable Codex mtime cutoff', file: exporter, from: 'if ((await fs.stat(filePath)).mtimeMs < cutoffMs) continue;', to: 'if (false) continue;' },
@@ -49,6 +50,21 @@ const cases = [
     { file: exporter, from: 'if (!(await isCanonicalRegularFileWithin(filePath, root))) continue;', to: 'if (false) continue;' },
   ] },
 ];
+cases.push(
+  { requirement:req[9], description:'light co-occurring Opus step -> Sonnet step', file:'usagePalettes.mjs', from:"'#f75e1c'", to:"'#d1b200'", test:'usagePalettePairs.test.mjs' },
+  { requirement:req[9], description:'dark co-occurring Opus step -> Sonnet step', file:'usagePalettes.mjs', from:"'#b40019'", to:"'#f35077'", test:'usagePalettePairs.test.mjs' },
+  { requirement:req[9], kind:'guard', description:'disable tail folding with capacity rejection disabled', coGuards:'colour-plan over-capacity rejection', disabledTogether:'colour-plan over-capacity rejection', edits:[
+    {file:'model.mjs',from:'const keepCount = ranked.length > capacity ? capacity - 1 : ranked.length;',to:'const keepCount = ranked.length;'},
+    {file:'model.mjs',from:'if (slot < 0) throw new Error(`Usage ${provider} colour plan over capacity`);',to:'if (slot < 0) slot = capacity - 1;'},
+  ],test:'usagePalettePairs.test.mjs'},
+  { requirement:req[9], description:'rank and fold from selected last day instead of entire export', file:'model.mjs', from:'for (const day of fullDays)', to:'for (const day of fullDays.slice(-1))', test:'usagePalettePairs.test.mjs' },
+  { requirement:req[9], description:'both chart hosts drop whole-export folding plan', edits:[
+    {file:'main.ts',from:'usageDayFamilyBars(win.days[0], view, colorPlan)',to:'usageDayFamilyBars(win.days[0], view)'},
+    {file:'main.ts',from:'usageChartFromWindow(win.days, view, colorPlan)',to:'usageChartFromWindow(win.days, view)'},
+  ],test:'usageTokenTableRender.test.mjs'},
+  { requirement:req[5], description:'drop named folded models from model table', file:'model.mjs',from:'return { legend, table };',to:'return { legend, table: table.filter(row => !row.foldedInto) };',test:'usagePalettePairs.test.mjs' },
+  { requirement:req[7], description:'ignore fixed model bindings and allocate by current table order', file:'model.mjs',from:'kept.filter(key => Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key))',to:'kept.filter(() => false)',test:'usagePalettePairs.test.mjs' },
+);
 const results = [];
 try {
   const libs = path.join(sandbox, 'AIOS', 'Operations', 'scripts', 'lib');
@@ -87,7 +103,7 @@ try {
       for (const [file, original] of originals) await fs.writeFile(file, original);
     }
   }
-  for (const test of ['usageViews.test.mjs', 'usageTokenTableRender.test.mjs', 'usageModel.test.mjs']) {
+  for (const test of ['usageViews.test.mjs', 'usageTokenTableRender.test.mjs', 'usageModel.test.mjs', 'usagePalettePairs.test.mjs']) {
     const green = spawnSync(process.execPath, [test], { cwd: dir, encoding: 'utf8', timeout: 120000 });
     assert.equal(green.status, 0, `restored green: ${green.stdout}${green.stderr}`);
     console.log(`RESTORED GREEN: ${test}`);

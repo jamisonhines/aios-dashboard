@@ -20,7 +20,7 @@ fs.writeFileSync(stub, [
   "export class Setting {}", "export class TFile {}", "export class TFolder {}", "export class WorkspaceLeaf {}",
   "export const normalizePath = (p) => p;", "export const setIcon = () => {};",
 ].join("\n"));
-fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderUsageModelsTable as models, renderSystemSkillsTable as systemSkills, renderUsageViewSwitch as viewSwitch, renderUsageChartHost as chartHost, usageDayTooltip as dayTooltip, renderUsageLegend as legend };\n");
+fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderUsageModelsTable as models, renderSystemSkillsTable as systemSkills, renderUsageViewSwitch as viewSwitch, renderUsageChartHost as chartHost, usageDayTooltip as dayTooltip, renderUsageLegend as legend, computeUsageColorPlan as makePlan, usageFamilyBreakdown as breakdown };\n");
 
 function el(tag = "div", options = {}) {
   const node = {
@@ -50,7 +50,7 @@ try {
     absWorkingDir: root, entryPoints: [path.basename(entry)], bundle: true, format: "esm", outfile: out, treeShaking: false,
     external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"], alias: { obsidian: stub },
   });
-  const { models, systemSkills, viewSwitch, chartHost, dayTooltip, legend } = await import(pathToFileURL(out).href);
+  const { models, systemSkills, viewSwitch, chartHost, dayTooltip, legend, makePlan, breakdown } = await import(pathToFileURL(out).href);
   globalThis.document = { createElementNS(_, tag) { return el(tag); } };
 
   // Distinct values prove the cells are wired by field, not merely populated.
@@ -106,6 +106,21 @@ try {
   legend(legendHost, [{ family: 'openai-3', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
   assert.ok(find(legendHost, n => n.text === 'codex-auto-review'), 'model legend label remains visible');
   assert.ok(find(legendHost, n => n.text === '1.0k tokens'), 'legend follows token metric');
+
+  const fullModels = Object.fromEntries(['claude-sonnet-5','claude-opus-5','claude-opus-5-5','claude-fable-5-1','claude-sonnet-5-5'].map((key,i) => [key,{...tokenRow,inputTokens:10000-i*1000}]));
+  const sliceDay = {date:'2026-09-30',models:{'claude-fable-5-1':{...tokenRow,inputTokens:11},'claude-sonnet-5-5':{...tokenRow,inputTokens:13}},totalCostUsd:0,totalOutputTokens:808};
+  const colorPlan = makePlan([{date:'2026-09-29',models:fullModels,totalCostUsd:0,totalOutputTokens:0},sliceDay],{});
+  for(const range of ['1d','7d']) {
+    const host=el();
+    chartHost(host,{label:'Sep 30',days:[sliceDay]},{usageRange:range},'tokens',colorPlan);
+    assert.ok(find(host,n=>n.tag==='title' && n.textContent.includes('Claude other')),`${range}: chart host uses the whole-export folding plan`);
+    assert.ok(find(host,n=>n.tag==='title' && n.textContent.includes('Input 24')),`${range}: chart host aggregates both folded models, not duplicate marks`);
+  }
+  const foldedTableHost=el();
+  models(foldedTableHost,breakdown([sliceDay],'tokens',colorPlan).table,[],'tokens');
+  const foldedTable=find(foldedTableHost,n=>n.tag==='table');
+  assert.equal(foldedTable.children[1].children.length,2,'renderer retains every folded model table row');
+  for(const row of foldedTable.children[1].children) assert.ok(find(row,n=>n.text===' (Claude other)'),'renderer labels folded membership alongside the actual model name');
 
   // System Skills intentionally remains a six-column table; it gets its own
   // closed six-column CSS map rather than pretending its Cost column aligns

@@ -2,7 +2,7 @@ import './testFileTimeout.mjs';
 import assert from 'node:assert/strict';
 import { computeUsageColorPlan, groupUsageDays, usageChartFromWindow, usageDayFamilyBars, usageFamilyBreakdown } from './model.mjs';
 import { USAGE_PROVIDER_PALETTES } from './usagePalettes.mjs';
-import { separation } from './dev/usage-color-math.mjs';
+import { separation, hue, legalCandidate } from './dev/usage-color-math.mjs';
 const bucket = n => ({ inputTokens:n, cacheReadTokens:n*2, cacheWriteTokens:n*3, outputTokens:n*4, messages:1, costUsd:n/100 });
 const models = ['claude-sonnet-5','claude-opus-5','claude-opus-5-5','claude-fable-5-1','claude-sonnet-5-5','openai-codex/gpt-6-astra','openai-codex/gpt-5.6-terra','openai-codex/gpt-5.6-sol','openai-codex/gpt-6-sol','openai-codex/gpt-5.5','ollama/model-a','ollama/model-b','ollama/model-c'];
 const full = [
@@ -14,6 +14,7 @@ const full = [
 const assignments = {};
 const plan = computeUsageColorPlan(full,assignments);
 assert.equal(plan.colors['claude-opus-5'].slot,1,'explicit Opus identity keeps mapped colour regardless of token rank');
+for(const provider of Object.keys(USAGE_PROVIDER_PALETTES)) assert.ok(Object.keys(plan.groups).filter(k=>plan.colors[k].provider===provider).length<=USAGE_PROVIDER_PALETTES[provider].light.length,'whole-export folding stays within provider capacity');
 assert.deepEqual(plan.foldedByProvider.claude,['claude-fable-5-1','claude-sonnet-5-5'], 'fold the smallest Claude token shares over the entire export');
 assert.deepEqual(plan.foldedByProvider.openai,['openai-codex/gpt-6-sol','openai-codex/gpt-5.5'], 'fold the smallest OpenAI token shares over the entire export');
 assert.deepEqual(plan.foldedByProvider.local,[], 'three local models fit without folding');
@@ -23,6 +24,11 @@ assert.equal(grouped.flatMap(d=>Object.values(d.models)).reduce((n,b)=>n+b.costU
 const after = grouped.flatMap(d=>Object.values(d.models)).reduce((n,b)=>n+b.inputTokens+b.cacheReadTokens+b.cacheWriteTokens+b.outputTokens,0);
 assert.equal(after,before,'folding preserves all four token buckets');
 for (const mode of ['light','dark']) {
+  for(const [provider,palette] of Object.entries(USAGE_PROVIDER_PALETTES)) for(const color of palette[mode]) {
+    const h=hue(color);
+    assert.ok(legalCandidate(color,mode),`${mode}: palette stays in lightness/chroma band`);
+    assert.ok(provider==='claude'?(h>=310||h<=100):provider==='openai'?(h>=130&&h<=285):(h>=290&&h<=335),`${mode}: ${provider} colour stays in its measured provider hue range`);
+  }
   const hex = color => USAGE_PROVIDER_PALETTES[color.provider][mode][color.slot];
   for(const day of grouped) {
     const keys=Object.keys(day.models);
