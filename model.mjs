@@ -685,6 +685,7 @@ export function usageModelSlot(key) {
   }
   const existing = usageColorAssignments[key];
   if (Number.isInteger(existing) && existing >= 0 && existing < USAGE_PROVIDER_PALETTES[provider].light.length && !used.has(existing)) return { provider, slot: existing };
+  if (Object.hasOwn(usageColorAssignments, key)) return { provider, slot: USAGE_PROVIDER_PALETTES[provider].light.length - 1 };
   const slot = USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, index) => !used.has(index));
   // Outside a complete export plan, overflow is explicitly provider Other,
   // not the historical shared grey. The UI always uses a full-export plan.

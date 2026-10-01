@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { main, parseTranscript, estimateCost, applyTranscriptToAggregates } from './vault-scripts/export-usage-stats.mjs';
-import { computeUsageColorPlan, usageModelColorFamily } from './model.mjs';
+import { computeUsageColorPlan, usageModelColorFamily, configureUsageModelColors, usageModelSlot } from './model.mjs';
 import { USAGE_EXPLICIT_MODEL_SLOTS } from './usagePalettes.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-fix3-'));
@@ -106,6 +106,10 @@ try {
     const legacyPlan = computeUsageColorPlan(days([unknown, explicit]), legacy);
     assert.equal(legacy[unknown], 0, 'legacy owned assignment is preserved rather than overwritten');
     assert.ok(legacyPlan.foldedByProvider.openai.includes(unknown), 'legacy collision folds, never steals explicit color');
+    configureUsageModelColors(legacy);
+    assert.equal(usageModelSlot(unknown).slot, 4, 'standalone legacy collision resolves to provider Other');
+    assert.equal(legacy[unknown], 0, 'standalone lookup never overwrites legacy persistence');
+    configureUsageModelColors({});
   });
   await check('Codex cache write tokens and cost', async () => {
     const file = path.join(root, 'cache-write.jsonl');
@@ -133,9 +137,15 @@ try {
       { ...counters, output_tokens: -1 }, { ...counters, cache_write_input_tokens: '13' },
       { ...counters, cache_write_input_tokens: -1 }, { ...counters, cache_write_input_tokens: null },
       { ...counters, input_tokens: null }, { ...counters, output_tokens: null }, [], 'wrong shape',
+      { ...counters, input_tokens: 'overflow' }, { ...counters, cached_input_tokens: 'overflow' },
+      { ...counters, output_tokens: 'overflow' }, { ...counters, cache_write_input_tokens: 'overflow' },
     ];
     for (const [index, last] of bad.entries()) {
       await writeLines(file, [context, event(timestamp, last), event()]);
+      // JSON's number grammar admits an exponent that overflows JS Number.
+      // Do not JSON.stringify Infinity, which silently turns it into null.
+      const raw = await fs.readFile(file, 'utf8');
+      await fs.writeFile(file, raw.replaceAll('"overflow"', '1e400'));
       const parsed = await parseTranscript(file, 0);
       assert.deepEqual(parsed.rejectedUsage.serialize(), { rejectedRecords: 1, reasons: { 'invalid-codex-numbers': 1 } }, `numeric fixture ${index} rejected by Codex guard, not normalizer`);
       assert.equal(parsed.entries.length, 1, `numeric fixture ${index} does not suppress valid refresh`);
