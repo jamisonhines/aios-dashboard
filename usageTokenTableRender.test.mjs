@@ -51,7 +51,7 @@ try {
     external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"], alias: { obsidian: stub },
   });
   const { models, systemSkills, viewSwitch, chartHost, dayTooltip, legend } = await import(pathToFileURL(out).href);
-  globalThis.document = { createElementNS(_, tag) { return el(tag); } }; 
+  globalThis.document = { createElementNS(_, tag) { return el(tag); } };
 
   // Distinct values prove the cells are wired by field, not merely populated.
   const modelsHost = el();

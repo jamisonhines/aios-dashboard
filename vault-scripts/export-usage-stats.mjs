@@ -1824,7 +1824,7 @@ export async function main({
       openaiCodexTier: "base rates only; transcript fields lack a reliable per-entry 272K threshold discriminator",
       openaiCodexTierThresholdTokens: 272000,
       unknownOpenAi: "unpriced; rate card required",
-      local: "free; tokens counted", 
+      local: "free; tokens counted",
     },
     unpricedOpenAiModels,
     dedupe: { skippedUsageRecords: usageDedupe.collisions.length, collisions: usageDedupe.collisions },

@@ -43,6 +43,7 @@ try {
   assert.deepEqual(await findCodexTranscripts(codexRoot, Date.now() + 1e8), [], 'Codex mtime cutoff');
   const { entries } = await parseTranscript(file, Date.parse('2026-09-29'), { upperBoundMs: Date.parse('2026-10-01') });
   assert.equal(entries[0].input_tokens, 40, 'Codex subtracts cached input instead of double-counting it');
+  assert.equal(entries.length, 2, 'Codex refresh of the same cumulative total is not a second turn');
   assert.deepEqual(entries.map(e => [e.model, e.input_tokens, e.cache_read_input_tokens, e.output_tokens]), [
     ['openai-codex/gpt-6-sol', 40, 60, 7], ['openai-codex/codex-auto-review', 130, 80, 11],
   ], 'Codex per-turn models and exclusive cached bucket');
