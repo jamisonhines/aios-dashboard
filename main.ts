@@ -3861,8 +3861,9 @@ function renderUsageTab(
 
       const breakdown = usageFamilyBreakdown(win.days, settings.usageView, colorPlan);
       renderUsageLegend(body, breakdown.legend, settings.usageView);
-      const folded = Object.entries(colorPlan.foldedByProvider).flatMap(([provider, models]) => models.map(model => `${usageModelLabel(model)} (${provider} other)`));
-      if (folded.length) body.createDiv({ cls: "aios-usage-quality", text: `Chart tails folded by whole-export token share for colour separation: ${folded.join(", ")}. Every model remains named in the table.` });
+      const folded = Object.entries(colorPlan.foldedByProvider).filter(([provider]) => provider !== "local").flatMap(([provider, models]) => models.map(model => `${usageModelLabel(model)} (${provider} other)`));
+      if (folded.length) body.createDiv({ cls: "aios-usage-quality", text: `Chart tails folded by recent 7-day export token share (${colorPlan.ranking.recentStart} to ${colorPlan.ranking.recentEnd}) for colour separation: ${folded.join(", ")}. Every model remains named in the table.` });
+      if ((colorPlan.foldedByProvider.local || []).length) body.createDiv({ cls: "aios-usage-quality", text: "Local models share one free Local chart colour and remain listed individually in the table." });
       body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
       renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || [], settings.usageView);
       const excluded = stats.rejectedUsage?.rejectedRecords || 0;

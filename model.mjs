@@ -663,6 +663,8 @@ export const USAGE_FAMILY_LABELS = {
 // slots plus persisted ordered fallback allocation, independent of filtering.
 import { USAGE_PROVIDER_PALETTES, USAGE_EXPLICIT_MODEL_SLOTS, USAGE_PROVIDER_LABELS } from "./usagePalettes.mjs";
 
+import { rankUsageModels } from './usageRanking.mjs';
+
 let usageColorAssignments = {};
 export function configureUsageModelColors(assignments) {
   usageColorAssignments = assignments;
@@ -700,18 +702,25 @@ export function usageMetric(bucket, view = "cost") {
 // Resolve colour capacity against the entire export once. Both chart modes,
 // day paging, legend and table consume this SAME plan, never a selected slice.
 export function computeUsageColorPlan(fullDays, assignments = {}) {
-  const totals = new Map();
-  for (const day of fullDays) for (const [model, bucket] of Object.entries(day.models)) {
-    totals.set(model, (totals.get(model) || 0) + usageTotalTokens(bucket));
-  }
+  const ranking = rankUsageModels(fullDays, usageModelProvider, usageTotalTokens);
   const colors = {}, foldedByProvider = {}, groups = {};
   for (const provider of Object.keys(USAGE_PROVIDER_PALETTES)) {
-    const ranked = [...totals].filter(([model]) => usageModelProvider(model) === provider)
-      .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const ranked = ranking.byProvider[provider] || [];
+    if (provider === 'local') {
+      const members = ranked.map(row => row.model);
+      foldedByProvider.local = members;
+      if (members.length) {
+        const group = 'usage-group:local:all';
+        colors[group] = {provider:'local',slot:0};
+        groups[group] = {label:'Local',members};
+        for (const model of members) colors[model] = colors[group];
+      }
+      continue;
+    }
     const capacity = USAGE_PROVIDER_PALETTES[provider].light.length;
     const keepCount = ranked.length > capacity ? capacity - 1 : ranked.length;
-    const kept = ranked.slice(0, keepCount).map(([model]) => model);
-    const folded = ranked.slice(keepCount).map(([model]) => model);
+    const kept = ranked.slice(0, keepCount).map(row => row.model);
+    const folded = ranked.slice(keepCount).map(row => row.model);
     foldedByProvider[provider] = folded;
     const used = new Set(folded.length ? [capacity - 1] : []);
     // Explicit identities bind first; the table's token rank cannot repaint
@@ -736,7 +745,7 @@ export function computeUsageColorPlan(fullDays, assignments = {}) {
       for (const model of folded) colors[model] = colors[group];
     }
   }
-  return { colors, foldedByProvider, groups };
+  return { colors, foldedByProvider, groups, ranking };
 }
 export function groupUsageDays(days, plan) {
   if (!plan) return days;
@@ -762,6 +771,7 @@ export function usageModelKeys(models, plan) {
 }
 
 export function usageModelLabel(key) {
+  if (key === 'usage-group:local:all') return 'Local';
   if (key.startsWith('usage-group:')) return `${USAGE_PROVIDER_LABELS[usageModelProvider(key)]} other`;
   if (/^openai(?:-codex)?\//.test(key)) return key.replace(/^openai(?:-codex)?\//, "");
   return USAGE_FAMILY_LABELS[key] || key;
@@ -855,7 +865,7 @@ export function usageFamilyBreakdown(windowDays, view = "cost", plan) {
       model: key,
       family: usageModelColorFamily(key, plan),
       label: usageModelLabel(key),
-      ...(plan && Object.entries(plan.groups).some(([group, value]) => group !== key && value.members.includes(key)) ? {foldedInto:`${USAGE_PROVIDER_LABELS[usageModelProvider(key)]} other`} : {}),
+      ...(plan && Object.entries(plan.groups).some(([group, value]) => group !== key && value.members.includes(key)) ? {foldedInto:usageModelProvider(key) === 'local' ? 'Local' : `${USAGE_PROVIDER_LABELS[usageModelProvider(key)]} other`} : {}),
       messages: b.messages,
       inputTokens: b.inputTokens,
       outputTokens: b.outputTokens,

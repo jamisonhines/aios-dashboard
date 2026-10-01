@@ -68,7 +68,7 @@ try {
   );
 
   const tokenHost = el();
-  const tokenRow = { model: 'openai-codex/codex-auto-review', label: 'codex-auto-review', family: 'openai-3', inputTokens: 101, cacheReadTokens: 202, cacheWriteTokens: 303, outputTokens: 404, costUsd: 0, sharePercent: 100, messages: 7 };
+  const tokenRow = { model: 'openai-codex/codex-auto-review', label: 'codex-auto-review', family: 'openai-4', inputTokens: 101, cacheReadTokens: 202, cacheWriteTokens: 303, outputTokens: 404, costUsd: 0, sharePercent: 100, messages: 7 };
   models(tokenHost, [tokenRow], [tokenRow.model], 'tokens');
   const tokenTable = find(tokenHost, n => n.tag === 'table');
   assert.equal(tokenTable.children[0].children[0].children[5].text, 'Total tokens', 'Tokens table names its selected metric');
@@ -97,18 +97,18 @@ try {
     chartHost(host, win, { usageRange: range }, reloaded.usageView);
     assert.ok(find(host, n => n.tag === 'svg').attrs['aria-label'].toLowerCase().includes('tokens'), `${range} chart receives saved Tokens view`);
     assert.ok(find(host, n => n.tag === 'text' && n.textContent === '1.0k'), `${range} chart has one token scale`);
-    assert.ok(find(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar aios-usage-bar-openai-3'), `${range} free model has its own colour mark`);
+    assert.ok(find(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar aios-usage-bar-openai-4'), `${range} free model has its own colour mark`);
     const title = find(host, n => n.tag === 'title').textContent;
     assert.ok(title.includes('Input 101 · Cache read 202 · Cache write 303 · Output 404'), `${range} tooltip retains per-bucket breakdown`);
     assert.ok(!title.includes('$'), `${range} Tokens tooltip does not display a dollar metric`);
   }
   const legendHost = el();
-  legend(legendHost, [{ family: 'openai-3', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
+  legend(legendHost, [{ family: 'openai-4', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
   assert.ok(find(legendHost, n => n.text === 'codex-auto-review'), 'model legend label remains visible');
   assert.ok(find(legendHost, n => n.text === '1.0k tokens'), 'legend follows token metric');
 
-  const fullModels = Object.fromEntries(['claude-sonnet-5','claude-opus-5','claude-opus-5-5','claude-fable-5-1','claude-sonnet-5-5'].map((key,i) => [key,{...tokenRow,inputTokens:10000-i*1000}]));
-  const sliceDay = {date:'2026-09-30',models:{'claude-fable-5-1':{...tokenRow,inputTokens:11},'claude-sonnet-5-5':{...tokenRow,inputTokens:13}},totalCostUsd:0,totalOutputTokens:808};
+  const fullModels = Object.fromEntries(['claude-sonnet-5','claude-opus-5','claude-opus-5-5','claude-fable-5-1','claude-sonnet-5-5','claude-haiku-4-5-20251001','claude-fable-5'].map((key,i) => [key,{...tokenRow,inputTokens:10000-i*1000}]));
+  const sliceDay = {date:'2026-09-30',models:{'claude-haiku-4-5-20251001':{...tokenRow,inputTokens:11},'claude-fable-5':{...tokenRow,inputTokens:13}},totalCostUsd:0,totalOutputTokens:808};
   const colorPlan = makePlan([{date:'2026-09-29',models:fullModels,totalCostUsd:0,totalOutputTokens:0},sliceDay],{});
   for(const range of ['1d','7d']) {
     const host=el();
@@ -121,6 +121,18 @@ try {
   const foldedTable=find(foldedTableHost,n=>n.tag==='table');
   assert.equal(foldedTable.children[1].children.length,2,'renderer retains every folded model table row');
   for(const row of foldedTable.children[1].children) assert.ok(find(row,n=>n.text===' (Claude other)'),'renderer labels folded membership alongside the actual model name');
+
+  const localDay={date:'2026-09-30',models:{'ollama/render-a':{...tokenRow,inputTokens:17},'ollama/render-b':{...tokenRow,inputTokens:19}},totalCostUsd:0,totalOutputTokens:808};
+  const localPlan=makePlan([localDay],{});
+  for(const range of ['1d','7d']) {
+    const host=el();
+    chartHost(host,{label:'Sep 30',days:[localDay]},{usageRange:range},'tokens',localPlan);
+    assert.ok(find(host,n=>n.tag==='title' && n.textContent.includes('Local') && n.textContent.includes('Input 36')),`${range}: renderer shows one summed Local chart identity`);
+  }
+  const localTableHost=el();
+  models(localTableHost,breakdown([localDay],'tokens',localPlan).table,[],'tokens');
+  assert.equal(find(localTableHost,n=>n.tag==='table').children[1].children.length,2,'renderer keeps both local models named in the table');
+  assert.ok(find(localTableHost,n=>n.text===' (Local)'),'renderer labels Local membership without calling it Local other');
 
   // System Skills intentionally remains a six-column table; it gets its own
   // closed six-column CSS map rather than pretending its Cost column aligns
