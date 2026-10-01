@@ -2984,19 +2984,25 @@ function renderUsageChart(
       tabindex: "0", "aria-label": `${breakdown.label}: ${breakdown.total}`,
     });
     let popup: HTMLElement | null = null;
-    const hide = () => { popup?.remove(); popup = null; };
+    let popupModels: HTMLElement | null = null;
+    const hide = () => { popup?.remove(); popup = null; popupModels = null; };
     const show = (event?: MouseEvent) => {
       hide();
       popup = wrap.createDiv({ cls: "aios-usage-popup", attr: { role: "tooltip" } });
-      popup.createDiv({ cls: "aios-usage-popup-period", text: breakdown.label });
-      popup.createDiv({ cls: "aios-usage-popup-total", text: breakdown.total });
+      const header = popup.createDiv({ cls: "aios-usage-popup-header" });
+      header.createDiv({ cls: "aios-usage-popup-period", text: breakdown.label });
+      header.createDiv({ cls: "aios-usage-popup-total", text: breakdown.total });
+      popupModels = popup.createDiv({ cls: "aios-usage-popup-models" });
       for (const row of breakdown.rows) {
-        const line = popup.createDiv({ cls: "aios-usage-popup-row" });
+        const line = popupModels.createDiv({ cls: "aios-usage-popup-row" });
         line.createSpan({ text: row.label });
         line.createSpan({ text: row.amount });
       }
-      const pane = wrap.closest(".aios-dashboard-root") as HTMLElement || container;
-      const bounds = pane.getBoundingClientRect();
+      const pane = wrap.closest(".aios-scroll") as HTMLElement || container;
+      const paneRect = pane.getBoundingClientRect();
+      // client dimensions exclude borders and scrollbar, unlike the root rect.
+      const bounds = { left: paneRect.left + pane.clientLeft, top: paneRect.top + pane.clientTop,
+        width: pane.clientWidth, height: pane.clientHeight };
       popup.style.width = `${Math.min(300, bounds.width)}px`;
       popup.style.maxHeight = `${bounds.height}px`;
       const target = hit.getBoundingClientRect();
@@ -3004,8 +3010,8 @@ function renderUsageChart(
         (event?.clientX ?? target.left + target.width / 2) - bounds.left,
         (event?.clientY ?? target.top) - bounds.top);
       const origin = wrap.getBoundingClientRect();
-      popup.style.left = `${bounds.left + position.left - origin.left}px`;
-      popup.style.top = `${bounds.top + position.top - origin.top}px`;
+      popup.style.left = `${bounds.left + position.left - origin.left - wrap.clientLeft}px`;
+      popup.style.top = `${bounds.top + position.top - origin.top - wrap.clientTop}px`;
     };
     hit.addEventListener("mouseenter", show);
     hit.addEventListener("mouseleave", hide);
@@ -3014,16 +3020,16 @@ function renderUsageChart(
     // The popup is non-interactive so moving off the column always hides it.
     // Forward wheel scrolling while hovered so long breakdowns remain readable.
     hit.addEventListener("wheel", (event) => {
-      if (popup && popup.scrollHeight > popup.clientHeight) {
+      if (popupModels && popupModels.scrollHeight > popupModels.clientHeight) {
         event.preventDefault();
-        popup.scrollTop += event.deltaY;
+        popupModels.scrollTop += event.deltaY;
       }
     }, { passive: false });
     hit.addEventListener("keydown", (event) => {
       if (event.key === "Escape") hide();
-      if (popup && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      if (popupModels && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
         event.preventDefault();
-        popup.scrollTop += event.key === "ArrowDown" ? 40 : -40;
+        popupModels.scrollTop += event.key === "ArrowDown" ? 40 : -40;
       }
     });
     g.appendChild(hit);

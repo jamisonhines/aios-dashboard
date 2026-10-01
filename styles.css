@@ -1510,7 +1510,9 @@
   z-index: 20;
   box-sizing: border-box;
   padding: 10px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   pointer-events: none;
   background: var(--aios-surface);
   color: var(--aios-text);
@@ -1518,6 +1520,8 @@
   box-shadow: 0 4px 16px #0003;
   font-size: 12px;
 }
+.aios-dashboard-root .aios-usage-popup-header { flex: none; }
+.aios-dashboard-root .aios-usage-popup-models { min-height: 0; overflow-y: auto; }
 .aios-dashboard-root .aios-usage-popup-period { font-weight: 600; }
 .aios-dashboard-root .aios-usage-popup-total { margin: 4px 0 8px; }
 .aios-dashboard-root .aios-usage-popup-row { display: flex; justify-content: space-between; gap: 12px; }

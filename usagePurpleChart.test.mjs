@@ -47,24 +47,27 @@ function el(tag = 'div', options = {}) {
     appendChild(child) { child.parentElement = this; this.children.push(child); },
     setAttribute(k, v) { this.attrs[k] = v; }, setAttr(k, v) { this.attrs[k] = v; },
     addEventListener(k, v) { this.events[k] = v; }, remove() { this.parentElement.children = this.parentElement.children.filter(c => c !== this); },
-    closest() { return pane; }, getBoundingClientRect() {
+    closest(selector) { return selector === '.aios-scroll' ? viewport : pane; }, getBoundingClientRect() {
       if (this.attrs.class === 'aios-usage-popup') return { left: 0, top: 0, width: parseFloat(this.style.width) || 300, height: 150 };
       if (this.attrs.class === 'aios-usage-chart-wrap') return { left: 20, top: 50, width: 600, height: 180 };
       return { left: 0, top: 0, width: 600, height: 400 };
     },
     classList: { add() {} }, empty() { this.children = []; },
     setText(text) { this.text = text; }, addClass() {},
-    scrollTop: 0, scrollHeight: 400, clientHeight: 400,
+    scrollTop: 0, scrollHeight: 400, clientHeight: 400, clientWidth: 600, clientLeft: 0, clientTop: 0,
   }; return node;
 }
 function all(node, pred) { return [...(pred(node) ? [node] : []), ...node.children.flatMap(c => all(c, pred))]; }
 const pane = el();
+const viewport = el();
+viewport.clientHeight = 280;
+viewport.getBoundingClientRect = () => ({ left: 0, top: 120, width: 600, height: 280 });
 try {
   esbuild.buildSync({ absWorkingDir: root, entryPoints: [entry], bundle: true, format: 'esm', outfile: out, treeShaking: false,
     external: ['electron', 'child_process', 'node:*', '@codemirror/*', '@lezer/*'], alias: { obsidian: stub } });
   const { chartHost, viewSwitch, usageTab } = await import(pathToFileURL(out).href);
   globalThis.document = { createElementNS(_, tag) { return el(tag); } };
-  globalThis.ResizeObserver = class { observe() {} }; 
+  globalThis.ResizeObserver = class { observe() {} };
   for (const range of ['1d', '7d']) for (const view of ['cost', 'tokens']) {
     const host = el();
     const days = range === '1d' ? [day] : [day, next];
@@ -87,10 +90,12 @@ try {
       : ['2026-09-30', '2.0M tokens', 'Opus', '2.0M tokens', 'unknown-example', '537 tokens', 'ollama/local-example', '337 tokens', 'gpt-6.1-sol', '137 tokens'], `${range} ${view}: popup renders period total and every model in metric order`);
     assert.equal(popup.style.left, '258px', 'popup flips left inside pane accounting for wrap offset');
     assert.equal(popup.style.top, '200px', 'popup clamps to pane bottom accounting for wrap offset');
-    popup.scrollHeight = 900; popup.clientHeight = 150;
+    const list = all(popup, n => n.attrs.class === 'aios-usage-popup-models')[0];
+    list.scrollHeight = 900; list.clientHeight = 150;
     let prevented = false;
     hits[0].events.wheel({ deltaY: 200, preventDefault() { prevented = true; } });
-    assert.equal(popup.scrollTop, 200, 'long popup scrolls while column is hovered');
+    assert.equal(list.scrollTop, 200, 'long model list scrolls while column is hovered');
+    assert.equal(popup.scrollTop, 0, 'period header is outside scrolling model list');
     assert.ok(prevented, 'scrolling long popup does not move dashboard');
     hits[0].events.mouseleave();
     assert.equal(all(host, n => n.attrs.class === 'aios-usage-popup').length, 0, 'popup disappears on mouse leave');
