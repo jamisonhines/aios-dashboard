@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { main, estimateCost, openAiApiEquivalentRate, findCodexTranscripts, parseTranscript, applyTranscriptToAggregates } from './vault-scripts/export-usage-stats.mjs';
-import { usageChartFromWindow, usageDayFamilyBars, usageFamilyBreakdown, usageModelColorFamily, usageModelProvider, usageTotalTokens, configureUsageModelColors, usageModelSlot, computeUsageColorPlan } from './model.mjs';
+import { usageChartFromWindow, usageFamilyBreakdown, usageTotalTokens } from './model.mjs';
 
 const usage = { input_tokens: 1e6, cache_read_input_tokens: 2e6, cache_creation_input_tokens: 3e6, output_tokens: 4e6 };
 for (const [model, rate, cost] of [
@@ -18,7 +18,6 @@ for (const [model, rate, cost] of [
 }
 assert.equal(estimateCost('other', usage, undefined, 'openai-codex/codex-auto-review'), 0, 'unknown OpenAI has no guessed charge');
 assert.equal(estimateCost('other', usage, undefined, 'ollama/qwen-example'), 0, 'local usage costs zero');
-assert.equal(usageModelProvider('ollama/qwen-example'), 'local', 'local provider bucket');
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-views-'));
 try {
@@ -73,26 +72,8 @@ const tokens = usageChartFromWindow([day], 'tokens');
 assert.equal(tokens.days[0].segments.length, 2, 'Tokens chart includes free models');
 assert.equal(tokens.gridlines[0].label, '34', 'Tokens axis totals all four buckets');
 assert.equal(tokens.days[0].segments[0].heightFraction, .5, 'Tokens stack uses token magnitude');
-assert.equal(usageDayFamilyBars(day, 'tokens').bars.length, 2, 'single day Tokens chart includes free models');
-assert.equal(usageDayFamilyBars(day, 'tokens').gridlines[0].label, '17', 'single day Tokens axis');
+assert.equal(tokens.days.length, 1, 'single day has one period column');
 assert.equal(usageChartFromWindow([day], 'cost').gridlines[0].label, '$4.00', 'Cost axis remains API-equivalent dollars');
 assert.equal(usageFamilyBreakdown([day], 'tokens').table[0].totalTokens, 17, 'Tokens table four-bucket total');
 assert.equal(usageFamilyBreakdown([day], 'tokens').table[0].sharePercent, 50, 'Tokens table share uses token total');
-assert.notEqual(usageModelColorFamily('claude-opus-5'), usageModelColorFamily('claude-opus-5-5'), 'same Claude family has distinct colours');
-const unknownDays = [{date:'2026-09-30',models:{'openai-codex/new-example-a':bucket,'openai-codex/new-example-b':bucket}}];
-const unknownPlan = computeUsageColorPlan(unknownDays, {});
-const unknown1 = usageModelColorFamily('openai-codex/new-example-a', unknownPlan);
-const unknown2 = usageModelColorFamily('openai-codex/new-example-b', unknownPlan);
-assert.equal(unknown1, unknown2, 'exhausted unowned slots fold into one provider Other colour');
-assert.deepEqual(unknownPlan.groups['usage-group:openai:other'].members.sort(), Object.keys(unknownDays[0].models).sort(), 'overflow models share a named chart group, not overlapping marks');
-assert.match(unknown1, /^openai-/, 'fallback uses OpenAI palette, not Other grey');
-assert.equal(usageModelColorFamily('openai-codex/new-example-a', unknownPlan), unknown1, 'fallback identity stable after another model');
-const assignments = {};
-configureUsageModelColors(assignments);
-const persistedDays = [{date:'2026-09-30',models:{'openai-codex/new-persisted':bucket}}];
-const persistedPlan = computeUsageColorPlan(persistedDays, assignments);
-const persistedColor = usageModelColorFamily('openai-codex/new-persisted', persistedPlan);
-const reloadedPlan = computeUsageColorPlan(persistedDays, JSON.parse(JSON.stringify(assignments)));
-assert.equal(usageModelColorFamily('openai-codex/new-persisted', reloadedPlan), persistedColor, 'fallback allocation persists across reload and filtering');
-assert.equal(reloadedPlan.colors['openai-codex/new-persisted'].slot, 4, 'fallback takes the next unowned provider step');
 console.log('usageViews.test.mjs: all assertions passed');

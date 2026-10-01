@@ -55,14 +55,10 @@ import {
   usageRunWarnings,
   computeUsageWindow,
   usageChartFromWindow,
-  configureUsageModelColors,
-  computeUsageColorPlan,
-  usageTotalTokens,
-  usageDayFamilyBars,
+  usagePeriodBreakdown,
+  usagePopupPosition,
   computeWorkflowSpikes,
   computeSpendSparkline,
-  usageFamilyBreakdown,
-  usageModelLabel,
   computeUsageRangeTiles,
   computeWorkflowsViewForRange,
   computeSkillsViewForRange,
@@ -150,7 +146,6 @@ interface AiosDashboardSettings {
   ideSessionTarget: "terminal" | "extension"; // where auto-session runs: integrated terminal (claude CLI) or the Claude Code extension panel
   ideNewSessionCommand: string; // command-palette entry used for the extension target
   usageView: "cost" | "tokens";
-  usageModelColors: Record<string, number>;
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
@@ -189,7 +184,6 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideSessionTarget: "terminal",
   ideNewSessionCommand: "Claude Code: New Session",
   usageView: "cost",
-  usageModelColors: {},
   usageStatsPath: "Operations/usage/usage-stats.json",
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
@@ -700,7 +694,6 @@ interface HealthInput {
 // supporting constants/helpers now live in model.mjs, imported above.
 // ---------------------------------------------------------------------------
 
-import { usagePaletteStyles } from "./usagePalettes.mjs";
 
 interface UsageFamilyBucket {
   inputTokens: number;
@@ -823,7 +816,6 @@ interface UsageStats {
 
 interface UsageChartSegment {
   model: string;
-  family: string;
   costUsd: number;
   inputTokens: number;
   cacheReadTokens: number;
@@ -853,27 +845,6 @@ interface UsageChart {
   xLabelIndices: number[];
 }
 
-interface UsageLegendItem {
-  family: string;
-  label: string;
-  costUsd: number;
-  totalTokens?: number;
-}
-
-interface UsageTableRow {
-  model: string;
-  family: string;
-  label: string;
-  messages: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  costUsd: number;
-  sharePercent: number;
-  foldedInto?: string;
-}
-
 interface UsageProjectRow {
   name: string;
   costUsd: number;
@@ -889,8 +860,6 @@ interface UsageView {
     last30DaysOutputTokensCompact: string;
   };
   chart: UsageChart;
-  legend: UsageLegendItem[];
-  table: UsageTableRow[];
   projects: UsageProjectRow[];
 }
 
@@ -2952,29 +2921,14 @@ function svgEl<K extends keyof SVGElementTagNameMap>(
   return el;
 }
 
-// Token labels are intentionally explicit: bars remain cost geometry, while
-// their tooltips disclose the normalized transcript buckets behind each model.
-function formatUsageTokenBreakdown(bucket: Pick<UsageFamilyBucket, "inputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "outputTokens">): string {
-  return `Input ${formatCompactNumber(bucket.inputTokens)} · Cache read ${formatCompactNumber(bucket.cacheReadTokens)} · Cache write ${formatCompactNumber(bucket.cacheWriteTokens)} · Output ${formatCompactNumber(bucket.outputTokens)}`;
-}
-
-// "YYYY-MM-DD: $X.XX (Opus $a · Input ..., ...)" tooltip text for a chart bar.
-function usageDayTooltip(day: UsageChartDay, view: "cost" | "tokens" = "cost"): string {
-  const parts = day.segments
-    .map((s) => `${usageModelLabel(s.model || s.family)} ${view === "tokens" ? formatCompactNumber(usageTotalTokens(s)) + " tokens" : formatUsd(s.costUsd)} · ${formatUsageTokenBreakdown(s)}`)
-    .join("; ");
-  return `${day.date}: ${view === "tokens" ? formatCompactNumber(day.totalTokens || 0) + " tokens" : formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
-}
-
-// Inline SVG stacked bar chart over an arbitrary day window, segments stacked
-// by model family. The viewBox width comes from the measured container so the
-// chart genuinely fills the pane (a fixed viewBox letterboxes at 600px).
+// One total column per day in both range modes. Hover uses the same period data.
 function renderUsageChart(
   container: HTMLElement,
   chart: UsageChart,
   pixelWidth: number,
   ariaLabel: string,
-  view: "cost" | "tokens" = "cost"
+  view: "cost" | "tokens" = "cost",
+  unpriced: string[] = []
 ) {
   const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
   const width = Math.max(320, pixelWidth);
@@ -3011,42 +2965,53 @@ function renderUsageChart(
     svg.appendChild(label);
   }
 
-  // Stacked bars.
+  // Plain columns plus full-height hover targets.
   const n = chart.days.length || 1;
   const slot = plotWidth / n;
   const barWidth = Math.max(1, slot * 0.7);
   chart.days.forEach((day, i) => {
     const x = marginLeft + i * slot + (slot - barWidth) / 2;
     const g = svgEl("g", { class: "aios-usage-bar-group" });
-    const title = svgEl("title", {});
-    title.textContent = usageDayTooltip(day, view);
-    g.appendChild(title);
-
-    let yCursor = baselineY;
-    for (const seg of day.segments) {
-      const segHeight = Math.max(0, seg.heightFraction * plotHeight);
-      const y = yCursor - segHeight;
-      const rect = svgEl("rect", {
-        x: String(x),
-        y: String(y),
-        width: String(barWidth),
-        height: String(segHeight),
-        class: "aios-usage-bar aios-usage-bar-" + seg.family,
-      });
-      g.appendChild(rect);
-      yCursor = y;
-    }
-    if (day.segments.length === 0) {
-      // Invisible full-height hit target so empty days still show a tooltip on hover.
-      const hit = svgEl("rect", {
-        x: String(x),
-        y: String(baselineY - 2),
-        width: String(barWidth),
-        height: "2",
-        class: "aios-usage-bar-empty",
-      });
-      g.appendChild(hit);
-    }
+    const barHeight = Math.max(0, day.totalFraction * plotHeight);
+    g.appendChild(svgEl("rect", {
+      x: String(x), y: String(baselineY - barHeight),
+      width: String(barWidth), height: String(barHeight), class: "aios-usage-bar",
+    }));
+    const breakdown = usagePeriodBreakdown(day, view, unpriced);
+    const hit = svgEl("rect", {
+      x: String(marginLeft + i * slot), y: String(baselineY - plotHeight),
+      width: String(slot), height: String(plotHeight), class: "aios-usage-column-hit",
+      tabindex: "0", "aria-label": `${breakdown.label}: ${breakdown.total}`,
+    });
+    let popup: HTMLElement | null = null;
+    const hide = () => { popup?.remove(); popup = null; };
+    const show = (event?: MouseEvent) => {
+      hide();
+      popup = wrap.createDiv({ cls: "aios-usage-popup", attr: { role: "tooltip" } });
+      popup.createDiv({ cls: "aios-usage-popup-period", text: breakdown.label });
+      popup.createDiv({ cls: "aios-usage-popup-total", text: breakdown.total });
+      for (const row of breakdown.rows) {
+        const line = popup.createDiv({ cls: "aios-usage-popup-row" });
+        line.createSpan({ text: row.label });
+        line.createSpan({ text: row.amount });
+      }
+      const pane = wrap.closest(".aios-dashboard-root") as HTMLElement || container;
+      const bounds = pane.getBoundingClientRect();
+      popup.style.width = `${Math.min(300, bounds.width)}px`;
+      popup.style.maxHeight = `${bounds.height}px`;
+      const target = hit.getBoundingClientRect();
+      const position = usagePopupPosition(bounds, popup.getBoundingClientRect(),
+        (event?.clientX ?? target.left + target.width / 2) - bounds.left,
+        (event?.clientY ?? target.top) - bounds.top);
+      const origin = wrap.getBoundingClientRect();
+      popup.style.left = `${bounds.left + position.left - origin.left}px`;
+      popup.style.top = `${bounds.top + position.top - origin.top}px`;
+    };
+    hit.addEventListener("mouseenter", show);
+    hit.addEventListener("mouseleave", hide);
+    hit.addEventListener("focus", () => show());
+    hit.addEventListener("blur", hide);
+    g.appendChild(hit);
     svg.appendChild(g);
   });
 
@@ -3062,96 +3027,6 @@ function renderUsageChart(
       "text-anchor": "middle",
     });
     label.textContent = day.date.slice(5); // MM-DD
-    svg.appendChild(label);
-  }
-
-  wrap.appendChild(svg);
-}
-
-// Single-day view: one vertical bar per model family (wider bars, family
-// names on the x axis). Data from usageDayFamilyBars (model.mjs, pure).
-function renderUsageDayChart(
-  container: HTMLElement,
-  dayBars: {
-    date: string;
-    bars: { family: string; label: string; costUsd: number; inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; outputTokens: number; fraction: number }[];
-    gridlines: { fraction: number; label: string }[];
-  },
-  pixelWidth: number,
-  view: "cost" | "tokens" = "cost"
-) {
-  const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
-  const width = Math.max(320, pixelWidth);
-  const height = 180;
-  const marginLeft = 44;
-  const marginBottom = 16;
-  const plotWidth = width - marginLeft - 4;
-  const plotHeight = height - marginBottom - 6;
-  const baselineY = height - marginBottom;
-
-  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "180" });
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `${view === "tokens" ? "Total tokens" : "API-equivalent estimated cost"} by model on ${dayBars.date}`);
-  svg.classList.add("aios-usage-svg");
-
-  for (const g of dayBars.gridlines) {
-    const y = baselineY - g.fraction * plotHeight;
-    svg.appendChild(
-      svgEl("line", {
-        x1: String(marginLeft),
-        x2: String(width - 4),
-        y1: String(y),
-        y2: String(y),
-        class: "aios-usage-gridline",
-      })
-    );
-    const label = svgEl("text", {
-      x: String(marginLeft - 6),
-      y: String(y + 3),
-      class: "aios-usage-axis-label",
-      "text-anchor": "end",
-    });
-    label.textContent = g.label;
-    svg.appendChild(label);
-  }
-
-  const n = dayBars.bars.length || 1;
-  const slot = plotWidth / n;
-  const barWidth = Math.min(90, Math.max(24, slot * 0.5));
-  dayBars.bars.forEach((bar, i) => {
-    const x = marginLeft + i * slot + (slot - barWidth) / 2;
-    const g = svgEl("g", { class: "aios-usage-bar-group" });
-    const title = svgEl("title", {});
-    title.textContent = `${bar.label}: ${view === "tokens" ? formatCompactNumber(usageTotalTokens(bar)) + " tokens" : formatUsd(bar.costUsd)} · ${formatUsageTokenBreakdown(bar)}`;
-    g.appendChild(title);
-    const barHeight = Math.max(1, bar.fraction * plotHeight);
-    g.appendChild(
-      svgEl("rect", {
-        x: String(x),
-        y: String(baselineY - barHeight),
-        width: String(barWidth),
-        height: String(barHeight),
-        class: "aios-usage-bar aios-usage-bar-" + bar.family,
-      })
-    );
-    const label = svgEl("text", {
-      x: String(x + barWidth / 2),
-      y: String(height - 2),
-      class: "aios-usage-axis-label",
-      "text-anchor": "middle",
-    });
-    label.textContent = bar.label;
-    g.appendChild(label);
-    svg.appendChild(g);
-  });
-  if (dayBars.bars.length === 0) {
-    const label = svgEl("text", {
-      x: String(marginLeft + plotWidth / 2),
-      y: String(baselineY - 8),
-      class: "aios-usage-axis-label",
-      "text-anchor": "middle",
-    });
-    label.textContent = "No usage recorded this day";
     svg.appendChild(label);
   }
 
@@ -3257,65 +3132,14 @@ function renderUsageChartHost(
   win: ReturnType<typeof computeUsageWindow>,
   viewState: ViewState,
   view: "cost" | "tokens" = "cost",
-  colorPlan?: ReturnType<typeof computeUsageColorPlan>
+  unpriced: string[] = []
 ) {
   const chartHost = container.createDiv({ cls: "aios-usage-chart-host" });
   const width = Math.floor(chartHost.getBoundingClientRect().width) || container.clientWidth || 600;
-  if (viewState.usageRange === "1d") {
-    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0], view, colorPlan), width, view);
-  } else {
-    renderUsageChart(
-      chartHost,
-      usageChartFromWindow(win.days, view, colorPlan),
-      width,
-      `Daily ${view === "tokens" ? "total tokens" : "API-equivalent estimated cost"}, ${win.label}, stacked by model`,
-      view
-    );
-  }
-}
-
-function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[], view: "cost" | "tokens" = "cost") {
-  const row = container.createDiv({ cls: "aios-usage-legend" });
-  for (const item of legend) {
-    const pill = row.createDiv({ cls: "aios-usage-legend-item" });
-    pill.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + item.family });
-    pill.createSpan({ cls: "aios-usage-legend-label", text: item.label });
-    pill.createSpan({ cls: "aios-usage-legend-cost", text: view === "tokens" ? formatCompactNumber(item.totalTokens || 0) + " tokens" : formatUsd(item.costUsd) });
-  }
-}
-
-// Models breakdown table (header/tabs restructure, 2026-08, replaces the
-// old bespoke Model breakdown table): shares the same breakdown-table
-// helper/column-alignment as Workflows and Skills below it -- family, cost,
-// share of this window's spend, output tokens, messages -- so all three
-// tables' Cost/Output-tokens/Msgs columns line up at the same pixel
-// position (USAGE_BREAKDOWN_TOTAL_COLUMNS padding, see that const's
-// comment). Follows the selected range like every other section on this
-// tab: `table` is already range-scoped by the caller (usageFamilyBreakdown
-// over the selected window's days).
-function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], unpriced: string[] = [], view: "cost" | "tokens" = "cost") {
-  if (table.length === 0) {
-    renderEmptyState(container, "No model usage in this period.");
-    return;
-  }
-  renderUsageBreakdownTable(
-    container,
-    ["Model", "Input", "Cache read", "Cache write", "Output", view === "tokens" ? "Total tokens" : "Cost", "Share", "Msgs"],
-    table.map((row) => ({
-      nameText: " " + row.label,
-      nameTitle: row.label,
-      nameDotClass: "aios-usage-dot-" + row.family,
-      nameSuffix: row.foldedInto ? ` (${row.foldedInto})` : undefined,
-      cells: [
-        formatCompactNumber(row.inputTokens),
-        formatCompactNumber(row.cacheReadTokens),
-        formatCompactNumber(row.cacheWriteTokens),
-        formatCompactNumber(row.outputTokens),
-        view === "tokens" ? formatCompactNumber(usageTotalTokens(row)) : unpriced.includes(row.model) ? "Unpriced" : formatUsd(row.costUsd),
-        Math.round(row.sharePercent) + "%",
-        String(row.messages),
-      ],
-    }))
+  renderUsageChart(
+    chartHost, usageChartFromWindow(win.days, view), width,
+    `Daily ${view === "tokens" ? "total tokens" : "API-equivalent estimated cost"}, ${win.label}`,
+    view, unpriced
   );
 }
 
@@ -3666,13 +3490,7 @@ function renderUsageTab(
     // range the user is browsing) and the all-time project table (projects
     // have no per-day breakdown to scope by range -- see computeUsageView's
     // note).
-    settings.usageModelColors ||= {};
-    configureUsageModelColors(settings.usageModelColors);
-    const beforeColors = JSON.stringify(settings.usageModelColors);
-    // Choose folds and fallback identities from the entire export once.
-    // Every selected range and both measurement views reuse this plan.
-    const colorPlan = computeUsageColorPlan(stats.days, settings.usageModelColors);
-    if (JSON.stringify(settings.usageModelColors) !== beforeColors) void saveSettings();
+
     const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date(), stats.dayTimeZone);
     const todayCostUsd = todayWin.days[0]?.totalCostUsd || 0;
     const projects = stats.projects.slice().sort((a,b) => b.costUsd - a.costUsd).slice(0,8);
@@ -3857,15 +3675,7 @@ function renderUsageTab(
       // side effect on that map is picked up on the very next redraw, same as `stats` itself.
       renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus, stats.generatedAt || null));
       renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
-      renderUsageChartHost(body, win, viewState, settings.usageView, colorPlan);
-
-      const breakdown = usageFamilyBreakdown(win.days, settings.usageView, colorPlan);
-      renderUsageLegend(body, breakdown.legend, settings.usageView);
-      const folded = Object.entries(colorPlan.foldedByProvider).filter(([provider]) => provider !== "local").flatMap(([provider, models]) => models.map(model => `${usageModelLabel(model)} (${provider} other)`));
-      if (folded.length) body.createDiv({ cls: "aios-usage-quality", text: `Chart tails folded by recent 7-day export token share (${colorPlan.ranking.recentStart} to ${colorPlan.ranking.recentEnd}) for colour separation: ${folded.join(", ")}. Every model remains named in the table.` });
-      if ((colorPlan.foldedByProvider.local || []).length) body.createDiv({ cls: "aios-usage-quality", text: "Local models share one free Local chart colour and remain listed individually in the table." });
-      body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
-      renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || [], settings.usageView);
+      renderUsageChartHost(body, win, viewState, settings.usageView, stats.unpricedOpenAiModels || []);
       const excluded = stats.rejectedUsage?.rejectedRecords || 0;
       if (excluded) body.createDiv({ cls: "aios-usage-quality", text: `${excluded} usage record(s) excluded for schema or temporal validation.` });
       if ((stats.unpricedOpenAiModels || []).length) body.createDiv({ cls: "aios-usage-quality", text: `Unpriced models: ${(stats.unpricedOpenAiModels || []).join(", ")}.` });
@@ -5539,7 +5349,6 @@ function renderDashboard(
   const coordFocus = captureCoordinationFocus(root);
   root.empty();
   root.addClass("aios-dashboard-root");
-  root.createEl("style", { text: usagePaletteStyles() });
   const undoCtx: UndoCtx = { plugin, isLeafView };
 
   // Incidents strip: the single highest-priority thing on the page when it

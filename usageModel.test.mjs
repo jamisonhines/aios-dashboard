@@ -1,5 +1,4 @@
 import "./testFileTimeout.mjs";
-import { USAGE_PROVIDER_PALETTES, usagePaletteStyles } from './usagePalettes.mjs';
 // Tests for the Usage-tab data model: computeUsageView, computeWorkflowsView,
 // usageWorkflowColorIndex, and formatCompactNumber (pure).
 // Imports the SAME module main.ts bundles (model.mjs). Run: node usageModel.test.mjs
@@ -13,7 +12,7 @@ import {
   USAGE_WORKFLOW_COLOR_COUNT,
   computeUsageWindow,
   usageChartFromWindow,
-  usageDayFamilyBars,
+  usagePeriodBreakdown,
   formatUsageWindowLabel,
   computeSkillsView,
   USAGE_SKILLS_TOP_N,
@@ -253,26 +252,25 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   assert.equal(chart7.days.length, 7, "chart mirrors window length");
   assert.deepEqual(chart7.xLabelIndices, [0, 1, 2, 3, 4, 5, 6], "short windows label every day");
   const segToday = chart7.days[6].segments[0];
-  assert.equal(segToday.family, "claude-5", "legacy Opus model palette slot");
+  assert.equal(segToday.model, "opus", "period breakdown retains model identity");
   assert.equal(segToday.heightFraction, 1, "max-cost day fills the plot");
   const chart30 = usageChartFromWindow(w30.days);
   assert.deepEqual(chart30.xLabelIndices, [0, 7, 14, 21, 28, 29], "long windows label every 7th + last");
 
-  // usageDayFamilyBars: per-family bars for the 1D view.
+  // Single-day periods use the same summed column model.
   const multi = {
     date: "2026-07-14",
     models: { opus: bucket(4), haiku: bucket(1) },
     totalCostUsd: 5,
     totalOutputTokens: 2,
   };
-  const dayBars = usageDayFamilyBars(multi);
-  assert.equal(dayBars.bars.length, 2, "one bar per active family");
-  assert.equal(dayBars.bars[0].family, "claude-5", "model order follows fixed palette slots");
-  assert.equal(dayBars.bars[0].fraction, 1, "costliest family fills the plot");
-  assert.equal(dayBars.bars[1].fraction, 0.25, "other families scale relative to max");
-  assert.equal(dayBars.maxCost, 4, "1d max is the costliest family");
-  const emptyBars = usageDayFamilyBars({ date: "2026-07-13", models: {}, totalCostUsd: 0, totalOutputTokens: 0 });
-  assert.equal(emptyBars.bars.length, 0, "empty day -> no bars");
+  const dayBars = usageChartFromWindow([multi]);
+  assert.equal(dayBars.days.length, 1, "one column per day");
+  assert.equal(dayBars.days[0].segments.length, 2, "every model retained for hover");
+  assert.equal(dayBars.days[0].totalFraction, 1, "summed day fills plot");
+  assert.equal(dayBars.maxCost, 5, "1d max is total day cost");
+  const emptyBars = usageChartFromWindow([{ date: "2026-07-13", models: {}, totalCostUsd: 0, totalOutputTokens: 0 }]);
+  assert.equal(emptyBars.days[0].segments.length, 0, "empty day has no models");
   assert.equal(emptyBars.maxCost, 0, "empty day -> zero max");
 
   // Label helper directly.
@@ -440,7 +438,6 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   // real data, the other 29 days are zero-cost placeholders and contribute
   // nothing to the family totals either way.
   const direct = usageFamilyBreakdown(stats.days);
-  assert.deepEqual(direct.legend, view.legend, "usageFamilyBreakdown legend matches computeUsageView's");
   assert.deepEqual(direct.table, view.table, "usageFamilyBreakdown table matches computeUsageView's");
 }
 
@@ -753,7 +750,7 @@ console.log("usageModel: all assertions passed");
 // --- OpenAI model identities remain visible rather than collapsing into Other. ---
 {
   const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
-  const { legend, table } = usageFamilyBreakdown([
+  const { table } = usageFamilyBreakdown([
     { models: {
       opus: bucket(2),
       "openai-codex/gpt-5.5": bucket(1),
@@ -764,8 +761,7 @@ console.log("usageModel: all assertions passed");
       "openai-codex/unobserved": bucket(6),
     } },
   ]);
-  assert.deepEqual(legend.map((row) => row.label), ["Opus", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "unobserved"], "OpenAI labels strip only their provider prefix");
-  assert.deepEqual(table.slice(1).map((row) => row.family), ["openai-0", "openai-1", "openai-4", "openai-4", "openai-4", "openai-4"], "known identities use explicit steps and overflow uses provider Other, not shared grey");
+  assert.deepEqual(table.map((row) => row.label).sort(), ["Opus", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "unobserved"].sort(), "OpenAI labels strip only their provider prefix");
 }
 
 
@@ -774,7 +770,7 @@ console.log("usageModel: all assertions passed");
 {
   const bucket = (cost) => ({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, messages: 1, costUsd: cost });
   const day = { date: "2026-09-15", models: { "openai-codex/gpt-6-astra": bucket(4) }, totalCostUsd: 4, totalOutputTokens: 1 };
-  const dayBar = usageDayFamilyBars(day).bars[0];
+  const dayBar = usagePeriodBreakdown(usageChartFromWindow([day]).days[0]).rows[0];
   assert.equal(dayBar.model, "openai-codex/gpt-6-astra", "day chart retains its provider-qualified internal model key");
   assert.equal(dayBar.label, "gpt-6-astra", "day chart exposes only the concise model name");
   assert.doesNotMatch(dayBar.label, /openai(?:-codex)?\//, "day chart visible label has no provider prefix");
@@ -782,34 +778,9 @@ console.log("usageModel: all assertions passed");
 }
 
 
-// Renderer contract: all three visible paths (Models table, multi-day chart,
-// and day chart) consume concise labels and never provider-qualified keys.
+// Remaining breakdown tables and cost disclosure retain their contracts.
 {
   const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
-  const table = source.slice(source.indexOf("function renderUsageModelsTable"), source.indexOf("function renderUsageProjectsTable"));
-  assert.match(table, /nameText:\s*" " \+ row\.label/, "Models table text uses the concise label");
-  assert.match(table, /nameTitle:\s*row\.label/, "Models table tooltip uses the concise label");
-  assert.doesNotMatch(table, /nameTitle:\s*row\.model/, "Models table tooltip never uses the provider-qualified key");
-  const tooltip = source.slice(source.indexOf("function usageDayTooltip"), source.indexOf("function renderUsageChart"));
-  assert.match(tooltip, /usageModelLabel\(s\.model \|\| s\.family\)/, "multi-day chart tooltip converts its internal key to a concise label");
-  const dayChart = source.slice(source.indexOf("function renderUsageDayChart"), source.indexOf("// Range buttons"));
-  assert.match(dayChart, /title\.textContent = `\$\{bar\.label\}:[\s\S]*?formatUsageTokenBreakdown\(bar\)/, "day-chart tooltip uses its concise label plus its labeled token breakdown");
-  assert.match(dayChart, /label\.textContent = bar\.label/, "day-chart text uses its concise label");
-  assert.doesNotMatch(`${table}\n${tooltip}\n${dayChart}`, /openai(?:-codex)?\//, "visible Usage render paths contain no provider prefix literal");
-  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
-  const paletteStyles = usagePaletteStyles();
-  for (const mode of ['light', 'dark']) {
-    const colors = Object.values(USAGE_PROVIDER_PALETTES).flatMap(palette => palette[mode]);
-    assert.equal(new Set(colors).size, colors.length, `${mode}: all provider/model steps are unique`);
-  }
-  for (const [provider, palette] of Object.entries(USAGE_PROVIDER_PALETTES)) {
-    for (const [slot, value] of palette.light.entries()) {
-      assert.ok(paletteStyles.includes(`.aios-usage-bar-${provider}-${slot}{fill:${value}}`), `${provider}-${slot} has its exact light chart fill`);
-      assert.ok(paletteStyles.includes(`.aios-usage-dot-${provider}-${slot}{background:${value}}`), `${provider}-${slot} has its exact light legend/table colour`);
-      assert.ok(paletteStyles.includes(`.theme-dark .aios-dashboard-root .aios-usage-bar-${provider}-${slot}{fill:${palette.dark[slot]}}`), `${provider}-${slot} has its exact dark chart fill`);
-    }
-  }
-  assert.match(source, /root\.createEl\("style", \{ text: usagePaletteStyles\(\) \}\)/, 'dashboard installs bundled provider palette styles');
   const tableRenderer = source.slice(source.indexOf("function renderUsageBreakdownTable"), source.indexOf("// Honest per-row suffix"));
   assert.match(tableRenderer, /title:\s*row\.nameTitle \|\| row\.nameText\.trim\(\)/, "table tooltip consumer prefers the full provider-qualified title and only then falls back to concise text");
   assert.match(source, /Claude and known OpenAI values are API-equivalent estimates from input, cache-read, cache-write, and output tokens; they are not subscription billing, allowance, quota, or entitlement\. Known OpenAI Codex estimates deliberately use base rates because transcript fields cannot reliably identify requests above the 272K tier\. Unknown OpenAI models remain labeled but unpriced until their rate card is reviewed\./, "footer identifies graph estimates, the 272K base-tier limitation, and unknown-OpenAI handling");

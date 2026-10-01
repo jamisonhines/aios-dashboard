@@ -1371,22 +1371,6 @@
 /* ---------------------------------------------------------------------
    Usage tab
 --------------------------------------------------------------------- */
-.aios-dashboard-root {
-  /* Model-family colors: accent family + blue/green. Red stays reserved for
-     errors (design r3: semantic colors carry meaning only). */
-  --aios-usage-fable: #c4b5fd;
-  --aios-usage-opus: #7c4dff;
-  --aios-usage-sonnet: #6ca7f4;
-  --aios-usage-haiku: #40d69a;
-  /* Stable OpenAI model slots use the existing non-error chart palette. */
-  --aios-usage-openai-codex-gpt-5-5: #c4b5fd;
-  --aios-usage-openai-codex-gpt-5-6-luna: #7c4dff;
-  --aios-usage-openai-codex-gpt-5-6-sol: #6ca7f4;
-  --aios-usage-openai-codex-gpt-5-6-terra: #40d69a;
-  --aios-usage-openai-codex-gpt-6-astra: #f7b955;
-  --aios-usage-other: var(--aios-faint);
-}
-
 /* Workflow attribution colors: 8 stable slots, indexed by
    usageWorkflowColorIndex() in main.ts so a given workflow key always lands
    on the same color regardless of sort order. Violet-anchored categorical
@@ -1497,6 +1481,7 @@
 }
 
 .aios-dashboard-root .aios-usage-chart-wrap {
+  position: relative;
   border: 1px solid var(--aios-border);
   border-radius: 0;
   background: var(--aios-surface);
@@ -1513,29 +1498,31 @@
   fill: var(--aios-dim);
   font-size: 9px;
 }
-.aios-usage-bar-empty {
+.aios-usage-bar {
+  fill: #9060d0;
+}
+.aios-usage-column-hit {
   fill: transparent;
+  pointer-events: all;
 }
-.aios-usage-bar-fable {
-  fill: var(--aios-usage-fable);
+.aios-dashboard-root .aios-usage-popup {
+  position: absolute;
+  z-index: 20;
+  box-sizing: border-box;
+  padding: 10px;
+  overflow: auto;
+  pointer-events: none;
+  background: var(--aios-surface);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  box-shadow: 0 4px 16px #0003;
+  font-size: 12px;
 }
-.aios-usage-bar-opus {
-  fill: var(--aios-usage-opus);
-}
-.aios-usage-bar-sonnet {
-  fill: var(--aios-usage-sonnet);
-}
-.aios-usage-bar-haiku {
-  fill: var(--aios-usage-haiku);
-}
-.aios-usage-bar-openai-codex-gpt-5-5 { fill: var(--aios-usage-openai-codex-gpt-5-5); }
-.aios-usage-bar-openai-codex-gpt-5-6-luna { fill: var(--aios-usage-openai-codex-gpt-5-6-luna); }
-.aios-usage-bar-openai-codex-gpt-5-6-sol { fill: var(--aios-usage-openai-codex-gpt-5-6-sol); }
-.aios-usage-bar-openai-codex-gpt-5-6-terra { fill: var(--aios-usage-openai-codex-gpt-5-6-terra); }
-.aios-usage-bar-openai-codex-gpt-6-astra { fill: var(--aios-usage-openai-codex-gpt-6-astra); }
-.aios-usage-bar-other {
-  fill: var(--aios-usage-other);
-}
+.aios-dashboard-root .aios-usage-popup-period { font-weight: 600; }
+.aios-dashboard-root .aios-usage-popup-total { margin: 4px 0 8px; }
+.aios-dashboard-root .aios-usage-popup-row { display: flex; justify-content: space-between; gap: 12px; }
+.aios-dashboard-root .aios-usage-popup-row span:first-child { overflow-wrap: anywhere; min-width: 0; }
+.aios-dashboard-root .aios-usage-popup-row span:last-child { white-space: nowrap; }
 
 .aios-dashboard-root .aios-usage-legend {
   display: flex;
@@ -1560,26 +1547,6 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
-}
-.aios-dashboard-root .aios-usage-dot-fable {
-  background: var(--aios-usage-fable);
-}
-.aios-dashboard-root .aios-usage-dot-opus {
-  background: var(--aios-usage-opus);
-}
-.aios-dashboard-root .aios-usage-dot-sonnet {
-  background: var(--aios-usage-sonnet);
-}
-.aios-dashboard-root .aios-usage-dot-haiku {
-  background: var(--aios-usage-haiku);
-}
-.aios-dashboard-root .aios-usage-dot-openai-codex-gpt-5-5 { background: var(--aios-usage-openai-codex-gpt-5-5); }
-.aios-dashboard-root .aios-usage-dot-openai-codex-gpt-5-6-luna { background: var(--aios-usage-openai-codex-gpt-5-6-luna); }
-.aios-dashboard-root .aios-usage-dot-openai-codex-gpt-5-6-sol { background: var(--aios-usage-openai-codex-gpt-5-6-sol); }
-.aios-dashboard-root .aios-usage-dot-openai-codex-gpt-5-6-terra { background: var(--aios-usage-openai-codex-gpt-5-6-terra); }
-.aios-dashboard-root .aios-usage-dot-openai-codex-gpt-6-astra { background: var(--aios-usage-openai-codex-gpt-6-astra); }
-.aios-dashboard-root .aios-usage-dot-other {
-  background: var(--aios-usage-other);
 }
 
 .aios-dashboard-root .aios-usage-subhead {
