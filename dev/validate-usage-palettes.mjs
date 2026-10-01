@@ -32,4 +32,6 @@ for(const mode of ['light','dark']){
 }
 fs.writeFileSync(output,evidence);
 console.log(`${runs} canonical all-pairs validator runs: all exit 0; ${stats.days.length} actual days, both modes, provider palettes and combined palette.`);
-console.log('Folded models: '+JSON.stringify(plan.foldedByProvider));
+console.log('Provider other tails: '+JSON.stringify(Object.fromEntries(Object.entries(plan.foldedByProvider).filter(([p])=>p!=='local'))));
+console.log('Local group members: '+JSON.stringify(plan.foldedByProvider.local));
+console.log('Recent export window: '+plan.ranking.recentStart+' to '+plan.ranking.recentEnd);

@@ -2,6 +2,8 @@ import './testFileTimeout.mjs';
 import assert from 'node:assert/strict';
 import { computeUsageColorPlan,groupUsageDays,usageFamilyBreakdown,usageChartFromWindow,usageDayFamilyBars } from './model.mjs';
 import { USAGE_PROVIDER_PALETTES } from './usagePalettes.mjs';
+import { candidates } from './dev/search-usage-palettes.mjs';
+import { hue } from './dev/usage-color-math.mjs';
 const bucket=n=>({inputTokens:n,cacheReadTokens:n*2,cacheWriteTokens:n*3,outputTokens:n*4,messages:1,costUsd:n/100});
 const recent=Array.from({length:12},(_,i)=>`openai-codex/recent-${String(i).padStart(2,'0')}`);
 const days=[
@@ -12,15 +14,17 @@ const days=[
 ];
 const plan=computeUsageColorPlan(days,{});
 const kept=Object.keys(plan.groups).filter(key=>key.startsWith('openai-codex/')).sort();
-assert.deepEqual(kept,recent.slice(0,USAGE_PROVIDER_PALETTES.openai.light.length-1),'recent 7-day share outranks retired whole-window volume');
-assert.equal(plan.ranking.recentStart,'2026-09-24','recent window includes exactly seven export calendar dates');
 assert.equal(plan.ranking.recentEnd,'2026-09-30','recent window anchored to latest export day, not host clock or filter');
+assert.equal(plan.ranking.recentStart,'2026-09-24','recent window includes exactly seven export calendar dates');
+assert.deepEqual(kept,recent.slice(0,USAGE_PROVIDER_PALETTES.openai.light.length-1),'recent 7-day share outranks retired whole-window volume');
 assert.equal(plan.ranking.byProvider.openai.find(r=>r.model==='openai-codex/outside-seven-days').recentShare,0,'day before recent cutoff has no recent share');
 const tieDays=[
   {date:'2026-09-01',models:{'openai-codex/tie-z':bucket(2),'openai-codex/tie-a':bucket(1)},totalCostUsd:.03},
   {date:'2026-09-30',models:{'openai-codex/tie-z':bucket(10),'openai-codex/tie-a':bucket(10),'openai-codex/key-b':bucket(9),'openai-codex/key-a':bucket(9)},totalCostUsd:.38},
 ];
 const ranking=computeUsageColorPlan(tieDays,{}).ranking.byProvider.openai;
+assert.equal(ranking[0].model,'openai-codex/tie-z','equal recent shares use whole-window share as tie-break');
+assert.equal(ranking[2].model,'openai-codex/key-a','equal recent and whole shares use model key as tie-break');
 assert.deepEqual(ranking.map(r=>r.model),['openai-codex/tie-z','openai-codex/tie-a','openai-codex/key-a','openai-codex/key-b'],'recent-share ties break by whole-window share, then model key');
 assert.ok(Math.abs(ranking.reduce((n,r)=>n+r.recentShare,0)-1)<1e-12,'provider-relative recent shares sum to one');
 const partial=usageFamilyBreakdown([days.at(-1)],'tokens',plan).table;
@@ -30,6 +34,7 @@ const locals=['ollama/local-a','ollama/local-b','qwen-example'];
 const localDays=[{date:'2026-09-30',models:Object.fromEntries(locals.map((m,i)=>[m,{...bucket(i+1),costUsd:0}])),totalCostUsd:0}];
 const localPlan=computeUsageColorPlan(localDays,{});
 assert.equal(USAGE_PROVIDER_PALETTES.local.light.length,1,'one reserved Local colour frees provider palette space');
+assert.equal(Object.keys(localPlan.groups).length,1,'all local models have one chart series');
 assert.deepEqual(Object.values(localPlan.groups).map(g=>g.label),['Local'],'all local models share one named Local chart group');
 assert.equal(new Set(locals.map(m=>localPlan.colors[m].slot)).size,1,'all local models share the same Local slot');
 const grouped=groupUsageDays(localDays,localPlan);
@@ -42,4 +47,5 @@ assert.ok(table.every(r=>r.foldedInto==='Local'),'local table rows identify the 
 assert.equal(usageChartFromWindow(localDays,'tokens',localPlan).days[0].segments.length,1,'multi-day Tokens chart has one Local series');
 assert.deepEqual(usageDayFamilyBars(localDays[0],'tokens',localPlan).bars.map(b=>b.label),['Local'],'single-day Tokens chart has one Local bar');
 assert.equal(usageChartFromWindow(localDays,'cost',localPlan).days[0].segments.length,0,'free Local group does not invent a dollar bar');
+for(const mode of ['light','dark']) for(const candidate of candidates('local',mode)) assert.ok(hue(candidate.hex)>=290&&hue(candidate.hex)<310,'computed Local candidates never overlap the Claude warm hue range');
 console.log('usageRecentPalette.test.mjs: all assertions passed');
