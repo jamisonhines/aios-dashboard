@@ -65,6 +65,11 @@ cases.push(
   { requirement:req[5], description:'drop named folded models from model table', file:'model.mjs',from:'return { legend, table };',to:'return { legend, table: table.filter(row => !row.foldedInto) };',test:'usagePalettePairs.test.mjs' },
   { requirement:req[7], description:'ignore fixed model bindings and allocate by current table order', file:'model.mjs',from:'kept.filter(key => Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key))',to:'kept.filter(() => false)',test:'usagePalettePairs.test.mjs' },
 );
+cases.push(
+  {requirement:req[9],description:'multi-day chart alone drops whole-export folding plan',file:'main.ts',from:'usageChartFromWindow(win.days, view, colorPlan)',to:'usageChartFromWindow(win.days, view)',test:'usageTokenTableRender.test.mjs'},
+  {requirement:req[5],description:'folded chart drops cache-read token bucket',file:'model.mjs',from:'const acc = models[key] ||= usageEmptyBucket();\n      for (const field of Object.keys(acc)) acc[field] += bucket[field] || 0;',to:'const acc = models[key] ||= usageEmptyBucket();\n      for (const field of Object.keys(acc)) if (field !== "cacheReadTokens") acc[field] += bucket[field] || 0;',test:'usagePalettePairs.test.mjs'},
+  {requirement:req[5],description:'folded chart drops API-equivalent cost',file:'model.mjs',from:'const acc = models[key] ||= usageEmptyBucket();\n      for (const field of Object.keys(acc)) acc[field] += bucket[field] || 0;',to:'const acc = models[key] ||= usageEmptyBucket();\n      for (const field of Object.keys(acc)) if (field !== "costUsd") acc[field] += bucket[field] || 0;',test:'usagePalettePairs.test.mjs'},
+);
 const results = [];
 try {
   const libs = path.join(sandbox, 'AIOS', 'Operations', 'scripts', 'lib');
