@@ -16,9 +16,17 @@ const req = [
   "REQ: hovering a column shows that period's per-model breakdown in the active view's unit, largest first.",
   'REQ: an unpriced model shows Unpriced in the Cost view breakdown.',
 ];
+const discoveryCoGuards = 'regular-file traversal; bb root depth; artifact/fork exclusion; bb mtime cutoff';
+const discoveryEdits = to => [
+  { file: exporter, from: '/^(?:thr|pi)_.+\\.jsonl$/', to },
+  { file: exporter, from: 'entry.isFile() && entry.name.endsWith(".jsonl")', to: '(entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".jsonl")' },
+  { file: exporter, from: 'const isThreadTranscript = rel.length === 1 &&', to: 'const isThreadTranscript =' },
+  { file: exporter, from: 'rel.includes("subagent-artifacts") || rel.includes("forks") || (!isThreadTranscript && !isRunTranscript)', to: '!isThreadTranscript && !isRunTranscript' },
+  { file: exporter, from: 'if ((await fs.stat(filePath)).mtimeMs >= cutoffMs) {\n        const sessionId = isThreadTranscript', to: 'if (true) {\n        const sessionId = isThreadTranscript' },
+];
 const cases = [
-  { requirement: req[0], file: exporter, from: '/^(?:thr|pi)_.+\\.jsonl$/', to: '/^thr_.+\\.jsonl$/', test: 'usageBbThreads.test.mjs', description: 'reject pi root transcript' },
-  { requirement: req[1], file: exporter, from: '/^(?:thr|pi)_.+\\.jsonl$/', to: '/^pi_.+\\.jsonl$/', test: 'usageBbThreads.test.mjs', description: 'reject legacy thr root transcript' },
+  { requirement: req[0], edits: discoveryEdits('/^thr_.+\\.jsonl$/'), coGuards: discoveryCoGuards, disabledTogether: discoveryCoGuards, test: 'usageBbThreads.test.mjs', description: 'reject pi root transcript with discovery co-guards disabled' },
+  { requirement: req[1], edits: discoveryEdits('/^pi_.+\\.jsonl$/'), coGuards: discoveryCoGuards, disabledTogether: discoveryCoGuards, test: 'usageBbThreads.test.mjs', description: 'reject legacy thr root transcript with discovery co-guards disabled' },
   { requirement: req[2], file: 'styles.css', from: 'fill: #9060d0;', to: 'fill: #ff0000;', description: 'single usage purple -> red' },
   { requirement: req[2], file: 'main.ts', from: 'class: "aios-usage-bar",', to: 'class: "aios-usage-bar-red",', description: 'column uses non-purple class' },
   { requirement: req[3], file: 'main.ts', from: 'renderUsageChartHost(body, win, viewState, settings.usageView, stats.unpricedOpenAiModels || []);', to: 'renderUsageChartHost(body, win, viewState, settings.usageView, stats.unpricedOpenAiModels || []); body.createEl("table", {text:"Models"});', description: 'restore model table below chart' },
@@ -80,7 +88,7 @@ try {
       assert.notEqual(run.status, 0, `survived mutation: ${mutation.description}`);
       const failure = output.match(/AssertionError \[ERR_ASSERTION\]: ([^\n]+)/)?.[1];
       assert.ok(failure, `must fail by assertion, not infrastructure: ${output}`);
-      const result = { requirement: mutation.requirement, mutation: mutation.description, failLine: `${test}: AssertionError [ERR_ASSERTION]: ${failure}`, output };
+      const result = { requirement: mutation.requirement, mutation: mutation.description, coGuards: mutation.coGuards || 'none', disabledTogether: mutation.disabledTogether || 'n/a', failLine: `${test}: AssertionError [ERR_ASSERTION]: ${failure}`, output };
       results.push(result);
       console.log(`KILLED: ${mutation.description}\nFAIL: ${result.failLine}`);
     } finally { for (const [file, original] of originals) await fs.writeFile(file, original); }
