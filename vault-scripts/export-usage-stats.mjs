@@ -740,6 +740,10 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
     } catch {
       continue;
     }
+    const isCodexUsage = obj?.type === "event_msg" && obj.payload?.type === "token_count";
+    // Isolate conversion failures per event, not per file or export. JSON can
+    // contain objects whose primitive conversion throws (including dates).
+    try {
     if (obj?.type === "turn_context" && typeof obj.payload?.model === "string") codexModel = obj.payload.model;
     if (obj?.type === "event_msg" && obj.payload?.type === "token_count") {
       const info = obj.payload.info;
@@ -815,6 +819,10 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
     };
     entries.push(entry);
     if (obj.type === "assistant") events.push({ type: "usage", replayOrder: entry.replayOrder, entry });
+    } catch (error) {
+      if (!isCodexUsage) throw error;
+      rejectedUsage.record("invalid-codex-event", `${sourceSessionId}:${sourceLine}`);
+    }
   }
   const rawEntries = entries;
   const finalEntries = retainFinalClaudeFragments(rawEntries);
