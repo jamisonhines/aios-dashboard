@@ -7,7 +7,8 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const root = path.dirname(fileURLToPath(import.meta.url));
-const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-view-proofs-'));
+const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-view-proofs-'));
+const dir = path.join(sandbox, 'Projects', 'dashboard');
 const exporter = 'vault-scripts/export-usage-stats.mjs';
 const req = [
   'REQ: gpt-6-sol, gpt-6.1-sol and gpt-6-luna usage is priced from the v2 rate card, not $0.',
@@ -50,6 +51,11 @@ const cases = [
 ];
 const results = [];
 try {
+  const libs = path.join(sandbox, 'AIOS', 'Operations', 'scripts', 'lib');
+  await fs.mkdir(libs, { recursive: true });
+  for (const name of ['coordination-parse.mjs', 'coordination-accounting.mjs']) {
+    await fs.copyFile(path.resolve(root, '../../AIOS/Operations/scripts/lib', name), path.join(libs, name));
+  }
   const files = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
   for (const file of files) {
     await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });
@@ -88,4 +94,4 @@ try {
   }
   if (process.env.USAGE_PROOF_RESULTS) await fs.writeFile(process.env.USAGE_PROOF_RESULTS, JSON.stringify(results, null, 2));
   console.log(`usageViews.mutations: ${results.length}/${cases.length} killed; restored suites green`);
-} finally { await fs.rm(dir, { recursive: true, force: true }); }
+} finally { await fs.rm(sandbox, { recursive: true, force: true }); }
