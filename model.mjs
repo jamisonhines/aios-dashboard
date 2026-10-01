@@ -659,25 +659,47 @@ export const USAGE_FAMILY_LABELS = {
 };
 
 
-// Claude remains grouped by family. OpenAI models retain their full keys in
-// exported data but use concise visible labels and stable palette slots.
-// Unknown model IDs deliberately remain Other grey rather than receiving an
-// accidental semantic color.
-export const USAGE_OPENAI_MODEL_COLORS = {
-  "openai-codex/gpt-5.5": "openai-codex-gpt-5-5",
-  "openai-codex/gpt-5.6-luna": "openai-codex-gpt-5-6-luna",
-  "openai-codex/gpt-5.6-sol": "openai-codex-gpt-5-6-sol",
-  "openai-codex/gpt-5.6-terra": "openai-codex-gpt-5-6-terra",
-  "openai-codex/gpt-6-astra": "openai-codex-gpt-6-astra",
-};
+// Every model retains its full identity. Provider palettes have fixed model
+// slots plus persisted ordered fallback allocation, independent of filtering.
+import { USAGE_PROVIDER_PALETTES, USAGE_EXPLICIT_MODEL_SLOTS } from "./usagePalettes.mjs";
+
+let usageColorAssignments = {};
+export function configureUsageModelColors(assignments) {
+  usageColorAssignments = assignments;
+}
+export function usageModelProvider(key) {
+  if (/^(?:ollama(?:-[^/]*)?|local)\//i.test(key)) return "local";
+  if (/^openai(?:-codex)?\//.test(key)) return "openai";
+  if (/claude/i.test(key) || Object.hasOwn(USAGE_FAMILY_LABELS, key)) return "claude";
+  return "local";
+}
+export function usageModelSlot(key) {
+  if (Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key)) return USAGE_EXPLICIT_MODEL_SLOTS[key];
+  const provider = usageModelProvider(key);
+  const used = new Set(Object.values(USAGE_EXPLICIT_MODEL_SLOTS).filter(s => s.provider === provider).map(s => s.slot));
+  for (const [model, slot] of Object.entries(usageColorAssignments)) {
+    if (model !== key && usageModelProvider(model) === provider) used.add(slot);
+  }
+  const existing = usageColorAssignments[key];
+  if (Number.isInteger(existing) && existing >= 0 && existing < USAGE_PROVIDER_PALETTES[provider].light.length && !used.has(existing)) return { provider, slot: existing };
+  const slot = USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, index) => !used.has(index));
+  if (slot < 0) throw new Error(`Usage ${provider} palette exhausted; add validated steps before displaying more models`);
+  usageColorAssignments[key] = slot;
+  return { provider, slot };
+}
+export function usageTotalTokens(bucket) {
+  return (bucket.inputTokens || 0) + (bucket.cacheReadTokens || 0) + (bucket.cacheWriteTokens || 0) + (bucket.outputTokens || 0);
+}
+export function usageMetric(bucket, view = "cost") {
+  return view === "tokens" ? usageTotalTokens(bucket) : bucket.costUsd;
+}
 
 export function usageModelKeys(models) {
   const keys = Object.keys(models);
-  return [
-    ...USAGE_FAMILY_ORDER.filter((key) => keys.includes(key)),
-    ...Object.keys(USAGE_OPENAI_MODEL_COLORS).filter((key) => keys.includes(key)),
-    ...keys.filter((key) => !USAGE_FAMILY_ORDER.includes(key) && !Object.prototype.hasOwnProperty.call(USAGE_OPENAI_MODEL_COLORS, key)).sort(),
-  ];
+  // Resolve identities before sorting, never derive colour from displayed rank.
+  const slots = new Map(keys.map(key => [key, usageModelSlot(key)]));
+  const providers = ["claude", "openai", "local"];
+  return keys.sort((a, b) => providers.indexOf(slots.get(a).provider) - providers.indexOf(slots.get(b).provider) || slots.get(a).slot - slots.get(b).slot);
 }
 
 export function usageModelLabel(key) {
@@ -686,7 +708,8 @@ export function usageModelLabel(key) {
 }
 
 export function usageModelColorFamily(key) {
-  return USAGE_FAMILY_LABELS[key] ? key : USAGE_OPENAI_MODEL_COLORS[key] || "other";
+  const { provider, slot } = usageModelSlot(key);
+  return `${provider}-${slot}`;
 }
 
 export function usagePad2(n) {
@@ -734,7 +757,7 @@ export function formatUsd(n) {
  * (computeUsageWindow's range-scoped slice), not only the fixed 30-day one --
  * this is what lets the "Model breakdown" table follow the range toggle.
  */
-export function usageFamilyBreakdown(windowDays) {
+export function usageFamilyBreakdown(windowDays, view = "cost") {
   const famTotals = new Map();
   for (const d of windowDays) {
     for (const fam of Object.keys(d.models)) {
@@ -755,10 +778,12 @@ export function usageFamilyBreakdown(windowDays) {
     family: usageModelColorFamily(key),
     label: usageModelLabel(key),
     costUsd: famTotals.get(key).costUsd,
+    totalTokens: usageTotalTokens(famTotals.get(key)),
   }));
 
   const totalCostUsd = modelKeys.reduce((sum, key) => sum + famTotals.get(key).costUsd, 0);
-  const safeTotalCostUsd = totalCostUsd > 0 ? totalCostUsd : 1;
+  const totalMetric = modelKeys.reduce((sum, key) => sum + usageMetric(famTotals.get(key), view), 0);
+  const safeTotalCostUsd = totalMetric > 0 ? totalMetric : 1;
 
   const table = modelKeys.map((key) => {
     const b = famTotals.get(key);
@@ -772,11 +797,12 @@ export function usageFamilyBreakdown(windowDays) {
       cacheReadTokens: b.cacheReadTokens,
       cacheWriteTokens: b.cacheWriteTokens,
       costUsd: b.costUsd,
+      totalTokens: usageTotalTokens(b),
       // Models breakdown section (header/tabs restructure, 2026-08): each
       // row's share of this window's total cost, so the "Models" table can
       // show a % column like the Workflows/Skills tables do without the
       // renderer re-deriving it from a running sum.
-      sharePercent: (b.costUsd / safeTotalCostUsd) * 100,
+      sharePercent: (usageMetric(b, view) / safeTotalCostUsd) * 100,
     };
   });
 
@@ -1022,15 +1048,16 @@ export function computeUsageRangeTiles(windowDays, rangeLabel) {
  * sparse x labels), generalized to any window length. Short windows label
  * every day; long ones label every 7th plus the last.
  */
-export function usageChartFromWindow(windowDays) {
-  const maxCost = Math.max(0, ...windowDays.map((d) => d.totalCostUsd));
+export function usageChartFromWindow(windowDays, view = "cost") {
+  const total = d => Object.values(d.models).reduce((sum, b) => sum + usageMetric(b, view), 0);
+  const maxCost = Math.max(0, ...windowDays.map(total));
   const safeMax = maxCost > 0 ? maxCost : 1;
 
   const chartDays = windowDays.map((d) => {
     const segments = [];
     for (const key of usageModelKeys(d.models)) {
       const bucket = d.models[key];
-      if (!bucket || bucket.costUsd <= 0) continue;
+      if (!bucket || usageMetric(bucket, view) <= 0) continue;
       segments.push({
         model: key,
         family: usageModelColorFamily(key),
@@ -1039,16 +1066,16 @@ export function usageChartFromWindow(windowDays) {
         cacheReadTokens: bucket.cacheReadTokens,
         cacheWriteTokens: bucket.cacheWriteTokens,
         outputTokens: bucket.outputTokens,
-        heightFraction: bucket.costUsd / safeMax,
+        heightFraction: usageMetric(bucket, view) / safeMax,
       });
     }
-    return { date: d.date, totalCostUsd: d.totalCostUsd, totalFraction: d.totalCostUsd / safeMax, segments };
+    return { date: d.date, totalCostUsd: d.totalCostUsd, totalTokens: total(d), totalFraction: total(d) / safeMax, segments };
   });
 
   const gridlines = [1, 0.5, 0].map((frac) => ({
     fraction: frac,
     value: maxCost * frac,
-    label: formatUsd(maxCost * frac),
+    label: view === "tokens" ? formatCompactNumber(maxCost * frac) : formatUsd(maxCost * frac),
   }));
 
   const step = windowDays.length > 10 ? 7 : 1;
@@ -1066,11 +1093,11 @@ export function usageChartFromWindow(windowDays) {
  * that day, fraction relative to the costliest family. Empty days return
  * an empty bars array (the renderer shows an empty-state hint).
  */
-export function usageDayFamilyBars(day) {
+export function usageDayFamilyBars(day, view = "cost") {
   const raw = [];
   for (const key of usageModelKeys(day.models)) {
     const bucket = day.models[key];
-    if (!bucket || bucket.costUsd <= 0) continue;
+    if (!bucket || usageMetric(bucket, view) <= 0) continue;
     raw.push({
       model: key,
       family: usageModelColorFamily(key),
@@ -1082,13 +1109,13 @@ export function usageDayFamilyBars(day) {
       outputTokens: bucket.outputTokens,
     });
   }
-  const maxCost = Math.max(0, ...raw.map((b) => b.costUsd));
+  const maxCost = Math.max(0, ...raw.map((b) => usageMetric(b, view)));
   const safeMax = maxCost > 0 ? maxCost : 1;
-  const bars = raw.map((b) => ({ ...b, fraction: b.costUsd / safeMax }));
+  const bars = raw.map((b) => ({ ...b, totalTokens: usageTotalTokens(b), fraction: usageMetric(b, view) / safeMax }));
   const gridlines = [1, 0.5, 0].map((frac) => ({
     fraction: frac,
     value: maxCost * frac,
-    label: formatUsd(maxCost * frac),
+    label: view === "tokens" ? formatCompactNumber(maxCost * frac) : formatUsd(maxCost * frac),
   }));
   return { date: day.date, bars, maxCost, gridlines };
 }

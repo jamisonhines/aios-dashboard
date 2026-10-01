@@ -1,4 +1,6 @@
 import "./testFileTimeout.mjs";
+process.env.AIOS_USAGE_EXPORT_TEST_MODE = "1";
+process.env.USAGE_EXPORT_TEST_CODEX_ROOT = "/dev/null";
 // Tests for the exporter's workflow classifier (build 2.5 m1). Imports the
 // REAL functions from the repo-canonical exporter (vault-scripts/, deployed
 // to the vault by deploy.sh). Importing the exporter never starts a scan
@@ -880,7 +882,7 @@ const OPENAI_RATE_EXPECTATIONS = {
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
 };
 assert.deepEqual(OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1, OPENAI_RATE_EXPECTATIONS, "versioned card pins every observed OpenAI model");
-assert.equal(OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE, "docs/openai-codex-api-equivalent-v1.md", "rate card names its versioned local provenance artifact");
+assert.equal(OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE, "docs/openai-codex-api-equivalent-v2.md", "rate card names its versioned local provenance artifact");
 {
   const provenance = await fs.readFile(new URL("./docs/openai-codex-api-equivalent-v1.md", import.meta.url), "utf8");
   assert.match(provenance, /openai-codex-api-equivalent-v1/, "provenance artifact names the rate-card version");
@@ -949,8 +951,8 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
     const days = new Map(), projects = new Map(), workflows = new Map(), skills = new Map();
     applyTranscriptToAggregates({ entries, skillRuns: [], projectName: "AIOS", rule: { key: "interactive", label: "Interactive" }, days, projects, workflows, skills });
     const buckets = days.get(localDay(timestamp));
-    assert.equal(buckets.opus.costUsd, 5, "Claude record ignores reported field and retains estimated opus family/key");
-    assert.equal(buckets.other.costUsd, 5, "other-provider record ignores reported field and retains estimated Other family/key");
+    assert.equal(buckets['anthropic/claude-opus'].costUsd, 5, "Claude record ignores reported field and retains its full model key");
+    assert.equal(buckets['other-provider/other-model'].costUsd, 5, "other-provider record ignores reported field and retains its full model key");
   } finally { await fs.unlink(tmpFile); }
 }
 
@@ -1008,7 +1010,7 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
     const models = output.days.flatMap((day) => Object.keys(day.models));
     assert.ok(models.includes("openai/gpt-integration"), "main aggregates Pi discovery output");
     assert.ok(models.includes("openai-codex/gpt-bb"), "main aggregates BB discovery output");
-    assert.deepEqual(output.costSemantics, { claude: "api-equivalent estimate", openai: "api-equivalent estimate", openaiCodex: "api-equivalent estimate", openaiRateCard: "openai-codex-api-equivalent-v1", openaiRateCardProvenance: "docs/openai-codex-api-equivalent-v1.md", openaiCodexTier: "base rates only; transcript fields lack a reliable per-entry 272K threshold discriminator", openaiCodexTierThresholdTokens: 272000, unknownOpenAi: "unpriced; rate card required" }, "serialized graph-cost semantics disclose rate-card provenance and the deliberate 272K base-tier limitation");
+    assert.deepEqual(output.costSemantics, { claude: "api-equivalent estimate", openai: "api-equivalent estimate", openaiCodex: "api-equivalent estimate", openaiRateCard: "openai-codex-api-equivalent-v2", openaiRateCardProvenance: "docs/openai-codex-api-equivalent-v2.md", openaiCodexTier: "base rates only; transcript fields lack a reliable per-entry 272K threshold discriminator", openaiCodexTierThresholdTokens: 272000, unknownOpenAi: "unpriced; rate card required", local: "free; tokens counted" }, "serialized graph-cost semantics disclose rate-card provenance and the deliberate 272K base-tier limitation");
     assert.deepEqual(output.unpricedOpenAiModels, ["openai-codex/gpt-bb", "openai/gpt-integration"], "unknown OpenAI models are explicitly serialized as unpriced rather than silently priced as Claude other");
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
@@ -1261,7 +1263,7 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
   try {
     await main({ vaultRoot, projectsRoot: claudeRoot, piRoot, bbRoot, now: new Date("2026-09-16T12:01:00.000Z") });
     const output = JSON.parse(await fs.readFile(path.join(vaultRoot, "Operations", "usage", "usage-stats.json"), "utf8"));
-    const sonnet = output.days[0].models.sonnet;
+    const sonnet = output.days[0].models['claude-sonnet-5'];
     assert.equal(sonnet.messages, 6, "four streamed IDs plus two missing-ID fallbacks retain six responses");
     assert.equal(sonnet.outputTokens, 115, "final cumulative outputs, file-order tie winner, descending timestamp winner, and message.id grouping are retained");
     assert.equal(output.responseDiagnostics.rawUsageRecords, 10, "diagnostics retain raw fragment count separately");
@@ -1323,7 +1325,7 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
   try {
     await main({ vaultRoot, projectsRoot: claudeRoot, piRoot, bbRoot, now: new Date("2026-09-16T12:01:00.000Z") });
     const output = JSON.parse(await fs.readFile(path.join(vaultRoot, "Operations", "usage", "usage-stats.json"), "utf8"));
-    const opus = output.days[0].models.opus;
+    const opus = output.days[0].models['claude-opus-5'];
     assert.equal(opus.messages, 2, "same Claude message ID in distinct transcripts never collapses");
     assert.equal(opus.outputTokens, 8, "both physical transcripts retain their own final response");
   } finally { await fs.rm(root, { recursive: true, force: true }); }

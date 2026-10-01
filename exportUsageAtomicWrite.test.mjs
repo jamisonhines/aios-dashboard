@@ -1,4 +1,5 @@
 import "./testFileTimeout.mjs";
+process.env.USAGE_EXPORT_TEST_CODEX_ROOT = "/dev/null";
 // Tests for the atomic-publish/single-writer-lock/run-status half of
 // tsk-2026-09-17-024 ("Usage exporter writes the live JSON non-atomically and has no refresh
 // trigger wired"). Spawns the REAL exporter CLI (vault-scripts/export-usage-stats.mjs) as

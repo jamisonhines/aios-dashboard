@@ -20,7 +20,7 @@ fs.writeFileSync(stub, [
   "export class Setting {}", "export class TFile {}", "export class TFolder {}", "export class WorkspaceLeaf {}",
   "export const normalizePath = (p) => p;", "export const setIcon = () => {};",
 ].join("\n"));
-fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderUsageModelsTable as models, renderSystemSkillsTable as systemSkills };\n");
+fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderUsageModelsTable as models, renderSystemSkillsTable as systemSkills, renderUsageViewSwitch as viewSwitch, renderUsageChartHost as chartHost, usageDayTooltip as dayTooltip, renderUsageLegend as legend };\n");
 
 function el(tag = "div", options = {}) {
   const node = {
@@ -28,7 +28,14 @@ function el(tag = "div", options = {}) {
     createDiv(o = {}) { const child = el("div", o); this.children.push(child); return child; },
     createSpan(o = {}) { const child = el("span", o); this.children.push(child); return child; },
     createEl(name, o = {}) { const child = el(name, o); this.children.push(child); return child; },
-    addEventListener() {}, hide() {}, show() {}, isShown() { return false; },
+    events: {},
+    addEventListener(name, fn) { this.events[name] = fn; },
+    setAttr(name, value) { this.attrs[name] = value; },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    appendChild(child) { this.children.push(child); },
+    classList: { add() {} },
+    getBoundingClientRect() { return { width: 600 }; },
+    hide() {}, show() {}, isShown() { return false; },
   };
   return node;
 }
@@ -43,7 +50,8 @@ try {
     absWorkingDir: root, entryPoints: [path.basename(entry)], bundle: true, format: "esm", outfile: out, treeShaking: false,
     external: ["electron", "child_process", "node:crypto", "node:fs", "node:path", "@codemirror/*", "@lezer/*"], alias: { obsidian: stub },
   });
-  const { models, systemSkills } = await import(pathToFileURL(out).href);
+  const { models, systemSkills, viewSwitch, chartHost, dayTooltip, legend } = await import(pathToFileURL(out).href);
+  globalThis.document = { createElementNS(_, tag) { return el(tag); } }; 
 
   // Distinct values prove the cells are wired by field, not merely populated.
   const modelsHost = el();
@@ -58,6 +66,46 @@ try {
     ["101", "202", "0", "404", "$5.50", "42%", "7", ""],
     "Models cells map Input, Cache read, Cache write, Output, Cost, Share, and Msgs in that exact order; zero cache write is 0"
   );
+
+  const tokenHost = el();
+  const tokenRow = { model: 'openai-codex/codex-auto-review', label: 'codex-auto-review', family: 'openai-7', inputTokens: 101, cacheReadTokens: 202, cacheWriteTokens: 303, outputTokens: 404, costUsd: 0, sharePercent: 100, messages: 7 };
+  models(tokenHost, [tokenRow], [tokenRow.model], 'tokens');
+  const tokenTable = find(tokenHost, n => n.tag === 'table');
+  assert.equal(tokenTable.children[0].children[0].children[5].text, 'Total tokens', 'Tokens table names its selected metric');
+  assert.deepEqual(tokenTable.children[1].children[0].children.slice(1, 6).map(n => n.text), ['101', '202', '303', '404', '1.0k'], 'Tokens table renders four buckets plus total even for an unpriced model');
+
+  let saved = null;
+  const settings = { usageView: 'cost' };
+  const save = async () => { saved = JSON.parse(JSON.stringify(settings)); };
+  let redraws = 0;
+  const switchHost = el();
+  viewSwitch(switchHost, settings, save, () => redraws++);
+  const tokenButton = find(switchHost, n => n.tag === 'button' && n.text === 'Tokens');
+  tokenButton.events.click();
+  assert.equal(saved?.usageView, 'tokens', 'selected usage view is saved in plugin settings');
+  assert.equal(redraws, 1, 'usage view redraws after selection');
+  const reloaded = JSON.parse(JSON.stringify(saved));
+  const rerender = el();
+  viewSwitch(rerender, reloaded, save, () => {});
+  assert.equal(find(rerender, n => n.text === 'Tokens').attrs['aria-pressed'], 'true', 'selected usage view persists across a re-render');
+  assert.equal(find(rerender, n => n.text === 'Cost ($, API-equivalent)').attrs['aria-pressed'], 'false', 'Cost view is labeled as API-equivalent and inactive after token selection');
+
+  const day = { date: '2026-09-30', models: { [tokenRow.model]: tokenRow }, totalCostUsd: 0, totalOutputTokens: 404 };
+  const win = { label: 'Sep 30', days: [day] };
+  for (const range of ['1d', '7d']) {
+    const host = el();
+    chartHost(host, win, { usageRange: range }, reloaded.usageView);
+    assert.ok(find(host, n => n.tag === 'svg').attrs['aria-label'].toLowerCase().includes('tokens'), `${range} chart receives saved Tokens view`);
+    assert.ok(find(host, n => n.tag === 'text' && n.textContent === '1.0k'), `${range} chart has one token scale`);
+    assert.ok(find(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar aios-usage-bar-openai-7'), `${range} free model has its own colour mark`);
+    const title = find(host, n => n.tag === 'title').textContent;
+    assert.ok(title.includes('Input 101 · Cache read 202 · Cache write 303 · Output 404'), `${range} tooltip retains per-bucket breakdown`);
+    assert.ok(!title.includes('$'), `${range} Tokens tooltip does not display a dollar metric`);
+  }
+  const legendHost = el();
+  legend(legendHost, [{ family: 'openai-7', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
+  assert.ok(find(legendHost, n => n.text === 'codex-auto-review'), 'model legend label remains visible');
+  assert.ok(find(legendHost, n => n.text === '1.0k tokens'), 'legend follows token metric');
 
   // System Skills intentionally remains a six-column table; it gets its own
   // closed six-column CSS map rather than pretending its Cost column aligns

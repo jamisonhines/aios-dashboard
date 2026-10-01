@@ -87,10 +87,10 @@ export function isOpenAiModel(model) {
 }
 
 // Versioned API-equivalent rates in USD per million tokens. See the local,
-// versioned source record at docs/openai-codex-api-equivalent-v1.md: it names
+// versioned source record at docs/openai-codex-api-equivalent-v2.md: it names
 // the exact catalog paths, retrieval date, cache-write semantics, rate tiers,
 // and why this exporter deliberately uses the base tier for every entry.
-export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE = "docs/openai-codex-api-equivalent-v1.md";
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_PROVENANCE = "docs/openai-codex-api-equivalent-v2.md";
 export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1 = {
   "gpt-5.5": { input: 5, cacheRead: 0.5, cacheWrite: 0, output: 30 },
   "gpt-5.6-luna": { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
@@ -98,12 +98,22 @@ export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1 = {
   "gpt-5.6-terra": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
 };
-export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_VERSION = "openai-codex-api-equivalent-v1";
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V2 = {
+  ...OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1,
+  "gpt-6-sol": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+  "gpt-6.1-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
+  "gpt-6-luna": { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
+};
+export const OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_VERSION = "openai-codex-api-equivalent-v2";
+
+export function isLocalModel(model) {
+  return typeof model === "string" && (/^(?:ollama(?:-[^/]*)?|local)\//i.test(model) || /^qwen[^/]*$/i.test(model));
+}
 
 export function openAiApiEquivalentRate(model) {
   if (!isOpenAiModel(model)) return undefined;
   const modelId = model.replace(/^(?:openai|openai-codex)\//, "");
-  return OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V1[modelId];
+  return Object.hasOwn(OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V2, modelId) ? OPENAI_CODEX_API_EQUIVALENT_RATE_CARD_V2[modelId] : undefined;
 }
 
 export function modelFamily(model) {
@@ -122,6 +132,7 @@ export function modelFamily(model) {
  * entry's own timestamp.
  */
 export function estimateCost(family, usage, timestamp, model) {
+  if (isLocalModel(model)) return 0;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
@@ -279,6 +290,20 @@ async function isCanonicalRegularFileWithin(filePath, expectedRoot) {
   } catch {
     return false;
   }
+}
+
+// Codex canonical sessions are date-partitioned regular files. Do not follow
+// directory or file symlinks, even when their lexical names fit the schema.
+export async function findCodexTranscripts(root, cutoffMs) {
+  const files = [];
+  for (const filePath of await walkJsonlFiles(root)) {
+    const rel = path.relative(root, filePath);
+    if (!/^\d{4}[/\\]\d{2}[/\\]\d{2}[/\\][^/\\]+\.jsonl$/.test(rel)) continue;
+    if (!(await isCanonicalRegularFileWithin(filePath, root))) continue;
+    if ((await fs.stat(filePath)).mtimeMs < cutoffMs) continue;
+    files.push({ filePath, project: "codex", sessionId: path.basename(filePath, ".jsonl"), sourceSessionId: rootNamespacedSourceId("codex", root, filePath), isTopLevel: true });
+  }
+  return files;
 }
 
 export async function findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs) {
@@ -698,6 +723,8 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
   // it from a later one.
   let attributionAgent;
   let currentProvider;
+  let codexModel;
+  const codexTotalsSeen = new Set();
   // Preserve transcript event order but do not mutate skill state until the
   // retained ledger is known. A rejected duplicate must be invisible to both
   // totals and command-body injection state.
@@ -712,6 +739,29 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
       obj = JSON.parse(line);
     } catch {
       continue;
+    }
+    if (obj?.type === "turn_context" && typeof obj.payload?.model === "string") codexModel = obj.payload.model;
+    if (obj?.type === "event_msg" && obj.payload?.type === "token_count") {
+      const info = obj.payload.info;
+      const last = info?.last_token_usage;
+      if (!last || !codexModel) continue;
+      // token_count is also emitted for rate-limit refreshes. The cumulative
+      // record is an identity only, NEVER an additional usage amount.
+      const identity = info.total_token_usage ? JSON.stringify(info.total_token_usage) : `${obj.timestamp}:${JSON.stringify(last)}`;
+      if (codexTotalsSeen.has(identity)) continue;
+      codexTotalsSeen.add(identity);
+      if (!Number.isFinite(last.input_tokens) || !Number.isFinite(last.cached_input_tokens) || last.cached_input_tokens > last.input_tokens) {
+        rejectedUsage.record("invalid-codex-input", `${sourceSessionId}:${sourceLine}`);
+        continue;
+      }
+      obj = { type: "assistant", timestamp: obj.timestamp, message: {
+        model: codexModel, provider: "openai-codex", usage: {
+          input_tokens: last.input_tokens - last.cached_input_tokens,
+          cache_read_input_tokens: last.cached_input_tokens,
+          cache_creation_input_tokens: last.cache_write_input_tokens ?? 0,
+          output_tokens: last.output_tokens,
+        },
+      } };
     }
     if (attributionAgent === undefined && typeof obj?.attributionAgent === "string" && obj.attributionAgent) {
       attributionAgent = obj.attributionAgent;
@@ -1100,7 +1150,7 @@ export function applyTranscriptToAggregates({
 
   for (const e of entries) {
     const family = modelFamily(e.model);
-    const modelKey = isOpenAiModel(e.model) ? e.model : family;
+    const modelKey = e.model;
     const cost = estimateCost(family, e, e.timestamp, e.model);
     const dayKey = localDay(e.timestamp);
 
@@ -1139,7 +1189,7 @@ export function applyTranscriptToAggregates({
 function createResponseDiagnostics() {
   const byProviderModel = new Map();
   const record = (entry, retained) => {
-    const provider = /claude/i.test(entry.model || "") ? "claude" : isOpenAiModel(entry.model) ? "openai" : "other";
+    const provider = isLocalModel(entry.model) ? "local" : /claude/i.test(entry.model || "") ? "claude" : isOpenAiModel(entry.model) ? "openai" : "other";
     const key = `${provider}\u0000${entry.model}`;
     if (!byProviderModel.has(key)) byProviderModel.set(key, { provider, model: entry.model, rawUsageRecords: 0, retainedResponses: 0, rawTokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, retainedTokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, rawCostUsd: 0, retainedCostUsd: 0 });
     const row = byProviderModel.get(key);
@@ -1383,6 +1433,7 @@ export async function main({
   projectsRoot = usageTestEnv("USAGE_EXPORT_TEST_PROJECTS_ROOT") || path.join(os.homedir(), ".claude", "projects"),
   piRoot = usageTestEnv("USAGE_EXPORT_TEST_PI_ROOT") || path.join(os.homedir(), ".pi", "agent", "sessions"),
   bbRoot = usageTestEnv("USAGE_EXPORT_TEST_BB_ROOT") || path.join(os.homedir(), ".bb", "pi-bridge-sessions"),
+  codexRoot = usageTestEnv("USAGE_EXPORT_TEST_CODEX_ROOT") || path.join(os.homedir(), ".codex", "sessions"),
   now = new Date(),
   lockWaitMs = usageTestNumber("USAGE_EXPORT_TEST_LOCK_WAIT_MS", 1000),
 } = {}) {
@@ -1590,6 +1641,7 @@ export async function main({
   const transcripts = [
     ...(await findTranscripts(projectsRoot, cutoffMs)),
     ...(await findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs)),
+    ...(await findCodexTranscripts(codexRoot, cutoffMs)),
   ];
   const canonicalTranscripts = [...new Map(transcripts.map((t) => [path.resolve(t.filePath), t])).values()];
   const bridgeSessionIds = await loadBridgeSessionIds();
@@ -1772,6 +1824,7 @@ export async function main({
       openaiCodexTier: "base rates only; transcript fields lack a reliable per-entry 272K threshold discriminator",
       openaiCodexTierThresholdTokens: 272000,
       unknownOpenAi: "unpriced; rate card required",
+      local: "free; tokens counted", 
     },
     unpricedOpenAiModels,
     dedupe: { skippedUsageRecords: usageDedupe.collisions.length, collisions: usageDedupe.collisions },

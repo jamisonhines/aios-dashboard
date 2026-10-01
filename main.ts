@@ -55,6 +55,9 @@ import {
   usageRunWarnings,
   computeUsageWindow,
   usageChartFromWindow,
+  configureUsageModelColors,
+  usageModelSlot,
+  usageTotalTokens,
   usageDayFamilyBars,
   computeWorkflowSpikes,
   computeSpendSparkline,
@@ -146,6 +149,8 @@ interface AiosDashboardSettings {
   ideAutoSession: boolean; // auto-open a terminal in the IDE and paste-run the claude command
   ideSessionTarget: "terminal" | "extension"; // where auto-session runs: integrated terminal (claude CLI) or the Claude Code extension panel
   ideNewSessionCommand: string; // command-palette entry used for the extension target
+  usageView: "cost" | "tokens";
+  usageModelColors: Record<string, number>;
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
@@ -183,6 +188,8 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   ideAutoSession: false,
   ideSessionTarget: "terminal",
   ideNewSessionCommand: "Claude Code: New Session",
+  usageView: "cost",
+  usageModelColors: {},
   usageStatsPath: "Operations/usage/usage-stats.json",
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
@@ -693,6 +700,8 @@ interface HealthInput {
 // supporting constants/helpers now live in model.mjs, imported above.
 // ---------------------------------------------------------------------------
 
+import { usagePaletteStyles } from "./usagePalettes.mjs";
+
 interface UsageFamilyBucket {
   inputTokens: number;
   outputTokens: number;
@@ -825,6 +834,7 @@ interface UsageChartSegment {
 
 interface UsageChartDay {
   date: string;
+  totalTokens?: number;
   totalCostUsd: number;
   totalFraction: number;
   segments: UsageChartSegment[];
@@ -847,6 +857,7 @@ interface UsageLegendItem {
   family: string;
   label: string;
   costUsd: number;
+  totalTokens?: number;
 }
 
 interface UsageTableRow {
@@ -2947,11 +2958,11 @@ function formatUsageTokenBreakdown(bucket: Pick<UsageFamilyBucket, "inputTokens"
 }
 
 // "YYYY-MM-DD: $X.XX (Opus $a · Input ..., ...)" tooltip text for a chart bar.
-function usageDayTooltip(day: UsageChartDay): string {
+function usageDayTooltip(day: UsageChartDay, view: "cost" | "tokens" = "cost"): string {
   const parts = day.segments
-    .map((s) => `${usageModelLabel(s.model || s.family)} ${formatUsd(s.costUsd)} · ${formatUsageTokenBreakdown(s)}`)
+    .map((s) => `${usageModelLabel(s.model || s.family)} ${view === "tokens" ? formatCompactNumber(usageTotalTokens(s)) + " tokens" : formatUsd(s.costUsd)} · ${formatUsageTokenBreakdown(s)}`)
     .join("; ");
-  return `${day.date}: ${formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
+  return `${day.date}: ${view === "tokens" ? formatCompactNumber(day.totalTokens || 0) + " tokens" : formatUsd(day.totalCostUsd)}` + (parts ? ` (${parts})` : "");
 }
 
 // Inline SVG stacked bar chart over an arbitrary day window, segments stacked
@@ -2961,7 +2972,8 @@ function renderUsageChart(
   container: HTMLElement,
   chart: UsageChart,
   pixelWidth: number,
-  ariaLabel: string
+  ariaLabel: string,
+  view: "cost" | "tokens" = "cost"
 ) {
   const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
   const width = Math.max(320, pixelWidth);
@@ -3006,7 +3018,7 @@ function renderUsageChart(
     const x = marginLeft + i * slot + (slot - barWidth) / 2;
     const g = svgEl("g", { class: "aios-usage-bar-group" });
     const title = svgEl("title", {});
-    title.textContent = usageDayTooltip(day);
+    title.textContent = usageDayTooltip(day, view);
     g.appendChild(title);
 
     let yCursor = baselineY;
@@ -3064,7 +3076,8 @@ function renderUsageDayChart(
     bars: { family: string; label: string; costUsd: number; inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; outputTokens: number; fraction: number }[];
     gridlines: { fraction: number; label: string }[];
   },
-  pixelWidth: number
+  pixelWidth: number,
+  view: "cost" | "tokens" = "cost"
 ) {
   const wrap = container.createDiv({ cls: "aios-usage-chart-wrap" });
   const width = Math.max(320, pixelWidth);
@@ -3077,7 +3090,7 @@ function renderUsageDayChart(
 
   const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height: "180" });
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `API-equivalent estimated cost by model on ${dayBars.date}`);
+  svg.setAttribute("aria-label", `${view === "tokens" ? "Total tokens" : "API-equivalent estimated cost"} by model on ${dayBars.date}`);
   svg.classList.add("aios-usage-svg");
 
   for (const g of dayBars.gridlines) {
@@ -3108,7 +3121,7 @@ function renderUsageDayChart(
     const x = marginLeft + i * slot + (slot - barWidth) / 2;
     const g = svgEl("g", { class: "aios-usage-bar-group" });
     const title = svgEl("title", {});
-    title.textContent = `${bar.label}: ${formatUsd(bar.costUsd)} · ${formatUsageTokenBreakdown(bar)}`;
+    title.textContent = `${bar.label}: ${view === "tokens" ? formatCompactNumber(usageTotalTokens(bar)) + " tokens" : formatUsd(bar.costUsd)} · ${formatUsageTokenBreakdown(bar)}`;
     g.appendChild(title);
     const barHeight = Math.max(1, bar.fraction * plotHeight);
     g.appendChild(
@@ -3147,6 +3160,20 @@ function renderUsageDayChart(
 // Range buttons (Phase 1 System-browser range toggle, 2026-08-04): 1D/7D/30D
 // plus ALL, everything the exporter scanned. Order matches USAGE_RANGE_DAYS.
 const USAGE_RANGE_OPTIONS = ["1d", "7d", "30d", "all"] as const;
+
+function renderUsageViewSwitch(container: HTMLElement, settings: AiosDashboardSettings, saveSettings: () => Promise<void>, redraw: () => void) {
+  const controls = container.createDiv({ cls: "aios-usage-range aios-usage-view-switch" });
+  controls.setAttr("aria-label", "Usage measurement");
+  for (const [view, label] of [["cost", "Cost ($, API-equivalent)"], ["tokens", "Tokens"]] as const) {
+    const button = controls.createEl("button", { cls: "aios-usage-range-btn" + (settings.usageView === view ? " aios-usage-range-on" : ""), text: label });
+    button.setAttr("aria-pressed", String(settings.usageView === view));
+    button.addEventListener("click", () => {
+      settings.usageView = view;
+      void saveSettings();
+      redraw();
+    });
+  }
+}
 
 // Period bar: range toggle + prev/next paging + the human period label
 // ("Last 7 days") + the concrete date-range label ("Jul 8 - Jul 14"). Lives
@@ -3227,29 +3254,31 @@ function renderUsagePeriodBar(
 function renderUsageChartHost(
   container: HTMLElement,
   win: ReturnType<typeof computeUsageWindow>,
-  viewState: ViewState
+  viewState: ViewState,
+  view: "cost" | "tokens" = "cost"
 ) {
   const chartHost = container.createDiv({ cls: "aios-usage-chart-host" });
   const width = Math.floor(chartHost.getBoundingClientRect().width) || container.clientWidth || 600;
   if (viewState.usageRange === "1d") {
-    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0]), width);
+    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0], view), width, view);
   } else {
     renderUsageChart(
       chartHost,
-      usageChartFromWindow(win.days),
+      usageChartFromWindow(win.days, view),
       width,
-      `Daily API-equivalent estimated cost, ${win.label}, stacked by model family`
+      `Daily ${view === "tokens" ? "total tokens" : "API-equivalent estimated cost"}, ${win.label}, stacked by model`,
+      view
     );
   }
 }
 
-function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
+function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[], view: "cost" | "tokens" = "cost") {
   const row = container.createDiv({ cls: "aios-usage-legend" });
   for (const item of legend) {
     const pill = row.createDiv({ cls: "aios-usage-legend-item" });
     pill.createSpan({ cls: "aios-usage-dot aios-usage-dot-" + item.family });
     pill.createSpan({ cls: "aios-usage-legend-label", text: item.label });
-    pill.createSpan({ cls: "aios-usage-legend-cost", text: formatUsd(item.costUsd) });
+    pill.createSpan({ cls: "aios-usage-legend-cost", text: view === "tokens" ? formatCompactNumber(item.totalTokens || 0) + " tokens" : formatUsd(item.costUsd) });
   }
 }
 
@@ -3262,14 +3291,14 @@ function renderUsageLegend(container: HTMLElement, legend: UsageLegendItem[]) {
 // comment). Follows the selected range like every other section on this
 // tab: `table` is already range-scoped by the caller (usageFamilyBreakdown
 // over the selected window's days).
-function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], unpriced: string[] = []) {
+function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], unpriced: string[] = [], view: "cost" | "tokens" = "cost") {
   if (table.length === 0) {
     renderEmptyState(container, "No model usage in this period.");
     return;
   }
   renderUsageBreakdownTable(
     container,
-    ["Model", "Input", "Cache read", "Cache write", "Output", "Cost", "Share", "Msgs"],
+    ["Model", "Input", "Cache read", "Cache write", "Output", view === "tokens" ? "Total tokens" : "Cost", "Share", "Msgs"],
     table.map((row) => ({
       nameText: " " + row.label,
       nameTitle: row.label,
@@ -3279,7 +3308,7 @@ function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], 
         formatCompactNumber(row.cacheReadTokens),
         formatCompactNumber(row.cacheWriteTokens),
         formatCompactNumber(row.outputTokens),
-        unpriced.includes(row.model) ? "Unpriced" : formatUsd(row.costUsd),
+        view === "tokens" ? formatCompactNumber(usageTotalTokens(row)) : unpriced.includes(row.model) ? "Unpriced" : formatUsd(row.costUsd),
         Math.round(row.sharePercent) + "%",
         String(row.messages),
       ],
@@ -3613,7 +3642,8 @@ function renderUsageTab(
   // usageRefreshInFlight on every renderDashboard call, so only a full rebuild can un-stick it
   // when a run this tab started (not a header click) settles while the header happens to be
   // showing spinning from some other coincidental re-render.
-  refresh: () => void
+  refresh: () => void,
+  saveSettings: () => Promise<void>
 ) {
   const wrap = container.createDiv({ cls: "aios-usage-tab" });
   wrap.createDiv({ cls: "aios-empty", text: "Loading usage data..." });
@@ -3633,6 +3663,12 @@ function renderUsageTab(
     // range the user is browsing) and the all-time project table (projects
     // have no per-day breakdown to scope by range -- see computeUsageView's
     // note).
+    settings.usageModelColors ||= {};
+    configureUsageModelColors(settings.usageModelColors);
+    const beforeColors = JSON.stringify(settings.usageModelColors);
+    // Allocate from the complete export, not a filtered window or spend rank.
+    for (const key of [...new Set(stats.days.flatMap(day => Object.keys(day.models)))].sort()) usageModelSlot(key);
+    if (JSON.stringify(settings.usageModelColors) !== beforeColors) void saveSettings();
     const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date(), stats.dayTimeZone);
     const todayCostUsd = todayWin.days[0]?.totalCostUsd || 0;
     const projects = computeUsageView(stats, new Date()).projects;
@@ -3804,6 +3840,7 @@ function renderUsageTab(
 
       const win = computeUsageWindow(stats.days || [], viewState.usageRange, viewState.usageOffset, new Date(), stats.dayTimeZone);
       renderUsagePeriodBar(periodbar, win, viewState, draw);
+      renderUsageViewSwitch(periodbar, settings, saveSettings, draw);
       // M4 (Reviewer, 2026-08-04): every subhead/tile below uses the SAME
       // offset-aware label the period bar just showed, so a paged-back
       // window never claims to be "Last 7 days" while the numbers are from
@@ -3816,17 +3853,18 @@ function renderUsageTab(
       // side effect on that map is picked up on the very next redraw, same as `stats` itself.
       renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus, stats.generatedAt || null));
       renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
-      renderUsageChartHost(body, win, viewState);
+      renderUsageChartHost(body, win, viewState, settings.usageView);
 
-      const breakdown = usageFamilyBreakdown(win.days);
-      renderUsageLegend(body, breakdown.legend);
+      const breakdown = usageFamilyBreakdown(win.days, settings.usageView);
+      renderUsageLegend(body, breakdown.legend, settings.usageView);
       body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
-      renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || []);
+      renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || [], settings.usageView);
       const excluded = stats.rejectedUsage?.rejectedRecords || 0;
       if (excluded) body.createDiv({ cls: "aios-usage-quality", text: `${excluded} usage record(s) excluded for schema or temporal validation.` });
       if ((stats.unpricedOpenAiModels || []).length) body.createDiv({ cls: "aios-usage-quality", text: `Unpriced models: ${(stats.unpricedOpenAiModels || []).join(", ")}.` });
 
       const workflowsView = computeWorkflowsViewForRange(stats, win.days, viewState.usageRange);
+      body.createDiv({ cls: "aios-usage-subhead", text: "Other breakdowns (API-equivalent cost estimates)" });
       renderUsageWorkflowsSection(body, workflowsView, spikeAlerts, scopedLabel);
 
       renderUsageSkillsSection(body, stats, win, viewState);
@@ -3834,7 +3872,7 @@ function renderUsageTab(
       renderUsageProjectsTable(body, projects);
       body.createDiv({
         cls: "aios-foot",
-        text: "Claude and known OpenAI values are API-equivalent estimates from input, cache-read, cache-write, and output tokens; they are not subscription billing, allowance, quota, or entitlement. Known OpenAI Codex estimates deliberately use base rates because transcript fields cannot reliably identify requests above the 272K tier. Unknown OpenAI models remain labeled but unpriced until their rate card is reviewed. Cache-write zero is a normalized numeric value and does not prove the original API field was absent. Rate assurance is incomplete: the local historical v1 card is retained, while current official-source comparisons conflict for GPT-5.6 Sol and GPT-5.5 cache writes; no effective date is inferred.",
+        text: "Claude and known OpenAI values are API-equivalent estimates from input, cache-read, cache-write, and output tokens; they are not subscription billing, allowance, quota, or entitlement. Known OpenAI Codex estimates deliberately use base rates because transcript fields cannot reliably identify requests above the 272K tier. Unknown OpenAI models remain labeled but unpriced until their rate card is reviewed. Cache-write zero is a normalized numeric value and does not prove the original API field was absent. The v2 rate card retains historical v1 rows and adds current models from the active local catalog. The installed provider catalog has not yet added those models. Local models are free; their tokens are still counted. These estimates are not a bill.",
       });
 
       if (scrollEl) {
@@ -5494,6 +5532,7 @@ function renderDashboard(
   const coordFocus = captureCoordinationFocus(root);
   root.empty();
   root.addClass("aios-dashboard-root");
+  root.createEl("style", { text: usagePaletteStyles() });
   const undoCtx: UndoCtx = { plugin, isLeafView };
 
   // Incidents strip: the single highest-priority thing on the page when it
@@ -5736,7 +5775,7 @@ function renderDashboard(
   } else if (viewState.activeTab === "tasks") {
     renderTasksTab(app, settings.tasksRoot, body, tasks, buckets, viewState, refresh, undoCtx);
   } else if (viewState.activeTab === "usage") {
-    renderUsageTab(app, body, usagePeriodbarHost as HTMLElement, settings, viewState, refresh);
+    renderUsageTab(app, body, usagePeriodbarHost as HTMLElement, settings, viewState, refresh, () => plugin.saveSettings());
   } else if (viewState.activeTab === "system") {
     renderSystemTab(app, body, settings, viewState, plugin);
   } else if (viewState.activeTab === "opsmap") {

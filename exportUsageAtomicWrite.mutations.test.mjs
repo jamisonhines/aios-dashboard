@@ -1,4 +1,5 @@
 import "./testFileTimeout.mjs";
+process.env.USAGE_EXPORT_TEST_CODEX_ROOT = "/dev/null";
 // Opt-in mutation-proof suite for the exporter fixes in exportUsageAtomicWrite.test.mjs.
 // NOT part of `npm test` -- run explicitly with `npm run test:mutations`.
 //
