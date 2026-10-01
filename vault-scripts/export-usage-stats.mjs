@@ -741,6 +741,7 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
       continue;
     }
     const isCodexUsage = obj?.type === "event_msg" && obj.payload?.type === "token_count";
+    let codexIdentity;
     // Isolate conversion failures per event, not per file or export. JSON can
     // contain objects whose primitive conversion throws (including dates).
     try {
@@ -748,12 +749,18 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
     if (obj?.type === "event_msg" && obj.payload?.type === "token_count") {
       const info = obj.payload.info;
       const last = info?.last_token_usage;
-      if (!last || !codexModel) continue;
-      // token_count is also emitted for rate-limit refreshes. The cumulative
-      // record is an identity only, NEVER an additional usage amount.
-      const identity = info.total_token_usage ? JSON.stringify(info.total_token_usage) : `${obj.timestamp}:${JSON.stringify(last)}`;
-      if (codexTotalsSeen.has(identity)) continue;
-      codexTotalsSeen.add(identity);
+      const candidateId = `${sourceSessionId}:${sourceLine}`;
+      const total = info?.total_token_usage;
+      if (total == null) { rejectedUsage.record("missing-codex-total", candidateId); continue; }
+      if (typeof total !== "object" || Array.isArray(total)
+        || !["input_tokens", "cached_input_tokens", "output_tokens", "total_tokens"].every(key => Object.hasOwn(total, key))
+        || !Object.values(total).every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+        rejectedUsage.record("invalid-codex-total", candidateId); continue;
+      }
+      if (!last || !codexModel) { rejectedUsage.record("invalid-codex-usage", candidateId); continue; }
+      // Cumulative counters identify refreshes only. Sort numeric field names
+      // canonically; neither JSON insertion order nor timestamps are identity.
+      codexIdentity = JSON.stringify(Object.keys(total).sort().map(key => [key, total[key]]));
       if (!Number.isFinite(last.input_tokens) || !Number.isFinite(last.cached_input_tokens) || last.cached_input_tokens > last.input_tokens) {
         rejectedUsage.record("invalid-codex-input", `${sourceSessionId}:${sourceLine}`);
         continue;
@@ -802,6 +809,11 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
     const entryMs = new Date(timestamp).getTime();
     if (Number.isNaN(entryMs)) { rejectedUsage.record("invalid-timestamp", candidateId); continue; }
     if (entryMs < cutoffMs || entryMs > upperBoundMs) { rejectedUsage.record("outside-temporal-window", candidateId); continue; }
+    // Rejected events must never reserve an identity ahead of a valid refresh.
+    if (codexIdentity !== undefined) {
+      if (codexTotalsSeen.has(codexIdentity)) continue;
+      codexTotalsSeen.add(codexIdentity);
+    }
     const entry = { timestamp, model, ...normalizedUsage,
       provider: typeof messageProvider === "string" ? messageProvider : "",
       responseId: typeof obj.message?.responseId === "string" ? obj.message.responseId : typeof obj.responseId === "string" ? obj.responseId : "",

@@ -49,4 +49,35 @@ try {
     assert.equal(stats.days[0].models['openai-codex/gpt-6-sol'].messages, 2, 'both valid Codex events export');
     assert.equal(stats.rejectedUsage.rejectedRecords, 3, 'main publishes rejected diagnostics');
   });
+  await check('canonical refresh identity', async () => {
+    const file = path.join(root, 'canonical.jsonl');
+    const reordered = Object.fromEntries(Object.entries(counters).reverse());
+    await writeLines(file, [context, event(), event('2026-09-30T12:00:01Z', counters, reordered)]);
+    const parsed = await parseTranscript(file, 0);
+    assert.equal(parsed.entries.length, 1, 'reordered cumulative refresh is charged once');
+    assert.equal(parsed.entries[0].input_tokens + parsed.entries[0].cache_read_input_tokens + parsed.entries[0].output_tokens, 107);
+  });
+  await check('rejection does not reserve identity', async () => {
+    const file = path.join(root, 'rejected-first.jsonl');
+    for (const [label, rejected, cutoff, upper] of [
+      ['invalid timestamp', event('invalid'), 0, Infinity],
+      ['throwing timestamp', event({ toString: null, valueOf: null }), 0, Infinity],
+      ['bad usage', event(timestamp, { ...counters, output_tokens: 'bad' }), 0, Infinity],
+      ['before cutoff', event('2026-09-29T12:00:00Z'), Date.parse('2026-09-30'), Infinity],
+      ['after upper bound', event('2026-10-02T12:00:00Z'), 0, Date.parse('2026-10-01')],
+    ]) {
+      await writeLines(file, [context, rejected, event()]);
+      const parsed = await parseTranscript(file, cutoff, { upperBoundMs: upper });
+      assert.equal(parsed.entries.length, 1, `${label}: valid refresh survives earlier rejection`);
+      assert.equal(parsed.rejectedUsage.serialize().rejectedRecords, 1, `${label}: rejected counter increments`);
+    }
+  });
+  await check('missing cumulative usage rejected', async () => {
+    const file = path.join(root, 'missing-total.jsonl');
+    const missing = event(); delete missing.payload.info.total_token_usage;
+    await writeLines(file, [context, missing, { ...missing, timestamp: '2026-09-30T12:00:01Z' }]);
+    const parsed = await parseTranscript(file, 0);
+    assert.equal(parsed.entries.length, 0, 'missing cumulative usage is never charged');
+    assert.deepEqual(parsed.rejectedUsage.serialize(), { rejectedRecords: 2, reasons: { 'missing-codex-total': 2 } }, 'missing cumulative diagnostic counts both records');
+  });
 } finally { await fs.rm(root, { recursive: true, force: true }); }
