@@ -68,7 +68,7 @@ try {
   );
 
   const tokenHost = el();
-  const tokenRow = { model: 'openai-codex/codex-auto-review', label: 'codex-auto-review', family: 'openai-7', inputTokens: 101, cacheReadTokens: 202, cacheWriteTokens: 303, outputTokens: 404, costUsd: 0, sharePercent: 100, messages: 7 };
+  const tokenRow = { model: 'openai-codex/codex-auto-review', label: 'codex-auto-review', family: 'openai-3', inputTokens: 101, cacheReadTokens: 202, cacheWriteTokens: 303, outputTokens: 404, costUsd: 0, sharePercent: 100, messages: 7 };
   models(tokenHost, [tokenRow], [tokenRow.model], 'tokens');
   const tokenTable = find(tokenHost, n => n.tag === 'table');
   assert.equal(tokenTable.children[0].children[0].children[5].text, 'Total tokens', 'Tokens table names its selected metric');
@@ -97,13 +97,13 @@ try {
     chartHost(host, win, { usageRange: range }, reloaded.usageView);
     assert.ok(find(host, n => n.tag === 'svg').attrs['aria-label'].toLowerCase().includes('tokens'), `${range} chart receives saved Tokens view`);
     assert.ok(find(host, n => n.tag === 'text' && n.textContent === '1.0k'), `${range} chart has one token scale`);
-    assert.ok(find(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar aios-usage-bar-openai-7'), `${range} free model has its own colour mark`);
+    assert.ok(find(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar aios-usage-bar-openai-3'), `${range} free model has its own colour mark`);
     const title = find(host, n => n.tag === 'title').textContent;
     assert.ok(title.includes('Input 101 · Cache read 202 · Cache write 303 · Output 404'), `${range} tooltip retains per-bucket breakdown`);
     assert.ok(!title.includes('$'), `${range} Tokens tooltip does not display a dollar metric`);
   }
   const legendHost = el();
-  legend(legendHost, [{ family: 'openai-7', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
+  legend(legendHost, [{ family: 'openai-3', label: 'codex-auto-review', costUsd: 0, totalTokens: 1010 }], 'tokens');
   assert.ok(find(legendHost, n => n.text === 'codex-auto-review'), 'model legend label remains visible');
   assert.ok(find(legendHost, n => n.text === '1.0k tokens'), 'legend follows token metric');
 

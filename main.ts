@@ -56,7 +56,7 @@ import {
   computeUsageWindow,
   usageChartFromWindow,
   configureUsageModelColors,
-  usageModelSlot,
+  computeUsageColorPlan,
   usageTotalTokens,
   usageDayFamilyBars,
   computeWorkflowSpikes,
@@ -871,6 +871,7 @@ interface UsageTableRow {
   cacheWriteTokens: number;
   costUsd: number;
   sharePercent: number;
+  foldedInto?: string;
 }
 
 interface UsageProjectRow {
@@ -3255,16 +3256,17 @@ function renderUsageChartHost(
   container: HTMLElement,
   win: ReturnType<typeof computeUsageWindow>,
   viewState: ViewState,
-  view: "cost" | "tokens" = "cost"
+  view: "cost" | "tokens" = "cost",
+  colorPlan?: ReturnType<typeof computeUsageColorPlan>
 ) {
   const chartHost = container.createDiv({ cls: "aios-usage-chart-host" });
   const width = Math.floor(chartHost.getBoundingClientRect().width) || container.clientWidth || 600;
   if (viewState.usageRange === "1d") {
-    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0], view), width, view);
+    renderUsageDayChart(chartHost, usageDayFamilyBars(win.days[0], view, colorPlan), width, view);
   } else {
     renderUsageChart(
       chartHost,
-      usageChartFromWindow(win.days, view),
+      usageChartFromWindow(win.days, view, colorPlan),
       width,
       `Daily ${view === "tokens" ? "total tokens" : "API-equivalent estimated cost"}, ${win.label}, stacked by model`,
       view
@@ -3303,6 +3305,7 @@ function renderUsageModelsTable(container: HTMLElement, table: UsageTableRow[], 
       nameText: " " + row.label,
       nameTitle: row.label,
       nameDotClass: "aios-usage-dot-" + row.family,
+      nameSuffix: row.foldedInto ? ` (${row.foldedInto})` : undefined,
       cells: [
         formatCompactNumber(row.inputTokens),
         formatCompactNumber(row.cacheReadTokens),
@@ -3666,12 +3669,13 @@ function renderUsageTab(
     settings.usageModelColors ||= {};
     configureUsageModelColors(settings.usageModelColors);
     const beforeColors = JSON.stringify(settings.usageModelColors);
-    // Allocate from the complete export, not a filtered window or spend rank.
-    for (const key of [...new Set(stats.days.flatMap(day => Object.keys(day.models)))].sort()) usageModelSlot(key);
+    // Choose folds and fallback identities from the entire export once.
+    // Every selected range and both measurement views reuse this plan.
+    const colorPlan = computeUsageColorPlan(stats.days, settings.usageModelColors);
     if (JSON.stringify(settings.usageModelColors) !== beforeColors) void saveSettings();
     const todayWin = computeUsageWindow(stats.days || [], "1d", 0, new Date(), stats.dayTimeZone);
     const todayCostUsd = todayWin.days[0]?.totalCostUsd || 0;
-    const projects = computeUsageView(stats, new Date()).projects;
+    const projects = stats.projects.slice().sort((a,b) => b.costUsd - a.costUsd).slice(0,8);
     const spikeAlerts = computeWorkflowSpikes(stats, new Date());
 
     const periodbar = periodbarHost.createDiv({ cls: "aios-usage-periodbar" });
@@ -3853,10 +3857,12 @@ function renderUsageTab(
       // side effect on that map is picked up on the very next redraw, same as `stats` itself.
       renderUsageRunWarnings(body, usageRunWarnings(usageReadState.get(settings.usageStatsPath), runStatus, stats.generatedAt || null));
       renderUsageTiles(body, computeUsageRangeTiles(win.days, scopedLabel));
-      renderUsageChartHost(body, win, viewState, settings.usageView);
+      renderUsageChartHost(body, win, viewState, settings.usageView, colorPlan);
 
-      const breakdown = usageFamilyBreakdown(win.days, settings.usageView);
+      const breakdown = usageFamilyBreakdown(win.days, settings.usageView, colorPlan);
       renderUsageLegend(body, breakdown.legend, settings.usageView);
+      const folded = Object.entries(colorPlan.foldedByProvider).flatMap(([provider, models]) => models.map(model => `${usageModelLabel(model)} (${provider} other)`));
+      if (folded.length) body.createDiv({ cls: "aios-usage-quality", text: `Chart tails folded by whole-export token share for colour separation: ${folded.join(", ")}. Every model remains named in the table.` });
       body.createDiv({ cls: "aios-usage-subhead", text: "Models (" + scopedLabel + ")" });
       renderUsageModelsTable(body, breakdown.table, stats.unpricedOpenAiModels || [], settings.usageView);
       const excluded = stats.rejectedUsage?.rejectedRecords || 0;

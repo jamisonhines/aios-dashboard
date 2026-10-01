@@ -19,13 +19,13 @@ const bucket = (inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens, co
   const rows = Object.fromEntries(usageFamilyBreakdown(selected.days).table.map((row) => [row.model, row]));
   assert.deepEqual(
     { ...rows.opus, sharePercent: undefined },
-    { model: "opus", family: "claude-9", label: "Opus", messages: 2, inputTokens: 100, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 20, totalTokens: 130, costUsd: 1, sharePercent: undefined },
+    { model: "opus", family: "claude-3", label: "Opus", messages: 2, inputTokens: 100, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 20, totalTokens: 130, costUsd: 1, sharePercent: undefined },
     "Claude row exposes every selected-range bucket; zero cache write remains an honest zero"
   );
   assert.ok(Math.abs(rows.opus.sharePercent - 100 / 3) < 1e-9, "Claude share remains the selected window's cost share");
   assert.deepEqual(
     { ...rows["openai-codex/gpt-6-astra"], sharePercent: undefined },
-    { model: "openai-codex/gpt-6-astra", family: "openai-4", label: "gpt-6-astra", messages: 3, inputTokens: 200, cacheReadTokens: 20, cacheWriteTokens: 2, outputTokens: 30, totalTokens: 252, costUsd: 2, sharePercent: undefined },
+    { model: "openai-codex/gpt-6-astra", family: "openai-0", label: "gpt-6-astra", messages: 3, inputTokens: 200, cacheReadTokens: 20, cacheWriteTokens: 2, outputTokens: 30, totalTokens: 252, costUsd: 2, sharePercent: undefined },
     "provider-qualified OpenAI row has the identical normalized range-scoped fields"
   );
   assert.ok(Math.abs(rows["openai-codex/gpt-6-astra"].sharePercent - 200 / 3) < 1e-9, "OpenAI share remains the selected window's cost share");

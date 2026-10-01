@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { main, estimateCost, openAiApiEquivalentRate, findCodexTranscripts, parseTranscript, applyTranscriptToAggregates } from './vault-scripts/export-usage-stats.mjs';
-import { usageChartFromWindow, usageDayFamilyBars, usageFamilyBreakdown, usageModelColorFamily, usageModelProvider, usageTotalTokens, configureUsageModelColors, usageModelSlot } from './model.mjs';
+import { usageChartFromWindow, usageDayFamilyBars, usageFamilyBreakdown, usageModelColorFamily, usageModelProvider, usageTotalTokens, configureUsageModelColors, usageModelSlot, computeUsageColorPlan } from './model.mjs';
 
 const usage = { input_tokens: 1e6, cache_read_input_tokens: 2e6, cache_creation_input_tokens: 3e6, output_tokens: 4e6 };
 for (const [model, rate, cost] of [
@@ -79,16 +79,19 @@ assert.equal(usageChartFromWindow([day], 'cost').gridlines[0].label, '$4.00', 'C
 assert.equal(usageFamilyBreakdown([day], 'tokens').table[0].totalTokens, 17, 'Tokens table four-bucket total');
 assert.equal(usageFamilyBreakdown([day], 'tokens').table[0].sharePercent, 50, 'Tokens table share uses token total');
 assert.notEqual(usageModelColorFamily('claude-opus-5'), usageModelColorFamily('claude-opus-5-5'), 'same Claude family has distinct colours');
-const unknown1 = usageModelColorFamily('openai-codex/new-example-a');
-const unknown2 = usageModelColorFamily('openai-codex/new-example-b');
+const unknownDays = [{date:'2026-09-30',models:{'openai-codex/new-example-a':bucket,'openai-codex/new-example-b':bucket}}];
+const unknownPlan = computeUsageColorPlan(unknownDays, {});
+const unknown1 = usageModelColorFamily('openai-codex/new-example-a', unknownPlan);
+const unknown2 = usageModelColorFamily('openai-codex/new-example-b', unknownPlan);
 assert.notEqual(unknown1, unknown2, 'fallback models get distinct next provider colours');
 assert.match(unknown1, /^openai-/, 'fallback uses OpenAI palette, not Other grey');
-assert.equal(usageModelColorFamily('openai-codex/new-example-a'), unknown1, 'fallback identity stable after another model');
+assert.equal(usageModelColorFamily('openai-codex/new-example-a', unknownPlan), unknown1, 'fallback identity stable after another model');
 const assignments = {};
 configureUsageModelColors(assignments);
-const persistedColor = usageModelColorFamily('openai-codex/new-persisted');
-configureUsageModelColors(JSON.parse(JSON.stringify(assignments)));
-usageModelColorFamily('openai-codex/new-later');
-assert.equal(usageModelColorFamily('openai-codex/new-persisted'), persistedColor, 'fallback allocation persists across reload and filtering');
-assert.equal(usageModelSlot('openai-codex/new-persisted').slot, 9, 'fallback takes the next unused provider step');
+const persistedDays = [{date:'2026-09-30',models:{'openai-codex/new-persisted':bucket}}];
+const persistedPlan = computeUsageColorPlan(persistedDays, assignments);
+const persistedColor = usageModelColorFamily('openai-codex/new-persisted', persistedPlan);
+const reloadedPlan = computeUsageColorPlan(persistedDays, JSON.parse(JSON.stringify(assignments)));
+assert.equal(usageModelColorFamily('openai-codex/new-persisted', reloadedPlan), persistedColor, 'fallback allocation persists across reload and filtering');
+assert.equal(reloadedPlan.colors['openai-codex/new-persisted'].slot, 0, 'fallback takes the next unused provider step');
 console.log('usageViews.test.mjs: all assertions passed');

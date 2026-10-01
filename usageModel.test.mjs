@@ -253,7 +253,7 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   assert.equal(chart7.days.length, 7, "chart mirrors window length");
   assert.deepEqual(chart7.xLabelIndices, [0, 1, 2, 3, 4, 5, 6], "short windows label every day");
   const segToday = chart7.days[6].segments[0];
-  assert.equal(segToday.family, "claude-9", "legacy Opus model palette slot");
+  assert.equal(segToday.family, "claude-3", "legacy Opus model palette slot");
   assert.equal(segToday.heightFraction, 1, "max-cost day fills the plot");
   const chart30 = usageChartFromWindow(w30.days);
   assert.deepEqual(chart30.xLabelIndices, [0, 7, 14, 21, 28, 29], "long windows label every 7th + last");
@@ -267,7 +267,7 @@ assert.equal(formatCompactNumber(-2500), "-2.5k", "negative values keep sign");
   };
   const dayBars = usageDayFamilyBars(multi);
   assert.equal(dayBars.bars.length, 2, "one bar per active family");
-  assert.equal(dayBars.bars[0].family, "claude-9", "model order follows fixed palette slots");
+  assert.equal(dayBars.bars[0].family, "claude-3", "model order follows fixed palette slots");
   assert.equal(dayBars.bars[0].fraction, 1, "costliest family fills the plot");
   assert.equal(dayBars.bars[1].fraction, 0.25, "other families scale relative to max");
   assert.equal(dayBars.maxCost, 4, "1d max is the costliest family");
@@ -764,8 +764,8 @@ console.log("usageModel: all assertions passed");
       "openai-codex/unobserved": bucket(6),
     } },
   ]);
-  assert.deepEqual(legend.map((row) => row.label), ["Opus", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "unobserved"], "OpenAI labels strip only their provider prefix");
-  assert.deepEqual(table.slice(1).map((row) => row.family), ["openai-0", "openai-1", "openai-2", "openai-3", "openai-4", "openai-9"], "observed and unknown OpenAI models have stable distinct provider colours");
+  assert.deepEqual(legend.map((row) => row.label), ["Opus", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.6-luna", "unobserved"], "OpenAI labels strip only their provider prefix");
+  assert.deepEqual(table.slice(1).map((row) => row.family), ["openai-0", "openai-1", "openai-2", "openai-3", "openai-3", "openai-3"], "known identities use explicit steps and overflow uses provider Other, not shared grey");
 }
 
 

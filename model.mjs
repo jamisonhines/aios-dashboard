@@ -661,13 +661,14 @@ export const USAGE_FAMILY_LABELS = {
 
 // Every model retains its full identity. Provider palettes have fixed model
 // slots plus persisted ordered fallback allocation, independent of filtering.
-import { USAGE_PROVIDER_PALETTES, USAGE_EXPLICIT_MODEL_SLOTS } from "./usagePalettes.mjs";
+import { USAGE_PROVIDER_PALETTES, USAGE_EXPLICIT_MODEL_SLOTS, USAGE_PROVIDER_LABELS } from "./usagePalettes.mjs";
 
 let usageColorAssignments = {};
 export function configureUsageModelColors(assignments) {
   usageColorAssignments = assignments;
 }
 export function usageModelProvider(key) {
+  if (key.startsWith('usage-group:')) return key.split(':')[1];
   if (/^(?:ollama(?:-[^/]*)?|local)\//i.test(key)) return "local";
   if (/^openai(?:-codex)?\//.test(key)) return "openai";
   if (/claude/i.test(key) || Object.hasOwn(USAGE_FAMILY_LABELS, key)) return "claude";
@@ -683,7 +684,9 @@ export function usageModelSlot(key) {
   const existing = usageColorAssignments[key];
   if (Number.isInteger(existing) && existing >= 0 && existing < USAGE_PROVIDER_PALETTES[provider].light.length && !used.has(existing)) return { provider, slot: existing };
   const slot = USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, index) => !used.has(index));
-  if (slot < 0) throw new Error(`Usage ${provider} palette exhausted; add validated steps before displaying more models`);
+  // Outside a complete export plan, overflow is explicitly provider Other,
+  // not the historical shared grey. The UI always uses a full-export plan.
+  if (slot < 0) return { provider, slot: USAGE_PROVIDER_PALETTES[provider].light.length - 1 };
   usageColorAssignments[key] = slot;
   return { provider, slot };
 }
@@ -694,21 +697,78 @@ export function usageMetric(bucket, view = "cost") {
   return view === "tokens" ? usageTotalTokens(bucket) : bucket.costUsd;
 }
 
-export function usageModelKeys(models) {
+// Resolve colour capacity against the entire export once. Both chart modes,
+// day paging, legend and table consume this SAME plan, never a selected slice.
+export function computeUsageColorPlan(fullDays, assignments = {}) {
+  const totals = new Map();
+  for (const day of fullDays) for (const [model, bucket] of Object.entries(day.models)) {
+    totals.set(model, (totals.get(model) || 0) + usageTotalTokens(bucket));
+  }
+  const colors = {}, foldedByProvider = {}, groups = {};
+  for (const provider of Object.keys(USAGE_PROVIDER_PALETTES)) {
+    const ranked = [...totals].filter(([model]) => usageModelProvider(model) === provider)
+      .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const capacity = USAGE_PROVIDER_PALETTES[provider].light.length;
+    const keepCount = ranked.length > capacity ? capacity - 1 : ranked.length;
+    const kept = ranked.slice(0, keepCount).map(([model]) => model);
+    const folded = ranked.slice(keepCount).map(([model]) => model);
+    foldedByProvider[provider] = folded;
+    const used = new Set(folded.length ? [capacity - 1] : []);
+    // Explicit identities bind first; the table's token rank cannot repaint
+    // them. Unknown kept identities then take persisted next-unused steps.
+    for (const model of kept.filter(key => Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key))) {
+      const fixed = USAGE_EXPLICIT_MODEL_SLOTS[model];
+      if (!used.has(fixed.slot)) { colors[model] = fixed; used.add(fixed.slot); }
+    }
+    for (const model of kept.filter(key => !colors[key]).sort()) {
+      let slot = assignments[model];
+      if (!Number.isInteger(slot) || slot < 0 || slot >= capacity || used.has(slot)) {
+        slot = USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, i) => !used.has(i));
+      }
+      if (slot < 0) throw new Error(`Usage ${provider} colour plan over capacity`);
+      colors[model] = {provider,slot}; assignments[model] = slot; used.add(slot);
+    }
+    for (const model of kept) groups[model] = { label:usageModelLabel(model), members:[model] };
+    if (folded.length) {
+      const group = `usage-group:${provider}:other`;
+      colors[group] = {provider,slot:capacity-1};
+      groups[group] = {label:`${USAGE_PROVIDER_LABELS[provider]} other`,members:folded};
+      for (const model of folded) colors[model] = colors[group];
+    }
+  }
+  return { colors, foldedByProvider, groups };
+}
+export function groupUsageDays(days, plan) {
+  if (!plan) return days;
+  const groupFor = new Map(Object.entries(plan.groups).flatMap(([key, group]) => group.members.map(model => [model,key])));
+  return days.map(day => {
+    const models = {};
+    for (const [model,bucket] of Object.entries(day.models)) {
+      const key = groupFor.get(model);
+      if (!key) throw new Error(`Usage colour plan missing model ${model}`);
+      const acc = models[key] ||= usageEmptyBucket();
+      for (const field of Object.keys(acc)) acc[field] += bucket[field] || 0;
+    }
+    return {...day,models};
+  });
+}
+
+export function usageModelKeys(models, plan) {
   const keys = Object.keys(models);
   // Resolve identities before sorting, never derive colour from displayed rank.
-  const slots = new Map(keys.map(key => [key, usageModelSlot(key)]));
+  const slots = new Map(keys.map(key => [key, plan?.colors[key] || usageModelSlot(key)]));
   const providers = ["claude", "openai", "local"];
-  return keys.sort((a, b) => providers.indexOf(slots.get(a).provider) - providers.indexOf(slots.get(b).provider) || slots.get(a).slot - slots.get(b).slot);
+  return keys.sort((a, b) => providers.indexOf(slots.get(a).provider) - providers.indexOf(slots.get(b).provider) || slots.get(a).slot - slots.get(b).slot || (USAGE_FAMILY_ORDER.includes(a) && USAGE_FAMILY_ORDER.includes(b) ? USAGE_FAMILY_ORDER.indexOf(a) - USAGE_FAMILY_ORDER.indexOf(b) : a.localeCompare(b)));
 }
 
 export function usageModelLabel(key) {
+  if (key.startsWith('usage-group:')) return `${USAGE_PROVIDER_LABELS[usageModelProvider(key)]} other`;
   if (/^openai(?:-codex)?\//.test(key)) return key.replace(/^openai(?:-codex)?\//, "");
   return USAGE_FAMILY_LABELS[key] || key;
 }
 
-export function usageModelColorFamily(key) {
-  const { provider, slot } = usageModelSlot(key);
+export function usageModelColorFamily(key, plan) {
+  const { provider, slot } = plan?.colors[key] || usageModelSlot(key);
   return `${provider}-${slot}`;
 }
 
@@ -757,7 +817,7 @@ export function formatUsd(n) {
  * (computeUsageWindow's range-scoped slice), not only the fixed 30-day one --
  * this is what lets the "Model breakdown" table follow the range toggle.
  */
-export function usageFamilyBreakdown(windowDays, view = "cost") {
+export function usageFamilyBreakdown(windowDays, view = "cost", plan) {
   const famTotals = new Map();
   for (const d of windowDays) {
     for (const fam of Object.keys(d.models)) {
@@ -773,12 +833,16 @@ export function usageFamilyBreakdown(windowDays, view = "cost") {
     }
   }
 
-  const modelKeys = usageModelKeys(Object.fromEntries(famTotals));
-  const legend = modelKeys.map((key) => ({
-    family: usageModelColorFamily(key),
-    label: usageModelLabel(key),
-    costUsd: famTotals.get(key).costUsd,
-    totalTokens: usageTotalTokens(famTotals.get(key)),
+  const modelKeys = usageModelKeys(Object.fromEntries(famTotals), plan);
+  const legendTotals = new Map();
+  for (const day of groupUsageDays(windowDays, plan)) for (const [key,bucket] of Object.entries(day.models)) {
+    const acc = legendTotals.get(key) || usageEmptyBucket();
+    for (const field of Object.keys(acc)) acc[field] += bucket[field] || 0;
+    legendTotals.set(key,acc);
+  }
+  const legend = usageModelKeys(Object.fromEntries(legendTotals), plan).map((key) => ({
+    family: usageModelColorFamily(key, plan), label:usageModelLabel(key),
+    costUsd:legendTotals.get(key).costUsd, totalTokens:usageTotalTokens(legendTotals.get(key)),
   }));
 
   const totalCostUsd = modelKeys.reduce((sum, key) => sum + famTotals.get(key).costUsd, 0);
@@ -789,8 +853,9 @@ export function usageFamilyBreakdown(windowDays, view = "cost") {
     const b = famTotals.get(key);
     return {
       model: key,
-      family: usageModelColorFamily(key),
+      family: usageModelColorFamily(key, plan),
       label: usageModelLabel(key),
+      ...(plan && Object.entries(plan.groups).some(([group, value]) => group !== key && value.members.includes(key)) ? {foldedInto:`${USAGE_PROVIDER_LABELS[usageModelProvider(key)]} other`} : {}),
       messages: b.messages,
       inputTokens: b.inputTokens,
       outputTokens: b.outputTokens,
@@ -1048,19 +1113,20 @@ export function computeUsageRangeTiles(windowDays, rangeLabel) {
  * sparse x labels), generalized to any window length. Short windows label
  * every day; long ones label every 7th plus the last.
  */
-export function usageChartFromWindow(windowDays, view = "cost") {
+export function usageChartFromWindow(windowDays, view = "cost", plan) {
+  windowDays = groupUsageDays(windowDays, plan);
   const total = d => Object.values(d.models).reduce((sum, b) => sum + usageMetric(b, view), 0);
   const maxCost = Math.max(0, ...windowDays.map(total));
   const safeMax = maxCost > 0 ? maxCost : 1;
 
   const chartDays = windowDays.map((d) => {
     const segments = [];
-    for (const key of usageModelKeys(d.models)) {
+    for (const key of usageModelKeys(d.models, plan)) {
       const bucket = d.models[key];
       if (!bucket || usageMetric(bucket, view) <= 0) continue;
       segments.push({
         model: key,
-        family: usageModelColorFamily(key),
+        family: usageModelColorFamily(key, plan),
         costUsd: bucket.costUsd,
         inputTokens: bucket.inputTokens,
         cacheReadTokens: bucket.cacheReadTokens,
@@ -1093,14 +1159,15 @@ export function usageChartFromWindow(windowDays, view = "cost") {
  * that day, fraction relative to the costliest family. Empty days return
  * an empty bars array (the renderer shows an empty-state hint).
  */
-export function usageDayFamilyBars(day, view = "cost") {
+export function usageDayFamilyBars(day, view = "cost", plan) {
+  day = groupUsageDays([day], plan)[0];
   const raw = [];
-  for (const key of usageModelKeys(day.models)) {
+  for (const key of usageModelKeys(day.models, plan)) {
     const bucket = day.models[key];
     if (!bucket || usageMetric(bucket, view) <= 0) continue;
     raw.push({
       model: key,
-      family: usageModelColorFamily(key),
+      family: usageModelColorFamily(key, plan),
       label: usageModelLabel(key),
       costUsd: bucket.costUsd,
       inputTokens: bucket.inputTokens,
