@@ -36,6 +36,7 @@ const localPlan=computeUsageColorPlan(localDays,{});
 assert.equal(USAGE_PROVIDER_PALETTES.local.light.length,1,'one reserved Local colour frees provider palette space');
 assert.equal(Object.keys(localPlan.groups).length,1,'all local models have one chart series');
 assert.deepEqual(Object.values(localPlan.groups).map(g=>g.label),['Local'],'all local models share one named Local chart group');
+assert.deepEqual(Object.keys(localPlan.groups),['usage-group:local:all'],'Local chart identifier is usage-group:local:all, not usage-group:local:other');
 assert.equal(new Set(locals.map(m=>localPlan.colors[m].slot)).size,1,'all local models share the same Local slot');
 const grouped=groupUsageDays(localDays,localPlan);
 assert.equal(Object.keys(grouped[0].models).length,1,'local grouping renders one mark, not overlapping same-colour marks');
