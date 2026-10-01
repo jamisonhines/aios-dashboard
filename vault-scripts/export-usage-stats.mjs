@@ -540,13 +540,19 @@ export function createSkillSegmenter() {
   };
 }
 
-// A usage record's provider/response ID is its strongest identity. Older or
-// partial transcript formats may lack that ID, so their fallback is purposely
-// conservative: root-namespaced transcript source + message identity/time/model/token
-// buckets + normalized assistant prose. The source keeps two otherwise-identical
-// responses from separate transcripts distinct; workflow sessionId is attribution only.
+// Response IDs are strongest. A nonempty message ID plus timestamp, model and
+// every normalized usage bucket reconciles physical copies without merging
+// distinct responses. Only anonymous records keep the source-scoped prose
+// fingerprint; workflow sessionId remains attribution, not response identity.
 export function usageRecordKey(entry) {
   if (entry.responseId) return `response:${entry.provider || ""}\u0000${entry.responseId}`;
+  if (typeof entry.messageId === "string" && entry.messageId.length > 0) {
+    return "message:" + JSON.stringify([
+      entry.messageId, entry.timestamp, entry.model,
+      entry.input_tokens, entry.output_tokens,
+      entry.cache_creation_input_tokens, entry.cache_read_input_tokens,
+    ]);
+  }
   return [
     "fingerprint",
     entry.sourceSessionId || "",

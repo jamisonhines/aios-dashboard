@@ -1100,8 +1100,8 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
-// Semantic dedupe uses provider-qualified response IDs. Fallbacks are scoped
-// to a root-namespaced transcript source, never a workflow session ID.
+// Semantic dedupe uses provider-qualified response IDs. Anonymous fallbacks
+// stay scoped to a transcript source, never a workflow session ID.
 {
   const dedupe = createUsageRecordDedupe();
   const fallback = (sourceSessionId, sourceRef = sourceSessionId) => ({
@@ -1205,7 +1205,7 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
     [duplicateA, [record({ id: "duplicate-a", model: "gpt-cross", responseId: "resp-cross" })]],
     [duplicateB, [record({ id: "duplicate-b", model: "gpt-cross", responseId: "resp-cross", content: "different copy text" })]],
     [proseA, [record({ id: "same-message-id", model: "gpt-prose" })]],
-    [proseB, [record({ id: "same-message-id", model: "gpt-prose" })]],
+    [proseB, [record({ id: "distinct-message-id", model: "gpt-prose" })]],
     [bb, [record({ id: "bb-message", model: "gpt-bb", responseId: "resp-bb" })]],
   ]);
   for (const [file, records] of files) {
@@ -1221,7 +1221,7 @@ assert.equal(estimateCost("other", { input_tokens: 1_000_000, output_tokens: 1_0
     assert.equal(modelMessages["openai-codex/gpt-parent"], 1, "direct Pi parent counts");
     assert.equal(modelMessages["openai-codex/gpt-child"], 1, "canonical Pi child counts once despite its artifact copy");
     assert.equal(modelMessages["openai-codex/gpt-cross"], 1, "cross-path responseId duplicate counts once");
-    assert.equal(modelMessages["openai-codex/gpt-prose"], 2, "identical prose without response IDs remains distinct across source sessions");
+    assert.equal(modelMessages["openai-codex/gpt-prose"], 2, "identical prose with distinct message IDs remains distinct across source sessions");
     assert.equal(modelMessages["openai-codex/gpt-bb"], 1, "canonical BB record remains counted");
     assert.equal(output.dedupe.skippedUsageRecords, 1, "the responseId collision is audited in generated output");
     assert.equal(output.dedupe.collisions[0].kind, "responseId", "the audit identifies the responseId collision strategy");

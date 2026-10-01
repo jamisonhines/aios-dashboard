@@ -12,6 +12,17 @@ const cases = [
   { requirement: viewportReq, file: 'main.ts', from: 'height: pane.clientHeight };', to: 'height: 400 };', test: 'usagePopupViewport.test.mjs', mutation: 'visible viewport height -> constant 400' },
   { requirement: viewportReq, file: 'main.ts', from: 'popupModels = popup.createDiv({ cls: "aios-usage-popup-models" });', to: 'popupModels = popup.createDiv({ cls: "aios-usage-popup-models" }); popupModels.appendChild(header);', test: 'usagePopupViewport.test.mjs', mutation: 'fixed header -> scrolling model list' },
 ];
+const sharedReq = 'REQ: a response without responseId that appears in two discovered transcripts with the same message id, timestamp, model and usage is counted once.';
+const distinctReq = 'REQ: two responses without responseId that differ in message id, timestamp, model or usage are both counted.';
+const messageKey = `return "message:" + JSON.stringify([
+      entry.messageId, entry.timestamp, entry.model,
+      entry.input_tokens, entry.output_tokens,
+      entry.cache_creation_input_tokens, entry.cache_read_input_tokens,
+    ]);`;
+cases.push({ requirement: sharedReq, file: 'vault-scripts/export-usage-stats.mjs', from: 'if (typeof entry.messageId === "string" && entry.messageId.length > 0)', to: 'if (false)', test: 'usageBbNoResponse.test.mjs', mutation: 'disable source-independent message identity' });
+for (const field of ['messageId','timestamp','model','input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens']) {
+  cases.push({ requirement: distinctReq, file: 'vault-scripts/export-usage-stats.mjs', from: messageKey, to: messageKey.replace('entry.'+field, '""'), test: 'usageBbNoResponse.test.mjs', mutation: 'omit distinct response field '+field });
+}
 const results = [];
 try {
   const libs = path.join(temp, 'AIOS/Operations/scripts/lib');
