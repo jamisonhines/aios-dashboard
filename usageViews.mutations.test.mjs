@@ -32,7 +32,7 @@ const cases = [
   { requirement: req[1], description: 'remove unpriced model reporting', file: exporter, from: 'isOpenAiModel(model) && !openAiApiEquivalentRate(model)', to: 'isOpenAiModel(model) && false' },
   { requirement: req[2], description: 'count cached input again as uncached input', file: exporter, from: 'input_tokens: last.input_tokens - last.cached_input_tokens,', to: 'input_tokens: last.input_tokens,' },
   { requirement: req[3], description: 'use cumulative total as last-turn usage', file: exporter, from: 'const last = info?.last_token_usage;', to: 'const last = info?.total_token_usage;' },
-  { requirement: req[3], description: 'count a repeated cumulative refresh as a second turn', file: exporter, from: 'if (codexTotalsSeen.has(identity)) continue;', to: 'if (false) continue;' },
+  { requirement: req[3], description: 'count a repeated cumulative refresh as a second turn', file: exporter, from: 'if (codexTotalsSeen.has(codexIdentity)) continue;', to: 'if (false) continue;' },
   { requirement: req[4], description: 'remove local zero-cost branch', file: exporter, from: 'if (isLocalModel(model)) return 0;', to: 'if (false) return 0;' },
   { requirement: req[4], description: 'drop local input tokens in aggregation', file: exporter, from: 'bucket.inputTokens += e.input_tokens;', to: 'bucket.inputTokens += isLocalModel(e.model) ? 0 : e.input_tokens;' },
   { requirement: req[5], description: 'Tokens metric -> dollar cost', file: 'model.mjs', from: 'return view === "tokens" ? usageTotalTokens(bucket) : bucket.costUsd;', to: 'return bucket.costUsd;' },

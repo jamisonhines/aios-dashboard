@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { main, parseTranscript } from './vault-scripts/export-usage-stats.mjs';
+import { main, parseTranscript, estimateCost, applyTranscriptToAggregates } from './vault-scripts/export-usage-stats.mjs';
 import { computeUsageColorPlan, usageModelColorFamily } from './model.mjs';
 import { USAGE_EXPLICIT_MODEL_SLOTS } from './usagePalettes.mjs';
 
@@ -106,5 +106,40 @@ try {
     const legacyPlan = computeUsageColorPlan(days([unknown, explicit]), legacy);
     assert.equal(legacy[unknown], 0, 'legacy owned assignment is preserved rather than overwritten');
     assert.ok(legacyPlan.foldedByProvider.openai.includes(unknown), 'legacy collision folds, never steals explicit color');
+  });
+  await check('Codex cache write tokens and cost', async () => {
+    const file = path.join(root, 'cache-write.jsonl');
+    const last = { ...counters, cache_write_input_tokens: 13, total_tokens: 120 };
+    await writeLines(file, [context, event(timestamp, last, last)]);
+    const parsed = await parseTranscript(file, 0);
+    assert.equal(parsed.entries.length, 1);
+    const entry = parsed.entries[0];
+    assert.equal(entry.cache_creation_input_tokens, 13, 'Codex nonzero cache write maps to cache creation');
+    const expectedCost = (40 * 2 + 60 * .2 + 13 * 2.5 + 7 * 10) / 1e6;
+    assert.equal(estimateCost('other', entry, undefined, entry.model), expectedCost, 'Codex cache write is priced at its distinct nonzero rate');
+    const days = new Map();
+    applyTranscriptToAggregates({ ...parsed, projectName: 'synthetic', rule: { key: 'interactive', label: 'Interactive' }, days, projects: new Map(), workflows: new Map(), skills: new Map() });
+    const bucket = [...days.values()][0][entry.model];
+    assert.equal(bucket.cacheWriteTokens, 13, 'aggregate retains Codex cache write tokens');
+    assert.equal(bucket.inputTokens + bucket.cacheReadTokens + bucket.cacheWriteTokens + bucket.outputTokens, 120, 'all four nonzero Codex buckets retained');
+    assert.equal(bucket.costUsd, expectedCost, 'aggregate retains cache write price');
+  });
+  await check('Codex numeric guard diagnostics', async () => {
+    const file = path.join(root, 'bad-numbers.jsonl');
+    const bad = [
+      { ...counters, input_tokens: '100' }, { ...counters, input_tokens: -1, cached_input_tokens: 0 },
+      { ...counters, cached_input_tokens: -1 }, { ...counters, cached_input_tokens: 101 },
+      { ...counters, cached_input_tokens: null }, { ...counters, output_tokens: '7' },
+      { ...counters, output_tokens: -1 }, { ...counters, cache_write_input_tokens: '13' },
+      { ...counters, cache_write_input_tokens: -1 }, { ...counters, cache_write_input_tokens: null },
+      { ...counters, input_tokens: null }, { ...counters, output_tokens: null }, [], 'wrong shape',
+    ];
+    for (const [index, last] of bad.entries()) {
+      await writeLines(file, [context, event(timestamp, last), event()]);
+      const parsed = await parseTranscript(file, 0);
+      assert.deepEqual(parsed.rejectedUsage.serialize(), { rejectedRecords: 1, reasons: { 'invalid-codex-numbers': 1 } }, `numeric fixture ${index} rejected by Codex guard, not normalizer`);
+      assert.equal(parsed.entries.length, 1, `numeric fixture ${index} does not suppress valid refresh`);
+      assert.equal(parsed.entries[0].input_tokens, 40, `numeric fixture ${index} retains only valid usage`);
+    }
   });
 } finally { await fs.rm(root, { recursive: true, force: true }); }

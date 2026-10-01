@@ -761,8 +761,12 @@ export async function parseTranscript(filePath, cutoffMs, { upperBoundMs = Infin
       // Cumulative counters identify refreshes only. Sort numeric field names
       // canonically; neither JSON insertion order nor timestamps are identity.
       codexIdentity = JSON.stringify(Object.keys(total).sort().map(key => [key, total[key]]));
-      if (!Number.isFinite(last.input_tokens) || !Number.isFinite(last.cached_input_tokens) || last.cached_input_tokens > last.input_tokens) {
-        rejectedUsage.record("invalid-codex-input", `${sourceSessionId}:${sourceLine}`);
+      if (typeof last !== "object" || Array.isArray(last)
+        || ![last.input_tokens, last.cached_input_tokens, last.output_tokens,
+          last.cache_write_input_tokens === undefined ? 0 : last.cache_write_input_tokens]
+          .every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)
+        || last.cached_input_tokens > last.input_tokens) {
+        rejectedUsage.record("invalid-codex-numbers", `${sourceSessionId}:${sourceLine}`);
         continue;
       }
       obj = { type: "assistant", timestamp: obj.timestamp, message: {
