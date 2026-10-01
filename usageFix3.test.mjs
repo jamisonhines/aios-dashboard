@@ -111,6 +111,15 @@ try {
     assert.equal(legacy[unknown], 0, 'standalone lookup never overwrites legacy persistence');
     configureUsageModelColors({});
   });
+  await check('malformed cumulative schema', async () => {
+    const file = path.join(root, 'bad-total.jsonl');
+    for (const total of [[], 'wrong shape', {}, { ...counters, output_tokens: '7' }, { ...counters, input_tokens: -1 }]) {
+      await writeLines(file, [context, event(timestamp, counters, total), event()]);
+      const parsed = await parseTranscript(file, 0);
+      assert.deepEqual(parsed.rejectedUsage.serialize(), { rejectedRecords: 1, reasons: { 'invalid-codex-total': 1 } }, 'malformed cumulative schema rejected before identity reservation');
+      assert.equal(parsed.entries.length, 1, 'valid event survives malformed cumulative schema');
+    }
+  });
   await check('Codex cache write tokens and cost', async () => {
     const file = path.join(root, 'cache-write.jsonl');
     const last = { ...counters, cache_write_input_tokens: 13, total_tokens: 120 };
