@@ -370,7 +370,7 @@ export async function findPiAndBbTranscripts(piRoot, bbRoot, cutoffMs) {
   const bbPaths = await walkJsonlFiles(bbRoot);
   for (const filePath of bbPaths) {
     const rel = path.relative(bbRoot, filePath).split(path.sep);
-    const isThreadTranscript = rel.length === 1 && /^thr_.+\.jsonl$/.test(rel[0]);
+    const isThreadTranscript = rel.length === 1 && /^(?:thr|pi)_.+\.jsonl$/.test(rel[0]);
     const isRunTranscript = path.basename(filePath) === "session.jsonl" && rel.some((part) => /^run-\d+$/.test(part));
     if (rel.includes("subagent-artifacts") || rel.includes("forks") || (!isThreadTranscript && !isRunTranscript)) continue;
     try {
