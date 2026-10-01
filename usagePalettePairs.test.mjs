@@ -15,8 +15,8 @@ const assignments = {};
 const plan = computeUsageColorPlan(full,assignments);
 assert.equal(plan.colors['claude-opus-5'].slot,1,'explicit Opus identity keeps mapped colour regardless of token rank');
 for(const provider of Object.keys(USAGE_PROVIDER_PALETTES)) assert.ok(Object.keys(plan.groups).filter(k=>plan.colors[k].provider===provider).length<=USAGE_PROVIDER_PALETTES[provider].light.length,'whole-export folding stays within provider capacity');
-assert.deepEqual(plan.foldedByProvider.claude,['claude-haiku-4-5-20251001','claude-fable-5'], 'fold the smallest Claude recent token shares before range selection');
-assert.deepEqual(plan.foldedByProvider.openai,['openai-codex/gpt-5.5','openai-codex/gpt-6.1-sol'], 'fold the smallest OpenAI recent token shares before range selection');
+assert.deepEqual(plan.foldedByProvider.claude,['claude-haiku-4-5-20251001','claude-fable-5','claude-fable-5-1'], 'fold ranked tail and fallback without an unowned Claude slot before range selection');
+assert.deepEqual(plan.foldedByProvider.openai,['openai-codex/gpt-5.5','openai-codex/gpt-6.1-sol','openai-codex/gpt-5.6-sol'], 'fold ranked tail and fallback without an unowned OpenAI slot before range selection');
 assert.deepEqual(plan.foldedByProvider.local,['ollama/model-a','ollama/model-b','ollama/model-c'], 'all local identities are grouped as Local, not individual colour slots');
 assert.equal(plan.colors['claude-sonnet-5'].slot,0,'explicit Sonnet identity keeps mapped colour rather than lexical allocation');
 const before = full.flatMap(d=>Object.values(d.models)).reduce((n,b)=>n+b.inputTokens+b.cacheReadTokens+b.cacheWriteTokens+b.outputTokens,0);
@@ -64,6 +64,6 @@ assert.deepEqual(reload.colors,plan.colors,'fallback/model assignments persist a
 // that same provider's named Other series, never the historical Other grey.
 const unknownDays=[{date:'2026-09-30',models:{'openai-codex/new-a':bucket(4),'openai-codex/new-b':bucket(3)},totalCostUsd:.07}];
 const unknown=computeUsageColorPlan(unknownDays,{});
-assert.notEqual(unknown.colors['openai-codex/new-a'].slot,unknown.colors['openai-codex/new-b'].slot,'unknown models take distinct next unused provider fallback steps');
+assert.deepEqual(unknown.groups['usage-group:openai:other'].members.sort(),['openai-codex/new-a','openai-codex/new-b'],'unowned fallback exhaustion folds unknown models into provider Other');
 assert.equal(unknown.colors['openai-codex/new-a'].provider,'openai','unknown fallback belongs to OpenAI');
 console.log('usagePalettePairs.test.mjs: all assertions passed');

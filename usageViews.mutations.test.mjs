@@ -55,9 +55,9 @@ const cases = [
 cases.push(
   { requirement:req[9], description:'light co-occurring Opus step -> Sonnet step', file:'usagePalettes.mjs', from:"'#e300b4'", to:"'#d1b200'", test:'usagePalettePairs.test.mjs' },
   { requirement:req[9], description:'dark co-occurring Opus step -> Sonnet step', file:'usagePalettes.mjs', from:"'#a05600'", to:"'#b29200'", test:'usagePalettePairs.test.mjs' },
-  { requirement:req[9], kind:'guard', description:'disable tail folding with capacity rejection disabled', coGuards:'colour-plan over-capacity rejection', disabledTogether:'colour-plan over-capacity rejection', edits:[
+  { requirement:req[9], kind:'guard', description:'disable tail folding with explicit-slot ownership disabled', coGuards:'explicit-slot ownership', disabledTogether:'explicit-slot ownership', edits:[
     {file:'model.mjs',from:'const keepCount = ranked.length > capacity ? capacity - 1 : ranked.length;',to:'const keepCount = ranked.length;'},
-    {file:'model.mjs',from:'if (slot < 0) throw new Error(`Usage ${provider} colour plan over capacity`);',to:'if (slot < 0) slot = capacity - 1;'},
+    {file:'model.mjs',from:'const owned = new Set(Object.values(USAGE_EXPLICIT_MODEL_SLOTS).filter(row => row.provider === provider).map(row => row.slot));',to:'const owned = new Set();'},
   ],test:'usagePalettePairs.test.mjs'},
   { requirement:req[9], description:'rank and fold from selected last day instead of entire export', file:'model.mjs', from:'rankUsageModels(fullDays, usageModelProvider, usageTotalTokens)', to:'rankUsageModels(fullDays.slice(-1), usageModelProvider, usageTotalTokens)' , test:'usagePalettePairs.test.mjs' },
   { requirement:req[9], description:'both chart hosts drop whole-export folding plan', edits:[

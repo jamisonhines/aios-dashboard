@@ -722,22 +722,42 @@ export function computeUsageColorPlan(fullDays, assignments = {}) {
     const kept = ranked.slice(0, keepCount).map(row => row.model);
     const folded = ranked.slice(keepCount).map(row => row.model);
     foldedByProvider[provider] = folded;
-    const used = new Set(folded.length ? [capacity - 1] : []);
-    // Explicit identities bind first; the table's token rank cannot repaint
-    // them. Unknown kept identities then take persisted next-unused steps.
-    for (const model of kept.filter(key => Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key))) {
-      const fixed = USAGE_EXPLICIT_MODEL_SLOTS[model];
-      if (!used.has(fixed.slot)) { colors[model] = fixed; used.add(fixed.slot); }
-    }
-    for (const model of kept.filter(key => !colors[key]).sort()) {
-      let slot = assignments[model];
-      if (!Number.isInteger(slot) || slot < 0 || slot >= capacity || used.has(slot)) {
-        slot = USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, i) => !used.has(i));
+    // Reserve ALL explicit bindings, including absent models. Also reserve
+    // persisted fallback slots for absent identities so returning exports do
+    // not repaint them. Existing assignments are immutable, even legacy ones.
+    const owned = new Set(Object.values(USAGE_EXPLICIT_MODEL_SLOTS).filter(row => row.provider === provider).map(row => row.slot));
+    const used = new Set([...owned, ...(folded.length ? [capacity - 1] : [])]);
+    const persistedOwners = new Map();
+    for (const [model, slot] of Object.entries(assignments).sort()) {
+      if (usageModelProvider(model) === provider && !Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, model)
+        && Number.isInteger(slot) && slot >= 0 && slot < capacity && !owned.has(slot)) {
+        if (!persistedOwners.has(slot)) persistedOwners.set(slot, model);
+        used.add(slot);
       }
-      if (slot < 0) throw new Error(`Usage ${provider} colour plan over capacity`);
-      colors[model] = {provider,slot}; assignments[model] = slot; used.add(slot);
     }
-    for (const model of kept) groups[model] = { label:usageModelLabel(model), members:[model] };
+    for (const model of kept.filter(key => Object.hasOwn(USAGE_EXPLICIT_MODEL_SLOTS, key))) {
+      colors[model] = USAGE_EXPLICIT_MODEL_SLOTS[model];
+    }
+    const pending = {};
+    for (const model of kept.filter(key => !colors[key]).sort()) {
+      const existing = Object.hasOwn(assignments, model);
+      const slot = existing ? assignments[model] : USAGE_PROVIDER_PALETTES[provider].light.findIndex((_, i) => !used.has(i));
+      const available = Number.isInteger(slot) && slot >= 0 && slot < capacity && !owned.has(slot)
+        && !(folded.length && slot === capacity - 1)
+        && (existing ? persistedOwners.get(slot) === model : !used.has(slot));
+      if (!available) { folded.push(model); continue; }
+      colors[model] = {provider,slot}; used.add(slot);
+      if (!existing) pending[model] = slot;
+    }
+    // Provider Other uses the final slot. If exhaustion introduced it, fold
+    // any provisional fallback in that slot too, without changing persistence.
+    if (folded.length) {
+      for (const model of kept.filter(key => colors[key]?.slot === capacity - 1)) {
+        delete colors[model]; delete pending[model]; folded.push(model);
+      }
+    }
+    for (const [model, slot] of Object.entries(pending)) assignments[model] = slot;
+    for (const model of kept.filter(key => colors[key])) groups[model] = { label:usageModelLabel(model), members:[model] };
     if (folded.length) {
       const group = `usage-group:${provider}:other`;
       colors[group] = {provider,slot:capacity-1};

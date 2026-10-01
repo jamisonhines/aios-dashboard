@@ -5,7 +5,7 @@ import { USAGE_PROVIDER_PALETTES } from './usagePalettes.mjs';
 import { candidates } from './dev/search-usage-palettes.mjs';
 import { hue } from './dev/usage-color-math.mjs';
 const bucket=n=>({inputTokens:n,cacheReadTokens:n*2,cacheWriteTokens:n*3,outputTokens:n*4,messages:1,costUsd:n/100});
-const recent=Array.from({length:12},(_,i)=>`openai-codex/recent-${String(i).padStart(2,'0')}`);
+const recent=['openai-codex/gpt-6-astra','openai-codex/gpt-6-sol','openai-codex/gpt-6.1-sol','openai-codex/gpt-5.6-terra',...Array.from({length:8},(_,i)=>`openai-codex/recent-${String(i+4).padStart(2,'0')}`)];
 const days=[
   {date:'2026-09-01',models:{'openai-codex/gpt-5.6-terra':bucket(1e8),'openai-codex/gpt-5.6-sol':bucket(2e8)},totalCostUsd:3e6},
   {date:'2026-09-23',models:{'openai-codex/outside-seven-days':bucket(9e7)},totalCostUsd:9e5},
@@ -16,7 +16,7 @@ const plan=computeUsageColorPlan(days,{});
 const kept=Object.keys(plan.groups).filter(key=>key.startsWith('openai-codex/')).sort();
 assert.equal(plan.ranking.recentEnd,'2026-09-30','recent window anchored to latest export day, not host clock or filter');
 assert.equal(plan.ranking.recentStart,'2026-09-24','recent window includes exactly seven export calendar dates');
-assert.deepEqual(kept,recent.slice(0,USAGE_PROVIDER_PALETTES.openai.light.length-1),'recent 7-day share outranks retired whole-window volume');
+assert.deepEqual(kept,recent.slice(0,USAGE_PROVIDER_PALETTES.openai.light.length-1).sort(),'recent 7-day share outranks retired whole-window volume');
 assert.equal(plan.ranking.byProvider.openai.find(r=>r.model==='openai-codex/outside-seven-days').recentShare,0,'day before recent cutoff has no recent share');
 const tieDays=[
   {date:'2026-09-01',models:{'openai-codex/tie-z':bucket(2),'openai-codex/tie-a':bucket(1)},totalCostUsd:.03},

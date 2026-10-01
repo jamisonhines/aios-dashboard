@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { main, parseTranscript } from './vault-scripts/export-usage-stats.mjs';
+import { computeUsageColorPlan, usageModelColorFamily } from './model.mjs';
+import { USAGE_EXPLICIT_MODEL_SLOTS } from './usagePalettes.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-fix3-'));
 const timestamp = '2026-09-30T12:00:00Z';
@@ -79,5 +81,30 @@ try {
     const parsed = await parseTranscript(file, 0);
     assert.equal(parsed.entries.length, 0, 'missing cumulative usage is never charged');
     assert.deepEqual(parsed.rejectedUsage.serialize(), { rejectedRecords: 2, reasons: { 'missing-codex-total': 2 } }, 'missing cumulative diagnostic counts both records');
+  });
+  await check('fallback persists across explicit arrival', async () => {
+    const unknown = 'openai-codex/synthetic-new';
+    const explicit = 'openai-codex/gpt-6-astra';
+    const bucket = { inputTokens: 100, costUsd: 1 };
+    const days = models => [{ date: '2026-09-30', models: Object.fromEntries(models.map(model => [model, bucket])) }];
+    const assignments = {};
+    const first = computeUsageColorPlan(days([unknown]), assignments);
+    const color = usageModelColorFamily(unknown, first);
+    const slot = assignments[unknown];
+    const next = computeUsageColorPlan(days([unknown, explicit]), assignments);
+    assert.equal(usageModelColorFamily(unknown, next), color, 'explicit arrival never repaints fallback');
+    assert.equal(assignments[unknown], slot, 'persisted fallback assignment is never overwritten');
+    const owned = new Set(Object.values(USAGE_EXPLICIT_MODEL_SLOTS).filter(row => row.provider === 'openai').map(row => row.slot));
+    assert.ok(!owned.has(slot), 'fallback never takes an absent explicit binding');
+    assert.equal(slot, 4, 'fallback takes the first unowned provider slot');
+    const crowded = computeUsageColorPlan(days([unknown, explicit, 'openai-codex/synthetic-second']), assignments);
+    assert.deepEqual(crowded.groups['usage-group:openai:other'].members.sort(), [unknown, 'openai-codex/synthetic-second'].sort(), 'exhausted unowned capacity folds fallback models into provider Other');
+    assert.equal(assignments[unknown], slot, 'folding does not rewrite persisted assignments');
+    const recovered = computeUsageColorPlan(days([unknown, explicit]), assignments);
+    assert.equal(usageModelColorFamily(unknown, recovered), color, 'fallback recovers original color after overflow disappears');
+    const legacy = { [unknown]: 0 };
+    const legacyPlan = computeUsageColorPlan(days([unknown, explicit]), legacy);
+    assert.equal(legacy[unknown], 0, 'legacy owned assignment is preserved rather than overwritten');
+    assert.ok(legacyPlan.foldedByProvider.openai.includes(unknown), 'legacy collision folds, never steals explicit color');
   });
 } finally { await fs.rm(root, { recursive: true, force: true }); }

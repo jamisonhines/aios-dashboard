@@ -83,7 +83,8 @@ const unknownDays = [{date:'2026-09-30',models:{'openai-codex/new-example-a':buc
 const unknownPlan = computeUsageColorPlan(unknownDays, {});
 const unknown1 = usageModelColorFamily('openai-codex/new-example-a', unknownPlan);
 const unknown2 = usageModelColorFamily('openai-codex/new-example-b', unknownPlan);
-assert.notEqual(unknown1, unknown2, 'fallback models get distinct next provider colours');
+assert.equal(unknown1, unknown2, 'exhausted unowned slots fold into one provider Other colour');
+assert.deepEqual(unknownPlan.groups['usage-group:openai:other'].members.sort(), Object.keys(unknownDays[0].models).sort(), 'overflow models share a named chart group, not overlapping marks');
 assert.match(unknown1, /^openai-/, 'fallback uses OpenAI palette, not Other grey');
 assert.equal(usageModelColorFamily('openai-codex/new-example-a', unknownPlan), unknown1, 'fallback identity stable after another model');
 const assignments = {};
@@ -93,5 +94,5 @@ const persistedPlan = computeUsageColorPlan(persistedDays, assignments);
 const persistedColor = usageModelColorFamily('openai-codex/new-persisted', persistedPlan);
 const reloadedPlan = computeUsageColorPlan(persistedDays, JSON.parse(JSON.stringify(assignments)));
 assert.equal(usageModelColorFamily('openai-codex/new-persisted', reloadedPlan), persistedColor, 'fallback allocation persists across reload and filtering');
-assert.equal(reloadedPlan.colors['openai-codex/new-persisted'].slot, 0, 'fallback takes the next unused provider step');
+assert.equal(reloadedPlan.colors['openai-codex/new-persisted'].slot, 4, 'fallback takes the next unowned provider step');
 console.log('usageViews.test.mjs: all assertions passed');
