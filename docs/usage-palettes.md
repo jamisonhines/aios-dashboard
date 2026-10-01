@@ -41,4 +41,10 @@ Each palette has 24 unique steps. Beyond capacity the allocator fails explicitly
 
 Candidates were derived in OKLCH at fixed provider hue anchors with alternating lightness, then converted to sRGB. Initial candidates failed the chroma floor after gamut clipping for yellow and aqua. Those were re-stepped, not accepted. A later cool dark candidate failed normal separation at 14.5 and was re-stepped. The final cool dark palette uses smaller chroma and a higher lightness anchor, clearing the normal floor at 16.0. Violet uses small hue steps within its provider range to prevent sRGB rounding from duplicating hex values.
 
-The implementation report includes every final CLI validator command/output for each provider and the combined order, in light on #ffffff and dark on #1e1e1e, plus the actual export's model order. All final runs exit 0; no CVD floor-band exception is needed. Numeric table and legend labels satisfy the contrast relief channel.
+The implementation report includes CLI validator command/output for each provider and the combined order, in light on #ffffff and dark on #1e1e1e, plus the actual export's whole-window model order. Those 16 runs exit 0; no CVD floor-band exception is needed in those orders. Numeric table and legend labels satisfy contrast relief only.
+
+## Shipment blocker: sparse daily order
+
+Further validation of the actual daily stacks found 66 of 72 day/mode combinations fail separation. For example, the first day contains only Opus 5 and Sonnet 5. Their light steps #fe77bd and #ff767c have normal Delta E 9.1, below the mandatory 15 floor. These normally non-adjacent slots become neighbours when other models are absent. Labels cannot excuse this hard failure.
+
+The palette work is incomplete and must not ship. Passing a full reserved order is insufficient when filtering creates new neighbours. A revised encoding must clear sparse combinations, not merely the full legend. Twenty-four unique hex steps are not twenty-four perceptually separated identities within a narrow provider hue range. No approval or all-pairs safety claim is made.
