@@ -68,6 +68,8 @@ try {
     const bars = all(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-bar');
     assert.equal(bars.length, days.length, `${range} ${view}: one plain purple bar per period`);
     assert.equal(Number(bars[0].attrs.height), 158, `${range} ${view}: column draws the whole period total`);
+    assert.ok(all(host, n => n.tag === 'text' && n.textContent === (view === 'cost' ? '$12.00' : '2.0M')).length, `${range} ${view}: y-axis uses active period total`);
+    if (days.length > 1) assert.equal(Number(bars[1].attrs.height), (view === 'cost' ? .5 : 237 / 2001048) * 158, `${range} ${view}: each column height uses active period metric`);
     const hits = all(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-column-hit');
     assert.equal(hits.length, days.length, 'each column has hover target');
     assert.equal(hits[0].attrs.height, '158', 'hover target is full plot height');
