@@ -14,6 +14,7 @@ const full = [
 const assignments = {};
 const plan = computeUsageColorPlan(full,assignments);
 assert.equal(plan.colors['claude-opus-5'].slot,1,'explicit Opus identity keeps mapped colour regardless of token rank');
+assert.equal(plan.colors['claude-sonnet-5'].slot,0,'explicit Sonnet identity keeps mapped colour rather than lexical allocation');
 for(const provider of Object.keys(USAGE_PROVIDER_PALETTES)) assert.ok(Object.keys(plan.groups).filter(k=>plan.colors[k].provider===provider).length<=USAGE_PROVIDER_PALETTES[provider].light.length,'whole-export folding stays within provider capacity');
 assert.deepEqual(plan.foldedByProvider.claude,['claude-haiku-4-5-20251001','claude-fable-5'], 'fold the smallest Claude recent token shares before range selection');
 assert.deepEqual(plan.foldedByProvider.openai,['openai-codex/gpt-5.5','openai-codex/gpt-6.1-sol'], 'fold the smallest OpenAI recent token shares before range selection');
