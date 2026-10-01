@@ -6123,11 +6123,15 @@ export default class AiosDashboardPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const stored = await this.loadData();
+    const owned = Object.fromEntries(Object.entries(stored || {}).filter(([key]) => Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS, key)));
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, owned);
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    // Persist only current settings, including when obsolete keys reappear in memory.
+    const persisted = Object.fromEntries(Object.entries(this.settings).filter(([key]) => Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS, key)));
+    await this.saveData(persisted);
   }
 
   // Public hook for the settings tab: force an immediate re-render (no debounce)

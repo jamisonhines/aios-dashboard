@@ -23,6 +23,9 @@ cases.push({ requirement: sharedReq, file: 'vault-scripts/export-usage-stats.mjs
 for (const field of ['messageId','timestamp','model','input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens']) {
   cases.push({ requirement: distinctReq, file: 'vault-scripts/export-usage-stats.mjs', from: messageKey, to: messageKey.replace('entry.'+field, '""'), test: 'usageBbNoResponse.test.mjs', mutation: 'omit distinct response field '+field });
 }
+const settingsReq = 'REQ: saving settings through the real plugin save path never writes per-model colour assignments.';
+cases.push({ requirement: settingsReq, file: 'main.ts', from: 'await this.saveData(persisted);', to: 'await this.saveData({ ...this.settings, ["usageModel" + "Colors"]: { obsolete: 1 } });', test: 'usageSettingsPersistence.test.mjs', mutation: 'Reviewer mutation writes obsolete assignments through saveData' });
+cases.push({ requirement: settingsReq, file: 'main.ts', from: 'await this.saveData(persisted);', to: 'await this.saveData(this.settings);', test: 'usageSettingsPersistence.test.mjs', mutation: 'save bypasses whitelist with legacy assignments injected after load' });
 const results = [];
 try {
   const libs = path.join(temp, 'AIOS/Operations/scripts/lib');
