@@ -3011,6 +3011,21 @@ function renderUsageChart(
     hit.addEventListener("mouseleave", hide);
     hit.addEventListener("focus", () => show());
     hit.addEventListener("blur", hide);
+    // The popup is non-interactive so moving off the column always hides it.
+    // Forward wheel scrolling while hovered so long breakdowns remain readable.
+    hit.addEventListener("wheel", (event) => {
+      if (popup && popup.scrollHeight > popup.clientHeight) {
+        event.preventDefault();
+        popup.scrollTop += event.deltaY;
+      }
+    }, { passive: false });
+    hit.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") hide();
+      if (popup && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+        event.preventDefault();
+        popup.scrollTop += event.key === "ArrowDown" ? 40 : -40;
+      }
+    });
     g.appendChild(hit);
     svg.appendChild(g);
   });

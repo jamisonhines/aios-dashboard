@@ -647,8 +647,7 @@ export function splitVisibleIncidents(groups, expanded, limit = INCIDENTS_VISIBL
 // reads usage-stats.json off disk and turns it into this plain-data shape.
 // ---------------------------------------------------------------------------
 
-// Fixed family order: drives stacking order, legend order, and table order so
-// the three views never disagree with each other.
+// Concise legacy family labels and deterministic identity ordering.
 export const USAGE_FAMILY_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
 export const USAGE_FAMILY_LABELS = {
   fable: "Fable",
@@ -717,11 +716,8 @@ export function formatUsd(n) {
 }
 
 /**
- * Per-model-family legend + breakdown table for an arbitrary continuous day
- * window. Extracted (Phase 1 System-browser range toggle, 2026-08-04) from
- * computeUsageView so the same aggregation can run over ANY window
- * (computeUsageWindow's range-scoped slice), not only the fixed 30-day one --
- * this is what lets the "Model breakdown" table follow the range toggle.
+ * Normalized per-model aggregation for an arbitrary continuous day window.
+ * Retained for consumers of computeUsageView; no model list is rendered.
  */
 export function usageFamilyBreakdown(windowDays, view = "cost") {
   const famTotals = new Map();
@@ -833,7 +829,7 @@ export function computeUsageView(stats, nowDate) {
     xLabelIndices.push(windowDays.length - 1);
   }
 
-  // 30d per-family totals, feeding both the legend and the breakdown table.
+  // Legacy aggregate data contract; the dashboard does not render this list.
   const { table } = usageFamilyBreakdown(windowDays);
 
   const projects = stats.projects
@@ -998,10 +994,9 @@ export function computeUsageRangeTiles(windowDays, rangeLabel) {
 }
 
 /**
- * Stacked-bar chart data for an arbitrary continuous day window: same shape
- * as computeUsageView's fixed 30-day chart (segments per family, gridlines,
- * sparse x labels), generalized to any window length. Short windows label
- * every day; long ones label every 7th plus the last.
+ * Total-column data for any continuous window. Model buckets are retained
+ * for the hover breakdown, not drawn as segments. Short windows label every
+ * day; long ones label every 7th plus the last.
  */
 export function usageChartFromWindow(windowDays, view = "cost") {
   const total = d => Object.values(d.models).reduce((sum, b) => sum + usageMetric(b, view), 0);

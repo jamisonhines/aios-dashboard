@@ -47,7 +47,11 @@ function el(tag = 'div', options = {}) {
     appendChild(child) { child.parentElement = this; this.children.push(child); },
     setAttribute(k, v) { this.attrs[k] = v; }, setAttr(k, v) { this.attrs[k] = v; },
     addEventListener(k, v) { this.events[k] = v; }, remove() { this.parentElement.children = this.parentElement.children.filter(c => c !== this); },
-    closest() { return pane; }, getBoundingClientRect() { return { left: 0, top: 0, width: 600, height: 400 }; },
+    closest() { return pane; }, getBoundingClientRect() {
+      if (this.attrs.class === 'aios-usage-popup') return { left: 0, top: 0, width: parseFloat(this.style.width) || 300, height: 150 };
+      if (this.attrs.class === 'aios-usage-chart-wrap') return { left: 20, top: 50, width: 600, height: 180 };
+      return { left: 0, top: 0, width: 600, height: 400 };
+    },
     classList: { add() {} }, empty() { this.children = []; },
     setText(text) { this.text = text; }, addClass() {},
     scrollTop: 0, scrollHeight: 400, clientHeight: 400,
@@ -72,7 +76,7 @@ try {
     if (days.length > 1) assert.equal(Number(bars[1].attrs.height), (view === 'cost' ? .5 : 237 / 2001048) * 158, `${range} ${view}: each column height uses active period metric`);
     const hits = all(host, n => n.tag === 'rect' && n.attrs.class === 'aios-usage-column-hit');
     assert.equal(hits.length, days.length, 'each column has hover target');
-    assert.equal(hits[0].attrs.height, '158', 'hover target is full plot height');
+    for (const hit of hits) assert.equal(hit.attrs.height, '158', 'hover target is full plot height even below maximum');
     assert.equal(hits[0].attrs.y, '6', 'hover target begins at top of plot');
     hits[0].events.mouseenter({ clientX: 590, clientY: 390 });
     const popup = all(host, n => n.attrs.class === 'aios-usage-popup')[0];
@@ -81,7 +85,13 @@ try {
     assert.deepEqual(text, view === 'cost'
       ? ['2026-09-30', '$12.00', 'gpt-6.1-sol', '$9.00', 'Opus', '$3.00', 'ollama/local-example', '$0.00', 'unknown-example', 'Unpriced']
       : ['2026-09-30', '2.0M tokens', 'Opus', '2.0M tokens', 'unknown-example', '537 tokens', 'ollama/local-example', '337 tokens', 'gpt-6.1-sol', '137 tokens'], `${range} ${view}: popup renders period total and every model in metric order`);
-    assert.ok(parseFloat(popup.style.left) >= 0 && parseFloat(popup.style.left) <= 590, 'popup position bounded');
+    assert.equal(popup.style.left, '258px', 'popup flips left inside pane accounting for wrap offset');
+    assert.equal(popup.style.top, '200px', 'popup clamps to pane bottom accounting for wrap offset');
+    popup.scrollHeight = 900; popup.clientHeight = 150;
+    let prevented = false;
+    hits[0].events.wheel({ deltaY: 200, preventDefault() { prevented = true; } });
+    assert.equal(popup.scrollTop, 200, 'long popup scrolls while column is hovered');
+    assert.ok(prevented, 'scrolling long popup does not move dashboard');
     hits[0].events.mouseleave();
     assert.equal(all(host, n => n.attrs.class === 'aios-usage-popup').length, 0, 'popup disappears on mouse leave');
     if (days.length > 1) {
