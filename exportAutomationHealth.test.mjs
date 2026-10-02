@@ -213,6 +213,6 @@ assert.equal(
 assert.deepEqual(resolvePrefixes(undefined), DEFAULT_LABEL_PREFIXES, "no arg -> defaults");
 assert.deepEqual(resolvePrefixes(""), DEFAULT_LABEL_PREFIXES, "empty arg -> defaults");
 assert.deepEqual(resolvePrefixes("com.acme., org.x."), ["com.acme.", "org.x."], "comma override");
-assert.deepEqual(DEFAULT_LABEL_PREFIXES, ["com.jaymo.", "com.aios.", "ge.vagabondadventures."]);
+assert.deepEqual(DEFAULT_LABEL_PREFIXES, ["com.jaymo.", "com.aios.", "ge.vagabondadventures.", "ge.vagabondskischool."]);
 
 console.log("exportAutomationHealth.test.mjs: all assertions passed");
