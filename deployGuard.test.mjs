@@ -59,6 +59,16 @@ test('deploy documentation and test-chain contract', () => {
 test('HEAD in integration branch deploys unchanged artifacts and output', () => {
   const f = fixture(); f.deployed(f.run());
 });
+test('HEAD behind integration branch is contained and deploys', () => {
+  const f = fixture(); f.git('branch', 'older');
+  writeFileSync(join(f.repo, 'future'), 'future'); f.git('add', '.'); f.git('commit', '-m', 'Integration advances');
+  f.git('switch', 'older'); f.deployed(f.run());
+});
+test('untracked files refuse before build or copy', () => {
+  const f = fixture(); writeFileSync(join(f.repo, 'untracked'), 'not committed');
+  const r = f.run(); assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /WARNING: dirty working tree/); f.untouched();
+});
 test('unmerged side branch refuses before build or copy; printed command fast-forwards occupied worktree', () => {
   const f = fixture(); const holding = f.side(); const r = f.run();
   assert.notEqual(r.status, 0, 'unmerged HEAD must refuse');
