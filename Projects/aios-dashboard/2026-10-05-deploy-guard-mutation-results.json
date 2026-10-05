@@ -1,0 +1,57 @@
+[
+  {
+    "name": "ancestry",
+    "failure": "✖ unmerged side branch refuses before build or copy; printed command fast-forwards occupied worktree (377.908292ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: unmerged HEAD must refuse"
+  },
+  {
+    "name": "default branch",
+    "failure": "✖ HEAD in integration branch deploys unchanged artifacts and output (68.974ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: Refusing deploy: local integration branch 'integration' does not exist (HEAD 5a2be49)."
+  },
+  {
+    "name": "repair command",
+    "failure": "✖ unmerged side branch refuses before build or copy; printed command fast-forwards occupied worktree (174.999334ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: error: unknown option `invalid-option'"
+  },
+  {
+    "name": "missing branch",
+    "failure": "✖ missing local integration branch refuses clearly even with preview flag (312.603375ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: Expected \"actual\" to be strictly unequal to: 0"
+  },
+  {
+    "name": "preview reminders",
+    "failure": "✖ --allow-unmerged permits preview in either position with reminders before and after copy (444.330208ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: preview reminder must appear twice"
+  },
+  {
+    "name": "dirty tree",
+    "failure": "✖ dirty tree refuses with warning; preview permits dirty changes with two reminders (350.997458ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: dirty tree must refuse"
+  },
+  {
+    "name": "artifact copy",
+    "failure": "✖ HEAD in integration branch deploys unchanged artifacts and output (335.1635ms)",
+    "assertion": "Error: ENOENT: no such file or directory, open '<checkout>/.deploy-guard-jCBbyF/target/.obsidian/plugins/aios-dashboard/styles.css'"
+  },
+  {
+    "name": "test chain",
+    "failure": "✖ deploy documentation and test-chain contract (0.89925ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: npm test must run deployGuard.test.mjs"
+  },
+  {
+    "name": "escape flag",
+    "failure": "✖ --allow-unmerged permits preview in either position with reminders before and after copy (135.764041ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: HEAD e5b2cb9 is not contained in integration branch 'main'."
+  },
+  {
+    "name": "README",
+    "failure": "✖ deploy documentation and test-chain contract (1.124042ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Deploy refuses before building or copying/. Input:"
+  },
+  {
+    "name": "env override",
+    "failure": "✖ AIOS_INTEGRATION_BRANCH override uses named local integration branch (154.732209ms)",
+    "assertion": "AssertionError [ERR_ASSERTION]: AIOS_INTEGRATION_BRANCH must select integration, not main: HEAD 4f46eef is not contained in integration branch 'main'."
+  }
+]
