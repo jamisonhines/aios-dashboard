@@ -26,6 +26,13 @@ process.on('exit', removeFixtures);
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(1));
 after(removeFixtures);
 
+// Fixture git calls and deploy.sh spawns must never see the caller's GIT_DIR, GIT_WORK_TREE,
+// GIT_INDEX_FILE etc. (set when tests run from a git hook), or they would write to that repo.
+const cleanEnv = (extra = {}) => ({
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+  ...extra,
+});
+
 function fixture(branch = 'main') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'deploy-guard-')));
   fixtureRoots.push(root);
@@ -34,7 +41,7 @@ function fixture(branch = 'main') {
   const bin = join(root, 'bin');
   mkdirSync(repo); mkdirSync(vault); mkdirSync(bin);
   writeFileSync(join(vault, 'sentinel'), 'untouched');
-  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const git = (...args) => execFileSync('git', args, { cwd: repo, env: cleanEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '-b', branch); git('config', 'user.name', 'Test Fixture'); git('config', 'user.email', 'fixture@example.invalid');
   writeFileSync(join(repo, 'deploy.sh'), script, { mode: 0o755 });
   for (const name of ['main.js', 'manifest.json', 'styles.css']) writeFileSync(join(repo, name), name);
@@ -44,7 +51,7 @@ function fixture(branch = 'main') {
   writeFileSync(join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "$*" > build-called\necho "stub build"\n', { mode: 0o755 });
   const run = (args = [vault], env = {}) => spawnSync('bash', ['deploy.sh', ...args], {
     cwd: repo, encoding: 'utf8', timeout: 10_000,
-    env: { ...process.env, AIOS_INTEGRATION_BRANCH: '', PATH: `${bin}:${process.env.PATH}`, ...env },
+    env: cleanEnv({ AIOS_INTEGRATION_BRANCH: '', PATH: `${bin}:${process.env.PATH}`, ...env }),
   });
   const side = () => {
     git('switch', '-c', 'side');
@@ -90,6 +97,13 @@ test('untracked files refuse before build or copy', () => {
   const r = f.run(); assert.notEqual(r.status, 0);
   assert.match(r.stderr, /WARNING: dirty working tree/); f.untouched();
 });
+test('untracked deploy content refuses even when status.showUntrackedFiles is no', () => {
+  const f = fixture(); f.git('config', 'status.showUntrackedFiles', 'no');
+  writeFileSync(join(f.repo, 'vault-scripts/evil.mjs'), 'export untracked');
+  assert.equal(f.git('status', '--porcelain'), '', 'fixture config must hide untracked files from plain status');
+  const r = f.run(); assert.notEqual(r.status, 0, 'untracked vault script must refuse');
+  assert.match(r.stderr, /WARNING: dirty working tree/); f.untouched();
+});
 test('unmerged side branch refuses before build or copy; printed command fast-forwards occupied worktree', () => {
   const f = fixture(); const holding = f.side(); const r = f.run();
   assert.notEqual(r.status, 0, 'unmerged HEAD must refuse');
@@ -97,9 +111,22 @@ test('unmerged side branch refuses before build or copy; printed command fast-fo
   f.untouched();
   const command = r.stderr.match(/^Fast-forward command: (.+)$/m)?.[1];
   assert.ok(command, 'exact fast-forward command must be printed');
-  const fixed = spawnSync('bash', ['-c', command], { cwd: f.repo, encoding: 'utf8', timeout: 10_000 });
+  const fixed = spawnSync('bash', ['-c', command], { cwd: f.repo, env: cleanEnv(), encoding: 'utf8', timeout: 10_000 });
   assert.equal(fixed.status, 0, fixed.stderr);
-  assert.equal(execFileSync('git', ['-C', holding, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), f.git('rev-parse', 'HEAD'));
+  assert.equal(execFileSync('git', ['-C', holding, 'rev-parse', 'HEAD'], { env: cleanEnv(), encoding: 'utf8' }).trim(), f.git('rev-parse', 'HEAD'));
+  f.deployed(f.run());
+});
+test('integration branch checked out nowhere prints checkout + ff command that works', () => {
+  const f = fixture(); const holding = f.side();
+  f.git('worktree', 'remove', holding);
+  const r = f.run(); assert.notEqual(r.status, 0, 'unmerged HEAD must refuse');
+  f.untouched();
+  const command = r.stderr.match(/^Fast-forward command: (.+)$/m)?.[1];
+  assert.ok(command, 'exact fast-forward command must be printed');
+  assert.match(command, / checkout main && git -C .* merge --ff-only /);
+  const fixed = spawnSync('bash', ['-c', command], { cwd: f.repo, env: cleanEnv(), encoding: 'utf8', timeout: 10_000 });
+  assert.equal(fixed.status, 0, fixed.stderr);
+  assert.equal(f.git('rev-parse', 'main'), f.git('rev-parse', 'HEAD'));
   f.deployed(f.run());
 });
 test('AIOS_INTEGRATION_BRANCH override uses named local integration branch', () => {
@@ -125,7 +152,7 @@ test('--allow-unmerged permits preview in either position with reminders before 
     // One combined stream proves the warning brackets both copy output lines.
     const combined = spawnSync('bash', ['-c', 'bash deploy.sh --allow-unmerged "$1" 2>&1', 'test', f.vault], {
       cwd: f.repo, encoding: 'utf8', timeout: 10_000,
-      env: { ...process.env, AIOS_INTEGRATION_BRANCH: '', PATH: `${join(f.root, 'bin')}:${process.env.PATH}` },
+      env: cleanEnv({ AIOS_INTEGRATION_BRANCH: '', PATH: `${join(f.root, 'bin')}:${process.env.PATH}` }),
     }).stdout;
     assert.ok(combined.indexOf(reminder) < combined.indexOf('stub build'));
     assert.ok(combined.lastIndexOf(reminder) > combined.indexOf('deployed vault scripts to'));

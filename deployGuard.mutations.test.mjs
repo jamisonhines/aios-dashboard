@@ -28,6 +28,8 @@ const cases = [
   ['test chain', 'package.json', 'node deployGuard.test.mjs && ', '', 'deploy documentation'],
   ['escape flag', 'deploy.sh', '--allow-unmerged) ALLOW_UNMERGED=true ;;', '--allow-unmerged) ALLOW_UNMERGED=false ;;', '--allow-unmerged permits'],
   ['README', 'README.md', 'Deploy refuses before building or copying', 'Deploy proceeds before building or copying', 'deploy documentation'],
+  ['untracked flag', 'deploy.sh', ' --untracked-files=normal', '', 'status.showUntrackedFiles is no'],
+  ['unoccupied ff cmd', 'deploy.sh', "printf 'git -C %q checkout %q && git -C %q merge --ff-only %q\\n'", "printf 'git -C %q checkout %q && git -C %q merge --bogus %q\\n'", 'checked out nowhere'],
   ['env override', 'deploy.sh', 'INTEGRATION_BRANCH="${AIOS_INTEGRATION_BRANCH:-main}"', 'INTEGRATION_BRANCH="main"', 'AIOS_INTEGRATION_BRANCH override'],
 ];
 

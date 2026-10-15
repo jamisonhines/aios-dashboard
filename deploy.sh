@@ -45,7 +45,7 @@ if ! git merge-base --is-ancestor HEAD "refs/heads/$INTEGRATION_BRANCH"; then
   fi
 fi
 DIRTY=false
-if [[ -n "$(git status --porcelain)" ]]; then
+if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
   DIRTY=true
   echo "WARNING: dirty working tree; uncommitted changes would be deployed but are in no branch." >&2
 fi
