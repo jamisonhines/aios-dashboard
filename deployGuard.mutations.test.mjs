@@ -23,7 +23,7 @@ const cases = [
   ['repair command', 'deploy.sh', "printf 'git -C %q merge --ff-only %q\\n'", "printf 'git -C %q merge --invalid-option %q\\n'", 'unmerged side branch'],
   ['missing branch', 'deploy.sh', 'if ! git show-ref --verify --quiet "refs/heads/$INTEGRATION_BRANCH"; then', 'if false; then', 'missing local integration branch'],
   ['preview reminders', 'deploy.sh', 'preview_reminder\nDST=', ':\nDST=', '--allow-unmerged permits'],
-  ['dirty tree', 'deploy.sh', 'if [[ -n "$(git status --porcelain)" ]]; then', 'if false; then', 'dirty tree refuses'],
+  ['dirty tree', 'deploy.sh', 'if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then', 'if false; then', 'dirty tree refuses'],
   ['artifact copy', 'deploy.sh', 'cp main.js manifest.json styles.css "$DST/"', 'cp main.js manifest.json "$DST/"', 'HEAD in integration branch'],
   ['test chain', 'package.json', 'node deployGuard.test.mjs && ', '', 'deploy documentation'],
   ['escape flag', 'deploy.sh', '--allow-unmerged) ALLOW_UNMERGED=true ;;', '--allow-unmerged) ALLOW_UNMERGED=false ;;', '--allow-unmerged permits'],
