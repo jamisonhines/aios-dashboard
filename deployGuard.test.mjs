@@ -1,13 +1,34 @@
 import './testFileTimeout.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, readdirSync, existsSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
+import { after, test } from 'node:test';
 
-const script = readFileSync(new URL('./deploy.sh', import.meta.url));
+// Files under test (deploy.sh, package.json, README.md) are read from DEPLOY_GUARD_SRC when set.
+// The opt-in mutation suite points it at a temp copy so the tracked files are never written.
+const srcDir = process.env.DEPLOY_GUARD_SRC ? pathToFileURL(join(process.env.DEPLOY_GUARD_SRC, '/')) : new URL('./', import.meta.url);
+const script = readFileSync(new URL('deploy.sh', srcDir));
+
+// Fixtures live under os.tmpdir(), never in the checkout. They are removed on pass, on failure
+// and on SIGINT/SIGTERM. DEPLOY_GUARD_KEEP_FIXTURES=1 keeps them for inspection (default off).
+const keepFixtures = process.env.DEPLOY_GUARD_KEEP_FIXTURES === '1';
+const fixtureRoots = [];
+function removeFixtures() {
+  for (const dir of fixtureRoots.splice(0)) {
+    if (keepFixtures) { process.stderr.write(`kept fixture: ${dir}\n`); continue; }
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+process.on('exit', removeFixtures);
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(1));
+after(removeFixtures);
+
 function fixture(branch = 'main') {
-  const root = execFileSync('mktemp', ['-d', join(process.cwd(), '.deploy-guard-XXXXXX')], { encoding: 'utf8' }).trim();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'deploy-guard-')));
+  fixtureRoots.push(root);
   const repo = join(root, 'side repo');
   const vault = join(root, 'target');
   const bin = join(root, 'bin');
@@ -47,10 +68,10 @@ function fixture(branch = 'main') {
 }
 
 test('deploy documentation and test-chain contract', () => {
-  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  const pkg = JSON.parse(readFileSync(new URL('package.json', srcDir), 'utf8'));
   assert.ok(pkg.scripts.test.split(' && ').includes('node deployGuard.test.mjs'), 'npm test must run deployGuard.test.mjs');
   assert.ok(readFileSync(new URL('./deployGuard.test.mjs', import.meta.url), 'utf8').includes("import './testFileTimeout.mjs';"), 'deploy guard tests must load hard timeout');
-  const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  const readme = readFileSync(new URL('README.md', srcDir), 'utf8');
   assert.match(readme, /Deploy refuses before building or copying/);
   assert.match(readme, /AIOS_INTEGRATION_BRANCH=<branch>/);
   assert.match(readme, /--allow-unmerged/);

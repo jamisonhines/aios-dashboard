@@ -1,6 +1,4 @@
 node_modules/
-# Real-git deploy guard fixtures retained for inspection.
-.deploy-guard-*
 *.map
 # Disposable esbuild entry files test harnesses write into the repo root (esbuild resolves
 # relative import specifiers against the importing file's own directory, so these can't live
