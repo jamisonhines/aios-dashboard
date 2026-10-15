@@ -24,7 +24,7 @@ const execFileP = promisify(execFile);
 
 // Only launchd labels starting with one of these prefixes are ours to watch.
 // CLI arg 2 (comma-separated) overrides.
-export const DEFAULT_LABEL_PREFIXES = ["com.jaymo.", "com.aios.", "ge.vagabondadventures."];
+export const DEFAULT_LABEL_PREFIXES = ["com.jaymo.", "com.aios.", "ge.vagabondadventures.", "ge.vagabondskischool."];
 
 // Red-first display/sort order. "unknown" means the label is not in
 // `launchctl list` at all (not loaded), which is a red state.
