@@ -8,6 +8,7 @@ import { buildAgentModelsSnapshot, main, parseShimFrontmatter, preserveLegacySna
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const exporter = path.join(here, "vault-scripts", "export-agent-models.mjs");
+const readOrNull = async (file) => { try { return await fs.readFile(file, "utf8"); } catch (error) { if (error?.code === "ENOENT") return null; throw error; } };
 
 // Frontmatter parsing: only the top-level frontmatter `model:` line counts.
 assert.deepEqual(parseShimFrontmatter("---\nname: coder\nmodel: sonnet\n---\nbody"), { name: "coder", model: "sonnet" });
@@ -60,7 +61,9 @@ try {
   const cli = await new Promise((resolve) => { const c = spawn(process.execPath, [exporter, vault, "--out", tempOut], { env: { ...process.env, HOME: fakeHome }, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = ""; c.stdout.on("data", (d) => stdout += d); c.stderr.on("data", (d) => stderr += d); c.once("exit", (code) => resolve({ code, stdout, stderr })); });
   assert.equal(cli.code, 0, `CLI exits cleanly: ${JSON.stringify(cli)}`);
   assert.match(cli.stdout, /agent-models: 4 Claude agent shim\(s\), 1 missing a model line \(nomodel\) ->/, "CLI summary names the missing shim loudly");
-  const written = JSON.parse(await fs.readFile(tempOut, "utf8"));
+  const writtenRaw = await readOrNull(tempOut);
+  assert.notEqual(writtenRaw, null, "--out writes the snapshot to the explicit temp path");
+  const written = JSON.parse(writtenRaw);
   assert.deepEqual(written.missingModel, ["nomodel"]); assert.ok(!JSON.stringify(written).includes("SECRET_CANARY"));
   await assert.rejects(fs.access(path.join(vault, "Operations", "agent-models.json")), "--out never writes the live default path");
   for (const file of canaries) await fs.chmod(file, 0o600);
@@ -72,7 +75,9 @@ try {
   await fs.writeFile(path.join(ops, "agent-models.json"), legacy);
   const historyFile = path.join(ops, "agent-models-history", "2026-09-15-pi.json");
   await main(vault);
-  assert.equal(await fs.readFile(historyFile, "utf8"), legacy, "legacy Pi snapshot is preserved byte-identical at Operations/agent-models-history/2026-09-15-pi.json");
+  // No custom message: the generated diff names the expected and actual history file names.
+  assert.deepEqual(await fs.readdir(path.dirname(historyFile)).catch(() => []), ["2026-09-15-pi.json"]);
+  assert.equal(await readOrNull(historyFile), legacy, "legacy Pi snapshot is preserved byte-identical at Operations/agent-models-history/2026-09-15-pi.json");
   assert.equal(JSON.parse(await fs.readFile(path.join(ops, "agent-models.json"), "utf8")).schemaVersion, 2, "live output becomes the Claude snapshot");
   await fs.writeFile(historyFile, "KEEP_EXISTING_HISTORY");
   await fs.writeFile(path.join(ops, "agent-models.json"), legacy);
