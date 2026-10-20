@@ -4,40 +4,26 @@ import { readFile } from "node:fs/promises";
 const source = await readFile(new URL("./main.ts", import.meta.url), "utf8");
 const styles = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 for (const required of [
-  "Configured model sources",
-  "No additional assignable Pi provider or local model source was discovered.",
-  "Local policy only · future launches only · access and quota unverified.",
-  "Model behavior",
-  "Active sessions do not change. Fallback is native Pi behavior for early provider/model failures.",
-  "renderAgentModelControls(app, modelArea",
-  "modelPickerOptions(snapshot.catalog, settings.enabledModelProviders)",
-  "Cross-provider fallback may use separate billing.",
+  "Agent models (Claude)",
+  "Read-only. Configured = the model: line in .claude/agents/<slug>.md.",
+  "These shims silently inherit the main session's Opus (expensive).",
+  "Before 2026-10-12: Pi / OpenAI (history, read-only)",
+  "computeClaudeAgentModelsView(agentModelsRaw, stats)",
+  "computePiModelHistoryView(historyRaw)",
+  "renderAgentModelReadonly(modelArea",
+  "agentModelsHistoryPath: \"Operations/agent-models-history/2026-09-15-pi.json\"",
   "aios-agent-card",
-  "Details & provenance",
-  "View ${provider.models.length} model",
-  "const isDirty = () =>",
-  "No changes",
-  "Ready to save",
 ]) assert.ok(source.includes(required), `render contract includes: ${required}`);
+// Read-only: no write path, picker or provider policy survives in the view.
+for (const banned of ["agent-models-write", "writeProjectAgentOverride", "readProjectAgentSettings", "enabledModelProviders", "aios-agent-model-save", "aios-agent-model-primary", "aios-agent-model-fallback-picker", "renderAgentModelControls", "Ready to save"]) {
+  assert.ok(!source.includes(banned), `view no longer contains ${banned}`);
+}
 for (const required of [
   "grid-template-areas: \"identity model usage\" \"links links links\"",
-  "grid-area: identity",
   "grid-area: model",
-  "grid-area: usage",
-  "grid-template-areas: \"dot info models action\"",
-  "container-type: inline-size",
-  "@container (max-width: 720px)",
-  "@container (max-width: 460px)",
-  "grid-template-columns: minmax(0, 360px) 88px",
-  "width: 88px",
-  "align-self: center",
-  "grid-template-areas: \"primary\" \"save\" \"meta\" \"state\" \"chain\" \"details\"",
-  "justify-self: start",
-  "white-space: nowrap",
-  "select, .aios-dashboard-root option",
-  "option:disabled",
-  "aios-agent-model-step-action",
+  ".aios-agent-model-configured.is-missing",
+  ".aios-agent-model-table-row",
+  ".aios-agent-model-history",
 ]) assert.ok(styles.includes(required), `layout contract includes: ${required}`);
-assert.ok(!source.includes("renderAgentModelsPanel"), "old detached bottom model-management panel is absent");
-assert.ok(!source.includes("aios-system-agent-model-badge"), "static historical model badge is absent from roster rendering");
+for (const dead of [".aios-agent-model-save", ".aios-agent-model-primary", ".aios-agent-provider-inventory", ".aios-agent-model-fallback"]) assert.ok(!styles.includes(dead), `dead picker style ${dead} is removed`);
 console.log("agentModelsRenderContract: all assertions passed");

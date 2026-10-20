@@ -87,9 +87,9 @@ function buildWiringBundle() {
       treeShaking: false,
       outfile,
       // Keep in sync with esbuild.config.mjs's `external` list (minus "obsidian",
-      // which is aliased to the stub above). The node:* entries are required because
-      // main.ts imports agent-models-write.mjs, which statically imports node:fs and
-      // node:path; without them this bundle fails to resolve while production builds fine.
+      // which is aliased to the stub above). The node:* entries were required while
+      // main.ts imported the retired agent-models-write.mjs (node:fs, node:path); they are
+      // kept so this list stays identical to production.
       external: [
         "electron",
         "child_process",

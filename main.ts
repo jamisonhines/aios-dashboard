@@ -83,16 +83,11 @@ import {
   filterCoordinationQuestions,
   coordinationQuestionFilterCounts,
   spliceAnswer,
-  catalogCandidates,
-  modelPickerOptions,
-  orderedFallbackModels,
-  validateAgentSelection,
-  safeFallbackCandidates,
-  agentModelPickerState,
+  computeClaudeAgentModelsView,
+  computePiModelHistoryView,
   resolveExporterLaunch,
   isUsageExporterOutputPath,
 } from "./model.mjs";
-import { readProjectAgentSettings, writeProjectAgentOverride } from "./agent-models-write.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -149,8 +144,8 @@ interface AiosDashboardSettings {
   usageStatsPath: string; // vault-relative path to the exporter's usage-stats.json
   opsMapPath: string; // vault-relative path to the exporter's ops-map.json
   automationHealthPath: string; // vault-relative path to the exporter's automation-health.json
-  agentModelsPath: string; // vault-relative path to the Pi model snapshot exporter output
-  enabledModelProviders: string[]; // owner-confirmed UI policy, non-secret plugin data
+  agentModelsPath: string; // vault-relative path to the Claude agent-models exporter output
+  agentModelsHistoryPath: string; // vault-relative path to the read-only pre-2026-10-12 Pi/OpenAI snapshot
   dailyBudgetUsd: number; // spend guardrail; 0 = off
   // Manual project drag order (owner feedback 2026-08-30: "I would like to
   // be able to drag projects up and down"). One global array of slugs,
@@ -188,7 +183,7 @@ const DEFAULT_SETTINGS: AiosDashboardSettings = {
   opsMapPath: "Operations/ops-map.json",
   automationHealthPath: "Operations/usage/automation-health.json",
   agentModelsPath: "Operations/agent-models.json",
-  enabledModelProviders: [],
+  agentModelsHistoryPath: "Operations/agent-models-history/2026-09-15-pi.json",
   dailyBudgetUsd: 0,
   projectOrder: [],
 };
@@ -4398,32 +4393,17 @@ async function loadOpsMap(app: App, mapPath: string): Promise<OpsMapManifest | n
   }
 }
 
-interface AgentModelCatalogProvider { id: string; access: "catalog-only" | "configured" | "connected" | "unknown"; availability?: "active" | "inactive" | "unknown"; models: string[]; sources?: string[]; fallbackSafe?: boolean; }
-interface AgentModelSnapshotAgent {
-  name: string;
-  requested?: { model?: string | null; fallbackModels?: string[] };
-  effective: { model?: string | null; source: string; fallbackModels?: string[] };
-  runtimeOnly?: boolean;
-  supported?: boolean;
-  unsupportedReason?: string;
-  writePrecondition?: { digest: string };
-  overrides?: { source: string; model?: string | null; fallbackModels?: string[] }[];
-}
-interface AgentModelsSnapshot {
-  schemaVersion: number;
-  catalog: { source: string; freshness: string; providers: AgentModelCatalogProvider[]; error?: string };
-  agents: AgentModelSnapshotAgent[];
-  errors?: string[];
-}
+interface ClaudeAgentModelRow { slug: string; name: string; file?: string; configured: string | null; status: "set" | "missing" | "inherit"; used: { model: string; runs: number }[]; usedRuns: number; }
+interface ClaudeAgentModelsView { available: boolean; rows: ClaudeAgentModelRow[]; missing: string[]; windowDays: number | null; }
+interface PiModelHistoryView { available: boolean; date: string | null; agents: { name: string; model: string | null }[]; providers: { id: string; models: string[] }[]; }
 
-// This deliberately consumes only the manual export artifact. It does not
-// invoke Pi, BB, auth, provider, or catalog refresh routes from Obsidian.
-async function loadAgentModels(app: App, modelsPath: string): Promise<AgentModelsSnapshot | null> {
+// Read-only: consumes the exporter artifacts only. Nothing in this view
+// writes a model setting (D-2026-10-20-02).
+async function loadJsonArtifact(app: App, vaultPath: string): Promise<any | null> {
   try {
-    if (!(await app.vault.adapter.exists(modelsPath))) return null;
-    const parsed = JSON.parse(await app.vault.adapter.read(modelsPath));
-    if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed?.catalog?.providers) || !Array.isArray(parsed?.agents)) return null;
-    return parsed as AgentModelsSnapshot;
+    if (!(await app.vault.adapter.exists(vaultPath))) return null;
+    const parsed = JSON.parse(await app.vault.adapter.read(vaultPath));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -4943,108 +4923,26 @@ function flattenAgentWiredTo(wiredTo: SystemAgentWiredTo): SystemSkillUsedByRow[
   return [...wiredTo.workflows, ...wiredTo.sops, ...wiredTo.skills];
 }
 
-function modelProvider(model: string): string { return model.includes("/") ? model.split("/", 1)[0] : "Unknown provider"; }
-function modelShortLabel(model: string): string {
-  const raw = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
-  return raw.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+function claudeModelStatusText(row: ClaudeAgentModelRow): string {
+  if (row.status === "missing") return "No model line: inherits the main session's Opus (expensive)";
+  if (row.status === "inherit") return "model: inherit (uses the main session's model)";
+  return row.configured || "";
 }
 
-function renderAgentModelControls(app: App, container: HTMLElement, agent: AgentModelSnapshotAgent | undefined, snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings) {
-  const controls = container.createDiv({ cls: "aios-agent-model-controls" });
-  if (!snapshot || !agent) {
-    controls.createSpan({ cls: "aios-agent-model-readonly", text: "Model assignment unavailable: no matching active Pi agent snapshot." });
-    return;
-  }
-  const assigned = agent.effective.model || "";
-  const pickerOptions = modelPickerOptions(snapshot.catalog, settings.enabledModelProviders);
-  const primary = controls.createEl("select", { cls: "aios-agent-model-primary", attr: { "aria-label": `Primary model for ${agent.name}` } });
-  primary.createEl("option", { text: assigned ? "Select model" : "Inherited parent model", value: "" });
-  for (const option of pickerOptions) {
-    const el = primary.createEl("option", { text: `${modelShortLabel(option.model)} · ${modelProvider(option.model)}`, value: option.model, attr: { title: `${option.model}. ${option.label}` } });
-    el.disabled = !option.selectable;
-  }
-  if (assigned && !pickerOptions.some((option) => option.model === assigned)) {
-    const preserved = primary.createEl("option", { text: `${modelShortLabel(assigned)} · current assignment unavailable`, value: assigned, attr: { title: assigned } });
-    preserved.disabled = true;
-  }
-  primary.value = assigned;
-  const primaryMeta = controls.createDiv({ cls: "aios-agent-model-primary-meta", text: assigned ? `${modelProvider(assigned)} · primary` : "Inherited parent model" });
-  const visibleState = controls.createDiv({ cls: "aios-agent-model-state", text: "Checking configuration..." });
-  const chain = controls.createDiv({ cls: "aios-agent-model-chain" });
-  chain.createSpan({ cls: "aios-agent-model-chain-label", text: "Fallback chain" });
-  const fallbackList = chain.createDiv({ cls: "aios-agent-model-fallbacks" });
-  const fallbackPicker = chain.createEl("select", { cls: "aios-agent-model-fallback-picker", attr: { "aria-label": `Add fallback for ${agent.name}` } });
-  const save = controls.createEl("button", { cls: "aios-agent-model-save", text: "Save" });
-  const details = controls.createEl("details", { cls: "aios-agent-model-details" });
-  details.createEl("summary", { text: "Details & provenance" });
-  const technical = details.createDiv({ cls: "aios-agent-model-technical" });
-  technical.createDiv({ cls: "aios-agent-model-provenance", text: `Effective: ${assigned || "parent session model"} (${agent.effective.source}). Requested: ${agent.requested?.model || "inherit parent model"}.` });
-  if (agent.runtimeOnly) technical.createDiv({ cls: "aios-agent-models-warning", text: "Provider-scoped runtime override may take precedence at launch. This row is not a complete runtime resolution." });
-  const state = visibleState;
-  const warning = technical.createDiv({ cls: "aios-agent-models-warning" });
-  const providerFor = (model: string) => snapshot.catalog.providers.find((provider) => model.startsWith(provider.id + "/"))?.id || null;
-  let fallbacks = orderedFallbackModels(primary.value, agent.effective.fallbackModels || []);
-  let initialPrimary = primary.value;
-  let initialFallbacks = [...fallbacks];
-  let diskCurrent = false;
-  let savePending = false;
-  const isDirty = () => primary.value !== initialPrimary || fallbacks.length !== initialFallbacks.length || fallbacks.some((model, index) => model !== initialFallbacks[index]);
-  const basePath = (app.vault.adapter as any).getBasePath?.();
-  const renderFallbacks = (focus?: string) => {
-    fallbackList.empty();
-    if (focus === "add") fallbackPicker.focus?.();
-    const primaryProvider = providerFor(primary.value);
-    warning.setText(fallbacks.some((model) => providerFor(model) && providerFor(model) !== primaryProvider) ? "Cross-provider fallback may use separate billing." : "");
-    fallbacks.forEach((model, index) => {
-      const row = fallbackList.createDiv({ cls: "aios-agent-model-fallback-row" });
-      if (index) row.createSpan({ cls: "aios-agent-model-fallback-arrow", text: "→", attr: { "aria-hidden": "true" } });
-      row.createSpan({ cls: "aios-agent-model-fallback-step", text: `${index + 1}. ${modelShortLabel(model)}`, attr: { title: model } });
-      const up = row.createEl("button", { cls: "aios-agent-model-step-action", text: "↑", attr: { "aria-label": `Move fallback ${index + 1} up`, title: "Move up" } });
-      const down = row.createEl("button", { cls: "aios-agent-model-step-action", text: "↓", attr: { "aria-label": `Move fallback ${index + 1} down`, title: "Move down" } });
-      const remove = row.createEl("button", { cls: "aios-agent-model-step-action is-remove", text: "×", attr: { "aria-label": `Remove fallback ${index + 1}`, title: "Remove fallback" } });
-      up.disabled = index === 0; down.disabled = index === fallbacks.length - 1;
-      if (focus === `up:${index}` && !up.disabled) up.focus?.(); if (focus === `down:${index}` && !down.disabled) down.focus?.(); if (focus === `remove:${index}`) remove.focus?.();
-      up.onclick = () => { [fallbacks[index - 1], fallbacks[index]] = [fallbacks[index], fallbacks[index - 1]]; renderFallbacks(`down:${index - 1}`); refreshSave(); };
-      down.onclick = () => { [fallbacks[index + 1], fallbacks[index]] = [fallbacks[index], fallbacks[index + 1]]; renderFallbacks(`up:${index + 1}`); refreshSave(); };
-      remove.onclick = () => { fallbacks.splice(index, 1); renderFallbacks(fallbacks.length ? `remove:${Math.min(index, fallbacks.length - 1)}` : "add"); refreshSave(); };
-    });
-  };
-  const renderFallbackPicker = () => {
-    fallbackPicker.empty(); fallbackPicker.createEl("option", { text: "+ Add fallback", value: "" });
-    const candidates = safeFallbackCandidates(snapshot.catalog, primary.value, settings.enabledModelProviders);
-    for (const model of candidates) fallbackPicker.createEl("option", { text: `${modelShortLabel(model)} · ${modelProvider(model)}`, value: model, attr: { title: model } });
-    fallbackPicker.disabled = candidates.length === 0;
-  };
-  const refreshSave = () => {
-    primaryMeta.setText(primary.value ? `${modelProvider(primary.value)} · primary` : "Inherited parent model");
-    if (!Platform.isDesktop || !basePath) { save.disabled = true; state.setText("Saving is desktop-only."); return; }
-    if (agent.supported === false) { save.disabled = true; state.setText(agent.unsupportedReason || "This active Pi agent is read-only."); return; }
-    if (savePending) { save.disabled = true; state.setText("Saving..."); return; }
-    const picker = agentModelPickerState(snapshot.catalog, primary.value, fallbacks, diskCurrent, settings.enabledModelProviders);
-    if (picker.disabled) { save.disabled = true; state.setText(picker.reason || "Configuration changed on disk, refresh and retry."); return; }
-    if (!isDirty()) { save.disabled = true; state.setText("No changes"); return; }
-    save.disabled = false; state.setText(agent.runtimeOnly ? "Ready to save · runtime override may apply" : "Ready to save");
-  };
-  primary.onchange = () => { fallbacks = orderedFallbackModels(primary.value, fallbacks); renderFallbackPicker(); renderFallbacks(); refreshSave(); };
-  fallbackPicker.onchange = () => { if (fallbackPicker.value && !fallbacks.includes(fallbackPicker.value) && fallbackPicker.value !== primary.value) fallbacks.push(fallbackPicker.value); fallbackPicker.value = ""; renderFallbacks(); refreshSave(); };
-  if (!Platform.isDesktop || !basePath) { state.setText("Saving is desktop-only."); save.disabled = true; }
-  else if (agent.supported === false) { state.setText(agent.unsupportedReason || "This active Pi agent is read-only."); save.disabled = true; }
-  else if (agent.writePrecondition) {
-    readProjectAgentSettings(basePath).then((current: any) => { diskCurrent = current.digest === agent.writePrecondition!.digest; state.setText(diskCurrent ? "Configuration matches this snapshot." : "Configuration changed on disk, refresh and retry."); refreshSave(); }).catch((error: Error) => { state.setText(error.message); save.disabled = true; });
-  }
-  save.onclick = async () => {
-    const selection = validateAgentSelection(snapshot.catalog, primary.value, fallbacks, settings.enabledModelProviders);
-    if (savePending || !basePath || !diskCurrent || !selection.valid || !agent.writePrecondition) return;
-    savePending = true; refreshSave();
-    try { const result = await writeProjectAgentOverride(basePath, agent.name, primary.value, fallbacks, agent.writePrecondition.digest); new Notice(result.status === "no-op" ? "No configuration change to save." : "Model assignment saved. Pi reload/restart is required, then run the manual exporter and refresh."); diskCurrent = false; }
-    catch (error) { state.setText(error instanceof Error ? error.message : String(error)); new Notice("Model assignment was not saved."); }
-    finally { savePending = false; refreshSave(); }
-  };
-  renderFallbackPicker(); renderFallbacks(); refreshSave();
+function usedModelsText(row: ClaudeAgentModelRow): string {
+  return row.used.length ? row.used.map((u) => `${u.model} ×${u.runs}`).join(", ") : "no runs";
 }
 
-function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[], snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings) {
-  const snapshotsByName = new Map((snapshot?.agents || []).map((agent) => [agent.name, agent]));
+function renderAgentModelReadonly(container: HTMLElement, row: ClaudeAgentModelRow | undefined, windowDays: number | null) {
+  const box = container.createDiv({ cls: "aios-agent-model-readonly" });
+  if (!row) { box.createSpan({ cls: "aios-agent-models-note", text: "No .claude/agents shim for this agent." }); return; }
+  box.createDiv({ cls: `aios-agent-model-configured${row.status === "set" ? "" : " is-" + row.status}`, text: `Configured: ${claudeModelStatusText(row)}`, attr: { title: row.file || row.slug } });
+  const window = windowDays == null ? "usage window" : `last ${windowDays} day${windowDays === 1 ? "" : "s"}`;
+  box.createDiv({ cls: "aios-agent-model-used", text: `Used (${window}): ${usedModelsText(row)}` });
+}
+
+function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemAgentRow[], models: ClaudeAgentModelsView) {
+  const modelsBySlug = new Map(models.rows.map((row) => [row.slug, row]));
   const roster = container.createDiv({ cls: "aios-agent-roster" });
   for (const row of rows) {
     const card = roster.createDiv({ cls: "aios-agent-card" });
@@ -5053,7 +4951,7 @@ function renderSystemAgentsTable(app: App, container: HTMLElement, rows: SystemA
     else identity.createSpan({ cls: "aios-system-agent-name", text: row.label });
     identity.createDiv({ cls: "aios-agent-role", text: row.description, attr: { title: row.description } });
     const modelArea = card.createDiv({ cls: "aios-agent-model-area" });
-    renderAgentModelControls(app, modelArea, snapshotsByName.get(row.id), snapshot, settings);
+    renderAgentModelReadonly(modelArea, modelsBySlug.get(row.id), models.windowDays);
     const usage = card.createDiv({ cls: "aios-agent-usage", attr: { "aria-label": `${row.label} usage` } });
     for (const [label, value] of [["Cost", row.costUsd == null ? "–" : formatUsd(row.costUsd)], ["Runs", row.runs == null ? "–" : formatCompactNumber(row.runs)], ["Avg/run", row.avgCostUsd == null ? "–" : formatUsd(row.avgCostUsd)]]) { const stat = usage.createDiv({ cls: "aios-agent-usage-stat" }); stat.createSpan({ text: label }); stat.createEl("strong", { text: value }); }
     const linked = flattenAgentWiredTo(row.wiredTo);
@@ -5114,33 +5012,31 @@ function renderSystemAvailableHires(app: App, container: HTMLElement, manifest: 
   }
 }
 
-function renderAgentModelsInventory(container: HTMLElement, snapshot: AgentModelsSnapshot | null, settings: AiosDashboardSettings, savePolicy: () => Promise<void>, redraw: () => void) {
+function renderAgentModelsInventory(container: HTMLElement, models: ClaudeAgentModelsView, history: PiModelHistoryView, historyPath: string) {
   const section = container.createDiv({ cls: "aios-system-section aios-agent-model-inventory" });
-  section.createDiv({ cls: "aios-section-eyebrow", text: "Configured model sources" });
-  section.createDiv({ cls: "aios-agent-models-note", text: "Local policy only · future launches only · access and quota unverified." });
-  const policyDetails = section.createEl("details", { cls: "aios-agent-model-policy" });
-  policyDetails.createEl("summary", { text: "Model behavior" });
-  policyDetails.createDiv({ cls: "aios-agent-models-note", text: "Active sessions do not change. Fallback is native Pi behavior for early provider/model failures. It does not replay completed mutations or switch paid providers automatically." });
-  if (!snapshot) { renderEmptyState(section, "No parseable agent-models.json snapshot. Run: node Operations/scripts/export-agent-models.mjs"); return; }
-  if (snapshot.catalog.error || snapshot.errors?.length) section.createDiv({ cls: "aios-agent-models-error", text: [snapshot.catalog.error, ...(snapshot.errors || [])].filter(Boolean).join(". ") });
-  if (!snapshot.catalog.providers.length) section.createDiv({ cls: "aios-agent-models-error", text: "No assignable Pi model source was discovered. Register a provider or local model in Pi configuration, run the exporter, then refresh." });
-  for (const provider of snapshot.catalog.providers) {
-    const enabled = settings.enabledModelProviders.includes(provider.id); const row = section.createDiv({ cls: "aios-agent-provider-inventory" });
-    const state = provider.availability === "inactive" ? "inactive" : enabled ? "active" : "disabled";
-    row.createSpan({ cls: `aios-agent-provider-state is-${state}`, attr: { "aria-label": `${provider.id} ${state}` } });
-    const info = row.createDiv({ cls: "aios-agent-provider-info" });
-    info.createSpan({ cls: "aios-agent-provider-name", text: provider.id });
-    const origin = provider.sources?.join(" + ") || provider.access;
-    const status = provider.availability === "inactive" ? `${origin} · inactive · ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}` : `${origin} · ${enabled ? "enabled by you" : "disabled by you"} · ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}`;
-    info.createSpan({ cls: "aios-agent-provider-status", text: status });
-    const models = row.createEl("details", { cls: "aios-agent-provider-models" });
-    models.createEl("summary", { text: `View ${provider.models.length} model${provider.models.length === 1 ? "" : "s"}` });
-    const list = models.createDiv({ cls: "aios-agent-provider-model-list" });
-    for (const option of modelPickerOptions({ providers: [provider] }, settings.enabledModelProviders)) list.createSpan({ cls: `aios-agent-provider-model${option.selectable ? "" : " is-disabled"}`, text: modelShortLabel(option.model), attr: { title: `${option.model}. ${option.label}` } });
-    const toggle = row.createEl("button", { cls: "aios-add", text: enabled ? "Disable" : "Enable", attr: { "aria-pressed": String(enabled), "aria-label": `${enabled ? "Disable" : "Enable"} ${provider.id}` } });
-    toggle.addEventListener("click", () => { settings.enabledModelProviders = enabled ? settings.enabledModelProviders.filter((id) => id !== provider.id) : [...new Set([...settings.enabledModelProviders, provider.id])]; void savePolicy().then(redraw); });
+  section.createDiv({ cls: "aios-section-eyebrow", text: "Agent models (Claude)" });
+  section.createDiv({ cls: "aios-agent-models-note", text: "Read-only. Configured = the model: line in .claude/agents/<slug>.md. Used = that agent's runs in the usage window." });
+  if (!models.available) {
+    renderEmptyState(section, "No Claude agent-models snapshot. Run: node Operations/scripts/export-agent-models.mjs");
+  } else {
+    if (models.missing.length) section.createDiv({ cls: "aios-agent-models-error", text: `No model line in ${models.missing.join(", ")}. These shims silently inherit the main session's Opus (expensive). Add a model: line to each.` });
+    const table = section.createDiv({ cls: "aios-agent-model-table" });
+    const head = table.createDiv({ cls: "aios-agent-model-table-row is-head" });
+    for (const text of ["Agent", "Configured", models.windowDays == null ? "Used" : `Used (last ${models.windowDays} day${models.windowDays === 1 ? "" : "s"})`]) head.createSpan({ text });
+    for (const row of models.rows) {
+      const line = table.createDiv({ cls: `aios-agent-model-table-row${row.status === "missing" ? " is-missing" : ""}` });
+      line.createSpan({ cls: "aios-agent-model-table-agent", text: row.slug, attr: { title: row.file || row.slug } });
+      line.createSpan({ cls: `aios-agent-model-configured${row.status === "set" ? "" : " is-" + row.status}`, text: row.status === "missing" ? "MISSING (inherits Opus)" : row.status === "inherit" ? "inherit" : row.configured || "" });
+      line.createSpan({ cls: "aios-agent-model-used", text: usedModelsText(row) });
+    }
   }
-  if (snapshot.catalog.providers.length === 1) section.createDiv({ cls: "aios-agent-models-note", text: "No additional assignable Pi provider or local model source was discovered. Register it in Pi configuration, run the exporter, then refresh." });
+  const past = section.createEl("details", { cls: "aios-agent-model-history" });
+  past.createEl("summary", { text: "Before 2026-10-12: Pi / OpenAI (history, read-only)" });
+  if (!history.available) { past.createDiv({ cls: "aios-agent-models-note", text: `No history snapshot at ${historyPath}.` }); return; }
+  past.createDiv({ cls: "aios-agent-models-note", text: `Snapshot from ${history.date || "an unknown date"}. Pi is no longer used; kept for reference.` });
+  const list = past.createDiv({ cls: "aios-agent-model-table" });
+  for (const agent of history.agents) { const line = list.createDiv({ cls: "aios-agent-model-table-row" }); line.createSpan({ text: agent.name }); line.createSpan({ text: agent.model || "parent session model" }); line.createSpan({ text: "" }); }
+  for (const provider of history.providers) past.createDiv({ cls: "aios-agent-models-note", text: `${provider.id} catalog: ${provider.models.join(", ") || "none"}` });
 }
 
 function renderSystemAgentsSection(
@@ -5148,10 +5044,7 @@ function renderSystemAgentsSection(
   container: HTMLElement,
   manifest: OpsMapManifest,
   stats: UsageStats | null,
-  agentModels: AgentModelsSnapshot | null,
-  settings: AiosDashboardSettings,
-  savePolicy: () => Promise<void>,
-  redraw: () => void
+  agentModels: ClaudeAgentModelsView
 ) {
   const section = container.createDiv({ cls: "aios-system-section" });
   const headRow = section.createDiv({ cls: "aios-system-section-head" });
@@ -5176,7 +5069,7 @@ function renderSystemAgentsSection(
       cls: "aios-system-skills-count",
       text: `${view.totalCount} hired agent${view.totalCount === 1 ? "" : "s"}`,
     });
-    renderSystemAgentsTable(app, section, view.rows, agentModels, settings);
+    renderSystemAgentsTable(app, section, view.rows, agentModels);
   }
 
   // "Generic subagents" (Dispatch escalation, 2026-08-05): non-roster
@@ -5305,16 +5198,19 @@ function renderSystemTab(
   Promise.all([
     loadOpsMap(app, settings.opsMapPath),
     loadUsageStats(app, settings.usageStatsPath),
-    loadAgentModels(app, settings.agentModelsPath),
+    loadJsonArtifact(app, settings.agentModelsPath),
+    loadJsonArtifact(app, settings.agentModelsHistoryPath),
   ]).then(
-    ([manifest, stats, agentModels]) => {
+    ([manifest, stats, agentModelsRaw, historyRaw]) => {
       wrap.empty();
+      const agentModels: ClaudeAgentModelsView = computeClaudeAgentModelsView(agentModelsRaw, stats);
+      const history: PiModelHistoryView = computePiModelHistoryView(historyRaw);
       if (!manifest) {
         renderEmptyState(
           wrap,
           "No system map yet. Run: node Operations/scripts/export-ops-map.mjs"
         );
-        renderAgentModelsInventory(wrap, agentModels, settings, () => plugin.saveSettings(), () => { container.empty(); renderSystemTab(app, container, settings, viewState, plugin); });
+        renderAgentModelsInventory(wrap, agentModels, history, settings.agentModelsHistoryPath);
         return;
       }
 
@@ -5342,8 +5238,8 @@ function renderSystemTab(
         } else if (viewState.systemActiveSubTab === "workflows") {
           renderSystemWorkflowsSopsSection(app, sectionsHost, manifest);
         } else {
-          renderAgentModelsInventory(sectionsHost, agentModels, settings, () => plugin.saveSettings(), redraw);
-          renderSystemAgentsSection(app, sectionsHost, manifest, stats, agentModels, settings, () => plugin.saveSettings(), redraw);
+          renderAgentModelsInventory(sectionsHost, agentModels, history, settings.agentModelsHistoryPath);
+          renderSystemAgentsSection(app, sectionsHost, manifest, stats, agentModels);
         }
       }
 
@@ -5950,7 +5846,7 @@ class AiosDashboardSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Agent models snapshot path")
-      .setDesc("Vault-relative output from the manually run Pi model exporter. The dashboard never refreshes Pi/provider catalogs.")
+      .setDesc("Vault-relative output from the Claude agent-models exporter (configured model per .claude/agents shim). Read-only.")
       .addText((t) =>
         t
           .setPlaceholder(DEFAULT_SETTINGS.agentModelsPath)

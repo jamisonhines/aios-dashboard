@@ -23,7 +23,7 @@ const syntheticEnv = { HOME: fakeHome, PATH: fakeBin };
 const cases = [
   ["vault-scripts/export-ops-map.mjs", "ops-map.json", (json) => Array.isArray(json.nodes) && json.nodes.some((node) => node.id === "synthetic-skill")],
   ["vault-scripts/export-automation-health.mjs", "automation-health.json", (json) => Array.isArray(json.jobs) && json.jobs.some((job) => job.label === "com.aios.synthetic.fixture")],
-  ["vault-scripts/export-agent-models.mjs", "agent-models.json", (json) => Array.isArray(json.agents) && json.agents.some((agent) => agent.name === "Synthetic Agent")],
+  ["vault-scripts/export-agent-models.mjs", "agent-models.json", (json) => Array.isArray(json.agents) && json.agents.some((agent) => agent.slug === "synthetic" && agent.status === "missing")],
 ];
 const run = (script, vault, env = {}) => new Promise((resolve) => {
   const child = spawn(process.execPath, [script, vault], { env: { ...process.env, AIOS_EXPORT_TEST_MODE: "1", ...syntheticEnv, ...env }, stdio: ["ignore", "pipe", "pipe"] });
