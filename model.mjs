@@ -2714,53 +2714,37 @@ export function coordinationQuestionFilterCounts(questions) {
   return { unanswered: list.length - answered, answered, all: list.length };
 }
 
-// Pi agent-model snapshot helpers. These stay pure so the dashboard never
-// infers provider access from credentials or invokes a runtime/catalog route.
-export function modelPickerOptions(catalog, enabledProviders = []) {
-  const providers = Array.isArray(catalog?.providers) ? catalog.providers : [];
-  return providers.flatMap((provider) => (Array.isArray(provider?.models) ? provider.models : []).filter((model) => typeof model === "string" && /^\S+\/\S+$/.test(model)).map((model) => {
-    const inactive = provider.availability === "inactive";
-    const enabled = enabledProviders.includes(provider.id);
-    const selectable = enabled && !inactive;
-    return { model, selectable, label: inactive ? "Subscription inactive" : enabled ? "Enabled by you; subscription and current quota not verified" : "Disabled by you; subscription and current quota not verified" };
-  })).sort((a, b) => a.model.localeCompare(b.model));
-}
-
-export function catalogCandidates(catalog, enabledProviders = []) {
-  return modelPickerOptions(catalog, enabledProviders).filter((option) => option.selectable).map((option) => option.model);
-}
-
-export function orderedFallbackModels(primary, fallbacks) {
-  const seen = new Set([primary]);
-  return (Array.isArray(fallbacks) ? fallbacks : []).filter((model) => {
-    if (typeof model !== "string" || seen.has(model)) return false;
-    seen.add(model);
-    return true;
+// Agent models view (D-2026-10-20-02). Current = Claude specialist shims'
+// configured `model:` lines (export-agent-models.mjs, schemaVersion 2). Used =
+// the usage exporter's own per-agent attribution (usage-stats.json agents[]
+// .models), joined by slug. History = the read-only pre-2026-10-12 Pi/OpenAI
+// snapshot (schemaVersion 1). All pure; nothing here writes configuration.
+export function computeClaudeAgentModelsView(snapshot, usageStats) {
+  const windowDays = typeof usageStats?.windowDays === "number" ? usageStats.windowDays : null;
+  if (!snapshot || snapshot.schemaVersion !== 2 || !Array.isArray(snapshot.agents)) return { available: false, rows: [], missing: [], windowDays };
+  const usageByKey = new Map((Array.isArray(usageStats?.agents) ? usageStats.agents : []).map((a) => [a.key, a]));
+  const rows = snapshot.agents.map((agent) => {
+    const usage = usageByKey.get(agent.slug);
+    const used = Object.entries(usage?.models || {})
+      .map(([name, m]) => ({ model: name, runs: Number(m?.runs) || 0 }))
+      .sort((a, b) => b.runs - a.runs || a.model.localeCompare(b.model));
+    return { slug: agent.slug, name: agent.name || agent.slug, file: agent.file, configured: agent.model || null, status: agent.status, used, usedRuns: Number(usage?.runs) || 0 };
   });
+  return { available: true, rows, missing: rows.filter((r) => r.status === "missing").map((r) => r.slug), windowDays };
 }
 
-export function safeFallbackCandidates(catalog, primary, enabledProviders = []) {
-  const providers = Array.isArray(catalog?.providers) ? catalog.providers : [];
-  return providers
-    .filter((provider) => enabledProviders.includes(provider?.id) && provider?.availability !== "inactive")
-    .flatMap((provider) => Array.isArray(provider.models) ? provider.models : [])
-    .filter((model) => typeof model === "string" && /^\S+\/\S+$/.test(model) && model !== primary)
-    .sort();
-}
-
-export function validateAgentSelection(catalog, primary, fallbacks, enabledProviders = []) {
-  const candidates = new Set(catalogCandidates(catalog, enabledProviders));
-  if (!candidates.has(primary)) return { valid: false, reason: "Select an exact cached catalog model." };
-  const safeFallbacks = new Set(safeFallbackCandidates(catalog, primary, enabledProviders));
-  if (!orderedFallbackModels(primary, fallbacks).every((model) => safeFallbacks.has(model))) {
-    return { valid: false, reason: "Fallback must be an exact cached model from a provider enabled by you." };
-  }
-  return { valid: true, reason: null };
-}
-
-export function agentModelPickerState(catalog, primary, fallbacks, snapshotCurrent, enabledProviders = []) {
-  const selection = validateAgentSelection(catalog, primary, fallbacks, enabledProviders);
-  return { disabled: !snapshotCurrent || !selection.valid, reason: snapshotCurrent ? selection.reason : "Configuration changed on disk, refresh and retry." };
+export function computePiModelHistoryView(history) {
+  if (!history || history.schemaVersion !== 1 || !Array.isArray(history.agents)) return { available: false, date: null, agents: [], providers: [] };
+  const generatedAt = typeof history.generatedAt === "string" ? history.generatedAt : null;
+  return {
+    available: true,
+    date: generatedAt ? generatedAt.slice(0, 10) : null,
+    agents: history.agents
+      .map((a) => ({ name: String(a?.name || "unknown"), model: a?.effective?.model || a?.requested?.model || null }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    providers: (Array.isArray(history.catalog?.providers) ? history.catalog.providers : [])
+      .map((p) => ({ id: String(p?.id || "unknown"), models: Array.isArray(p?.models) ? p.models.filter((m) => typeof m === "string") : [] })),
+  };
 }
 
 // tsk-2026-09-18-020: which Node binary should launch the usage exporter.
@@ -2930,16 +2914,3 @@ export function isUsageExporterOutputPath(path, usageStatsPath) {
   return false;
 }
 
-export function resolveAgentConfiguration(agent, frontmatter = {}, userSettings = {}, projectSettings = {}) {
-  const user = userSettings?.subagents || userSettings || {}; const project = projectSettings?.subagents || projectSettings || {};
-  const userOverride = user.agentOverrides?.[agent]; const projectOverride = project.agentOverrides?.[agent];
-  const has = (object, key) => object && Object.prototype.hasOwnProperty.call(object, key);
-  const rawModel = has(projectOverride, "model") ? projectOverride.model : has(userOverride, "model") ? userOverride.model : frontmatter?.model;
-  const defaultModel = project.defaultModel ?? user.defaultModel ?? null;
-  const model = rawModel === "inherit" || rawModel === false ? null : rawModel || defaultModel;
-  const rawFallbacks = has(projectOverride, "fallbackModels") ? projectOverride.fallbackModels : has(userOverride, "fallbackModels") ? userOverride.fallbackModels : frontmatter?.fallbackModels;
-  const fallbackModels = rawFallbacks === false ? [] : orderedFallbackModels(model, rawFallbacks || []);
-  const source = rawModel === false ? "runtime parent model (model cleared by override)" : has(projectOverride, "model") ? "project agent override" : has(userOverride, "model") ? "user agent override" : frontmatter?.model === "inherit" ? "parent session model (inherit)" : frontmatter?.model ? "project agent frontmatter" : defaultModel ? "subagents.defaultModel" : "parent session model";
-  const providerSpecific = Object.values(project.agentOverridesByProvider || {}).some((byAgent) => byAgent?.[agent]);
-  return { effective: { model, source, fallbackModels }, runtimeOnly: Boolean(providerSpecific), overrides: [ ...(userOverride ? [{ source: "user agent override", model: userOverride.model, fallbackModels: userOverride.fallbackModels }] : []), ...(projectOverride ? [{ source: "project agent override", model: projectOverride.model, fallbackModels: projectOverride.fallbackModels }] : []) ] };
-}

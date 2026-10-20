@@ -2,76 +2,55 @@ import "./testFileTimeout.mjs";
 import assert from "node:assert";
 import esbuild from "esbuild";
 import fs from "node:fs";
-import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { computeClaudeAgentModelsView, computePiModelHistoryView } from "./model.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-model-dom-"));
 const stub = path.join(dir, "obsidian.mjs"), entry = path.join(root, ".agent-model-dom-entry.ts"), out = path.join(dir, "out.mjs");
-fs.writeFileSync(stub, `export class App{}; export class ItemView{}; export class Menu{}; export class Modal{}; export class Notice{constructor(message){globalThis.__notices.push(message)}}; export const Platform={isDesktop:true}; export class Plugin{}; export class PluginSettingTab{}; export class Scope{}; export class Setting{}; export class TFile{}; export class TFolder{}; export class WorkspaceLeaf{}; export const normalizePath=(x)=>x; export const setIcon=()=>{};`);
+fs.writeFileSync(stub, `export class App{}; export class ItemView{}; export class Menu{}; export class Modal{}; export class Notice{}; export const Platform={isDesktop:true}; export class Plugin{}; export class PluginSettingTab{}; export class Scope{}; export class Setting{}; export class TFile{}; export class TFolder{}; export class WorkspaceLeaf{}; export const normalizePath=(x)=>x; export const setIcon=()=>{};`);
 fs.writeFileSync(entry, fs.readFileSync(path.join(root, "main.ts"), "utf8") + "\nexport { renderAgentModelsInventory as inventory, renderSystemAgentsTable as roster };\n");
 try {
   esbuild.buildSync({ absWorkingDir: root, entryPoints: [path.basename(entry)], bundle: true, format: "esm", outfile: out, treeShaking: false, external: ["electron","child_process","node:crypto","node:fs","node:path","@codemirror/*","@lezer/*"], alias: { obsidian: stub } });
-  globalThis.__notices = [];
   const { inventory, roster } = await import(pathToFileURL(out).href);
-  function el(tag = "div", opts = {}) { const node = { tag, children: [], text: opts.text || "", value: opts.value || "", disabled: false, onclick: null, onchange: null, cls: opts.cls || "", attrs: opts.attr || {}, focused: false, focus(){if(!this.disabled)this.focused=true;}, empty(){this.children=[];}, addEventListener(_event, handler){this.onclick=handler;}, setText(v){this.text=v;}, createDiv(o={}){const x=el("div",o);this.children.push(x);return x;}, createSpan(o={}){const x=el("span",o);this.children.push(x);return x;}, createEl(t,o={}){const x=el(t,o);this.children.push(x);return x;} }; return node; }
-  const walk = (n, out = []) => { out.push(n); n.children.forEach((c) => walk(c, out)); return out; };
-  const sleep = () => new Promise((resolve) => setTimeout(resolve, 15));
-  const digest = (raw) => `sha256:${createHash("sha256").update(raw).digest("hex")}`;
-  const vault = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-model-dom-vault-")); await fsp.mkdir(path.join(vault, ".pi"));
-  const raw = '{"subagents":{"agentOverrides":{}}}\n'; await fsp.writeFile(path.join(vault, ".pi", "settings.json"), raw);
-  const snapshot = { schemaVersion: 1, catalog: { source: "fixture", freshness: "unknown", providers: [ { id: "p", access: "catalog-only", availability: "unknown", models: ["p/current", "p/new", "p/third"] }, { id: "inactive", access: "catalog-only", availability: "inactive", models: ["inactive/model"] } ] }, agents: [ { name: "tooling", effective: { model: "p/current", source: "project agent frontmatter", fallbackModels: [] }, requested: { model: "p/current", fallbackModels: [] }, runtimeOnly: true, overrides: [{ source: "user agent override", model: "p/current" }], supported: true, writePrecondition: { digest: digest(raw) } }, { name: "package-agent", effective: { model: "p/current", source: "project agent frontmatter", fallbackModels: [] }, supported: false, unsupportedReason: "Package-qualified project agent requires native package discovery; read-only." } ] };
-  const app = { vault: { adapter: { getBasePath: () => vault } }, workspace: { openLinkText(){} } };
-  const settings = { enabledModelProviders: [] }; let policyWrites = 0;
-  const inventoryHost = el(); inventory(inventoryHost, { ...snapshot, catalog: { ...snapshot.catalog, providers: [snapshot.catalog.providers[0]] } }, settings, async () => { policyWrites++; }, () => {});
-  let nodes = walk(inventoryHost);
-  assert.ok(nodes.some((n) => n.text === "Configured model sources"), "top inventory renders configured source heading");
-  assert.ok(nodes.some((n) => n.text.includes("No additional assignable Pi provider or local model source")), "missing local source is an actionable gap, not a fake model");
-  await nodes.find((n) => n.text === "Enable").onclick();
-  assert.deepEqual(settings.enabledModelProviders, ["p"]); assert.equal(policyWrites, 1, "provider toggle persists dashboard policy only");
-  settings.enabledModelProviders.push("inactive");
-  const longRole = "Owns integrations, hooks, automation wiring, external imports and operational safety checks across every connected system.";
-  const rows = [ { id: "tooling", label: "Tooling", path: "Agents/Tooling/AGENTS.md", description: longRole, wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null }, { id: "package-agent", label: "Package", description: "Package-qualified implementation role.", wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null }, { id: "history-only", label: "History", description: "Historical-only activity role.", wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null } ];
-  const host = el(); roster(app, host, rows, snapshot, settings); await sleep(); nodes = walk(host);
-  assert.equal(nodes.filter((n) => n.cls === "aios-agent-model-primary").length, 2, "every snapshot-backed roster row has one primary control; history-only row has none");
-  assert.ok(nodes.some((n) => n.text === "Tooling" && n.cls === "aios-system-agent-name-link"), "roster renders the agent name as the contract link");
+  function el(tag = "div", opts = {}) { const node = { tag, children: [], text: opts.text || "", cls: opts.cls || "", attrs: opts.attr || {}, empty(){this.children=[];}, addEventListener(){}, setText(v){this.text=v;}, createDiv(o={}){const x=el("div",o);this.children.push(x);return x;}, createSpan(o={}){const x=el("span",o);this.children.push(x);return x;}, createEl(t,o={}){const x=el(t,o);this.children.push(x);return x;} }; return node; }
+  const walk = (n, acc = []) => { acc.push(n); n.children.forEach((c) => walk(c, acc)); return acc; };
+
+  const snapshot = { schemaVersion: 2, agents: [
+    { slug: "coder", name: "coder", file: ".claude/agents/coder.md", model: "sonnet", status: "set" },
+    { slug: "nomodel", name: "nomodel", file: ".claude/agents/nomodel.md", model: null, status: "missing" },
+  ], missingModel: ["nomodel"], errors: [] };
+  const stats = { windowDays: 35, agents: [{ key: "coder", runs: 5, models: { "claude-sonnet-5": { runs: 4 }, "claude-opus-5": { runs: 1 } } }] };
+  const view = computeClaudeAgentModelsView(snapshot, stats);
+  const history = computePiModelHistoryView({ schemaVersion: 1, generatedAt: "2026-09-15T10:02:14.953Z", catalog: { providers: [{ id: "openai-codex", models: ["openai-codex/gpt-5.5"] }] }, agents: [{ name: "coder", effective: { model: "openai-codex/gpt-5.6-terra" } }] });
+
+  const host = el(); inventory(host, view, history, "Operations/agent-models-history/2026-09-15-pi.json");
+  let nodes = walk(host);
+  assert.ok(nodes.some((n) => n.text === "Agent models (Claude)"), "current section is labelled Claude");
+  assert.ok(nodes.some((n) => n.cls === "aios-agent-models-error" && n.text.startsWith("No model line in nomodel.") && n.text.includes("Opus (expensive)")), "missing model line is flagged loudly by slug");
+  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-configured is-missing" && n.text === "MISSING (inherits Opus)"), "missing row is styled as missing");
+  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-configured" && n.text === "sonnet"), "configured model renders from the shim");
+  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-used" && n.text === "claude-sonnet-5 ×4, claude-opus-5 ×1"), "used models render with run counts from usage attribution");
+  assert.ok(nodes.some((n) => n.text === "Used (last 35 days)"), "used column names the usage window");
+  assert.ok(nodes.some((n) => n.tag === "summary" && n.text === "Before 2026-10-12: Pi / OpenAI (history, read-only)"), "history is a labelled read-only section");
+  assert.ok(nodes.some((n) => n.text === "openai-codex/gpt-5.6-terra"), "history keeps the Pi/OpenAI model per agent");
+  assert.ok(nodes.some((n) => n.text === "openai-codex catalog: openai-codex/gpt-5.5"), "history keeps the Pi catalog");
+  for (const tag of ["select", "button", "input"]) assert.ok(!nodes.some((n) => n.tag === tag), `inventory renders no ${tag}: read-only`);
+
+  const noHistory = el(); inventory(noHistory, computeClaudeAgentModelsView(null, stats), computePiModelHistoryView(null), "Operations/agent-models-history/2026-09-15-pi.json"); nodes = walk(noHistory);
+  assert.ok(nodes.some((n) => n.text.includes("No Claude agent-models snapshot. Run: node Operations/scripts/export-agent-models.mjs")), "missing snapshot shows the exporter command");
+  assert.ok(nodes.some((n) => n.text === "No history snapshot at Operations/agent-models-history/2026-09-15-pi.json."), "missing history names its path");
+
+  const rows = [ { id: "coder", label: "Coder", path: "Agents/Coder/AGENTS.md", description: "Implementer.", wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null }, { id: "nomodel", label: "No model", description: "Forgot.", wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null }, { id: "history-only", label: "History", description: "Not a shim.", wiredTo: { workflows: [], sops: [], skills: [] }, costUsd: null, runs: null, avgCostUsd: null } ];
+  const rosterHost = el(); roster({ workspace: { openLinkText(){} } }, rosterHost, rows, view); nodes = walk(rosterHost);
   const firstCard = nodes.find((n) => n.cls === "aios-agent-card");
-  assert.deepEqual(firstCard.children.slice(0, 3).map((n) => n.cls), ["aios-agent-identity", "aios-agent-model-area", "aios-agent-usage"], "production child order is identity, model, usage and does not rely on CSS auto-placement");
-  const role = nodes.find((n) => n.cls === "aios-agent-role");
-  assert.equal(role.text, longRole, "role keeps full text for accessibility/title access while CSS clamps its visible line");
-  assert.equal(role.attrs.title, longRole, "long role exposes full copy in title access");
-  assert.ok(nodes.some((n) => n.tag === "details") && nodes.some((n) => n.text === "Details & provenance"), "provenance uses keyboard-native progressive disclosure");
-  assert.equal(nodes.find((n) => n.cls === "aios-agent-model-primary").attrs["aria-label"], "Primary model for tooling", "primary control has a row-specific accessible name");
-  assert.equal(nodes.find((n) => n.value === "inactive/model").disabled, true, "inactive provider models stay visible but disabled even when owner-enabled");
-  assert.ok(nodes.some((n) => n.text.includes("Effective: p/current (project agent frontmatter). Requested: p/current.")), "effective and requested assignment provenance stay available in details");
-  assert.ok(nodes.some((n) => n.text.includes("Provider-scoped runtime override may take precedence")), "runtime-only assignment warning stays visible");
-  assert.ok(nodes.some((n) => n.text.includes("no matching active Pi agent snapshot")), "unmatched roster join remains non-editable");
-  assert.ok(nodes.some((n) => n.text.includes("Package-qualified")), "unsupported snapshot row remains non-editable");
-  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-state" && n.text === "No changes"), "fresh exact assignment disables Save as unchanged");
-  const unchangedSave = nodes.find((n) => n.text === "Save");
-  assert.equal(unchangedSave.cls, "aios-agent-model-save", "unchanged Save keeps its compact grid-control class");
-  assert.equal(unchangedSave.disabled, true, "unchanged valid assignment cannot be saved");
-  const primary = nodes.find((n) => n.cls === "aios-agent-model-primary"); primary.value = "p/new"; primary.onchange(); nodes = walk(host);
-  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-state" && n.text.includes("Ready to save")), "valid primary edit becomes dirty and ready to save");
-  primary.value = "p/current"; primary.onchange(); nodes = walk(host);
-  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-state" && n.text === "No changes"), "reverting exact primary and fallback order returns to unchanged");
-  primary.value = "p/new"; primary.onchange(); nodes = walk(host);
-  const fallback = nodes.find((n) => n.cls === "aios-agent-model-fallback-picker"); fallback.value = "p/current"; fallback.onchange(); nodes = walk(host);
-  assert.ok(nodes.some((n) => n.text === "1. Current"), "keyboard-native select adds an explicit ordered fallback");
-  fallback.value = "p/third"; fallback.onchange(); nodes = walk(host);
-  const moveDown = nodes.find((n) => n.attrs["aria-label"] === "Move fallback 1 down" && !n.disabled); moveDown.onclick(); nodes = walk(host);
-  assert.equal(nodes.filter((n) => n.cls === "aios-agent-model-fallback-step").length, 2, "fallback chain renders two ordered steps after edits");
-  assert.ok(nodes.some((n) => n.attrs["aria-label"] === "Move fallback 2 up" && n.focused && !n.disabled), "boundary reorder restores focus to an enabled control");
-  assert.ok(nodes.some((n) => n.cls.includes("aios-agent-model-step-action") && n.text === "×"), "fallback controls render compact icon-like buttons with accessible labels");
-  nodes.find((n) => n.attrs["aria-label"] === "Remove fallback 1").onclick(); nodes = walk(host);
-  nodes.find((n) => n.attrs["aria-label"] === "Remove fallback 1").onclick(); nodes = walk(host);
-  assert.ok(nodes.find((n) => n.cls === "aios-agent-model-fallback-picker").focused, "last fallback removal restores focus to Add fallback");
-  const fallbackAfterRemoval = nodes.find((n) => n.cls === "aios-agent-model-fallback-picker"); fallbackAfterRemoval.value = "p/current"; fallbackAfterRemoval.onchange();
-  nodes = walk(host); const save = nodes.find((n) => n.text === "Save"); assert.equal(save.disabled, false, "enabled provider permits exact cached selection"); await save.onclick();
-  const saved = JSON.parse(await fsp.readFile(path.join(vault, ".pi", "settings.json"), "utf8"));
-  assert.deepEqual(saved.subagents.agentOverrides.tooling, { model: "p/new", fallbackModels: ["p/current"] }, "save persists exact primary and ordered fallback");
-  nodes = walk(host); assert.ok(nodes.some((n) => n.cls === "aios-agent-model-state" && n.text.includes("Configuration changed on disk")), "successful save resets initial state but marks the consumed snapshot stale until refresh");
-  await fsp.rm(vault, { recursive: true, force: true }); console.log("agentModelsDom: all assertions passed");
+  assert.deepEqual(firstCard.children.slice(0, 3).map((n) => n.cls), ["aios-agent-identity", "aios-agent-model-area", "aios-agent-usage"], "card order unchanged");
+  assert.ok(nodes.some((n) => n.text === "Configured: sonnet"), "roster card shows the configured model");
+  assert.ok(nodes.some((n) => n.text === "Used (last 35 days): claude-sonnet-5 ×4, claude-opus-5 ×1"), "roster card shows used models");
+  assert.ok(nodes.some((n) => n.cls === "aios-agent-model-configured is-missing" && n.text.includes("inherits the main session's Opus")), "roster card flags missing model line");
+  assert.ok(nodes.some((n) => n.text === "Used (last 35 days): no runs"), "a shim with no runs says so");
+  assert.ok(nodes.some((n) => n.text === "No .claude/agents shim for this agent."), "a roster row without a shim is labelled");
+  for (const tag of ["select", "button"]) assert.ok(!nodes.some((n) => n.tag === tag), `roster renders no ${tag}: read-only`);
+  console.log("agentModelsDom: all assertions passed");
 } finally { fs.rmSync(entry, { force: true }); fs.rmSync(dir, { recursive: true, force: true }); }

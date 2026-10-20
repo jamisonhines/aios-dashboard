@@ -2783,26 +2783,17 @@
 .aios-dashboard-root .aios-system-agent-name-link:hover { color: var(--aios-accent-hi); text-decoration: underline; }
 .aios-dashboard-root .aios-agent-role { margin-top: 4px; color: var(--aios-dim); font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aios-dashboard-root .aios-agent-model-area { grid-area: model; min-width: 0; }
-.aios-dashboard-root .aios-agent-model-controls { display: grid; grid-template-columns: minmax(0, 360px) 88px; grid-template-areas: "primary save" "meta state" "chain chain" "details details"; gap: 4px 8px; min-width: 0; align-items: center; }
-.aios-dashboard-root .aios-agent-model-primary { grid-area: primary; width: 100%; min-width: 0; font-weight: 600; color: var(--aios-text); background: var(--aios-surface-2); border: 1px solid var(--aios-border-hi); border-radius: 0; padding: 5px 26px 5px 8px; line-height: 1.2; }
-.aios-dashboard-root .aios-agent-model-primary-meta { grid-area: meta; margin: 0; color: var(--aios-faint); font-size: 10px; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-model-save { grid-area: save; width: 88px; min-height: 28px; align-self: center; justify-self: start; white-space: nowrap; background: var(--aios-accent); border: 1px solid var(--aios-accent); color: #fff; border-radius: 0; padding: 0 10px; font-weight: 600; }
-.aios-dashboard-root .aios-agent-model-save:disabled { opacity: 1; background: var(--aios-surface-2); border-color: var(--aios-border-hi); color: var(--aios-dim); }
-.aios-dashboard-root .aios-agent-model-state { grid-area: state; color: var(--aios-faint); font-size: 10px; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-model-chain { grid-area: chain; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding-top: 6px; border-top: 1px solid var(--aios-border); min-width: 0; }
-.aios-dashboard-root .aios-agent-model-chain-label { color: var(--aios-faint); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; }
-.aios-dashboard-root .aios-agent-model-fallbacks { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.aios-dashboard-root .aios-agent-model-fallback-row { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; color: var(--aios-dim); font-size: 11px; min-width: 0; }
-.aios-dashboard-root .aios-agent-model-fallback-arrow { color: var(--aios-faint); }
-.aios-dashboard-root .aios-agent-model-fallback-step { border: 1px solid var(--aios-border); padding: 2px 5px; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-model-step-action { width: 20px; height: 20px; border: 1px solid var(--aios-border); border-radius: 0; padding: 0; font-size: 12px; line-height: 1; color: var(--aios-dim); background: var(--aios-track); }
-.aios-dashboard-root .aios-agent-model-step-action:hover { color: var(--aios-text); border-color: var(--aios-border-hi); }
-.aios-dashboard-root .aios-agent-model-step-action.is-remove:hover { color: var(--aios-p1); }
-.aios-dashboard-root .aios-agent-model-step-action:disabled { opacity: .35; }
-.aios-dashboard-root .aios-agent-model-fallback-picker { max-width: 170px; min-width: 0; font-size: 11px; }
-.aios-dashboard-root .aios-agent-model-details { grid-area: details; color: var(--aios-faint); font-size: 11px; min-width: 0; }
-.aios-dashboard-root .aios-agent-model-details summary { cursor: pointer; width: fit-content; }
-.aios-dashboard-root .aios-agent-model-technical { padding-top: 6px; overflow-wrap: anywhere; }
+.aios-dashboard-root .aios-agent-model-configured { color: var(--aios-text); font-weight: 600; overflow-wrap: anywhere; }
+.aios-dashboard-root .aios-agent-model-configured.is-missing { color: var(--aios-p1); font-weight: 700; }
+.aios-dashboard-root .aios-agent-model-configured.is-inherit { color: var(--aios-p2); }
+.aios-dashboard-root .aios-agent-model-used { color: var(--aios-dim); font-size: 11px; overflow-wrap: anywhere; }
+.aios-dashboard-root .aios-agent-model-table { display: grid; gap: 0; margin-top: 6px; min-width: 0; }
+.aios-dashboard-root .aios-agent-model-table-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(120px, 1.2fr) minmax(0, 2fr); gap: 8px; padding: 5px 0; border-top: 1px solid var(--aios-border); align-items: baseline; min-width: 0; font-size: 12px; }
+.aios-dashboard-root .aios-agent-model-table-row.is-head { color: var(--aios-faint); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; }
+.aios-dashboard-root .aios-agent-model-table-row.is-missing { background: color-mix(in srgb, var(--aios-p1) 10%, transparent); }
+.aios-dashboard-root .aios-agent-model-history { margin-top: 10px; color: var(--aios-faint); font-size: 11px; }
+.aios-dashboard-root .aios-agent-model-history summary { cursor: pointer; width: fit-content; }
+@container (max-width: 460px) { .aios-dashboard-root .aios-agent-model-table-row { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
 .aios-dashboard-root .aios-agent-model-readonly { color: var(--aios-faint); font-size: 11px; overflow-wrap: anywhere; }
 .aios-dashboard-root .aios-agent-usage { grid-area: usage; display: grid; grid-template-columns: repeat(3, minmax(42px, 1fr)); gap: 7px; text-align: right; font-variant-numeric: tabular-nums; align-self: center; padding-top: 2px; }
 .aios-dashboard-root .aios-agent-usage-stat { display: grid; gap: 2px; color: var(--aios-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
@@ -2810,21 +2801,7 @@
 .aios-dashboard-root .aios-agent-links { grid-area: links; color: var(--aios-faint); font-size: 11px; min-width: 0; }
 .aios-dashboard-root .aios-agent-links summary { cursor: pointer; width: fit-content; }
 .aios-dashboard-root .aios-agent-links-list { padding-top: 6px; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-provider-inventory { display: grid; grid-template-columns: 8px minmax(0, 1fr) minmax(92px, auto) auto; grid-template-areas: "dot info models action"; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--aios-border); min-width: 0; }
-.aios-dashboard-root .aios-agent-provider-state { grid-area: dot; width: 7px; height: 7px; border-radius: 50%; background: var(--aios-faint); display: inline-block; }
-.aios-dashboard-root .aios-agent-provider-state.is-active { background: var(--aios-p4); }
-.aios-dashboard-root .aios-agent-provider-state.is-inactive { background: var(--aios-faint); }
-.aios-dashboard-root .aios-agent-provider-info { grid-area: info; display: grid; gap: 2px; min-width: 0; }
-.aios-dashboard-root .aios-agent-provider-name { font-weight: 650; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-provider-status { color: var(--aios-faint); font-size: 11px; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-provider-models { grid-area: models; min-width: 0; }
-.aios-dashboard-root .aios-agent-provider-models summary { color: var(--aios-dim); cursor: pointer; font-size: 11px; white-space: nowrap; }
-.aios-dashboard-root .aios-agent-provider-model-list { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 6px; }
-.aios-dashboard-root .aios-agent-provider-model { color: var(--aios-dim); font-size: 11px; border: 1px solid var(--aios-border); padding: 2px 5px; overflow-wrap: anywhere; }
-.aios-dashboard-root .aios-agent-provider-model.is-disabled { color: var(--aios-faint); opacity: .7; }
-.aios-dashboard-root .aios-agent-provider-inventory > button { grid-area: action; white-space: nowrap; }
 @container (max-width: 720px) { .aios-dashboard-root .aios-agent-card { grid-template-columns: 1fr; grid-template-areas: "identity" "model" "usage" "links"; gap: 9px; } .aios-dashboard-root .aios-agent-usage { width: min(100%, 220px); text-align: left; } }
-@container (max-width: 460px) { .aios-dashboard-root .aios-agent-model-controls { grid-template-columns: minmax(0, 1fr); grid-template-areas: "primary" "save" "meta" "state" "chain" "details"; } .aios-dashboard-root .aios-agent-model-save { justify-self: start; width: 88px; min-height: 28px; } .aios-dashboard-root .aios-agent-model-state { text-align: left; white-space: normal; overflow-wrap: anywhere; } .aios-dashboard-root .aios-agent-provider-inventory { grid-template-columns: 8px minmax(0, 1fr) auto; grid-template-areas: "dot info action" "dot models models"; } }
 /* "Generic subagents" (Dispatch escalation, 2026-08-05): visually distinct
    from the roster table -- a dashed top border and a muted eyebrow set it
    apart as "real spend, no specialist" rather than a 9th roster row. */
@@ -2852,8 +2829,6 @@
 }
 .aios-dashboard-root .aios-agent-models-warning,
 .aios-dashboard-root .aios-agent-models-error { color: var(--aios-p2); }
-.aios-dashboard-root .aios-agent-model-policy { margin: 2px 0 5px; color: var(--aios-faint); font-size: 11px; }
-.aios-dashboard-root .aios-agent-model-policy summary { cursor: pointer; width: fit-content; }
 .aios-dashboard-root select, .aios-dashboard-root option { color: var(--aios-text); background-color: var(--aios-surface-2); }
 .aios-dashboard-root select { border: 1px solid var(--aios-border-hi); border-radius: 0; }
 .aios-dashboard-root option:disabled { color: var(--aios-faint); background-color: var(--aios-track); }
