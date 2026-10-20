@@ -80,6 +80,8 @@ test('deploy documentation and test-chain contract', () => {
   assert.ok(readFileSync(new URL('./deployGuard.test.mjs', import.meta.url), 'utf8').includes("import './testFileTimeout.mjs';"), 'deploy guard tests must load hard timeout');
   const readme = readFileSync(new URL('README.md', srcDir), 'utf8');
   assert.match(readme, /Deploy refuses before building or copying/);
+  assert.match(readme, /HEAD is the tip of local `main`/);
+  assert.match(readme, /deliberate rollback/);
   assert.match(readme, /AIOS_INTEGRATION_BRANCH=<branch>/);
   assert.match(readme, /--allow-unmerged/);
 });
@@ -87,10 +89,30 @@ test('deploy documentation and test-chain contract', () => {
 test('HEAD in integration branch deploys unchanged artifacts and output', () => {
   const f = fixture(); f.deployed(f.run());
 });
-test('HEAD behind integration branch is contained and deploys', () => {
+// Integration advances one commit past HEAD: HEAD is contained but behind the tip (D-2026-10-20-01).
+function behindFixture() {
   const f = fixture(); f.git('branch', 'older');
   writeFileSync(join(f.repo, 'future'), 'future'); f.git('add', '.'); f.git('commit', '-m', 'Integration advances');
-  f.git('switch', 'older'); f.deployed(f.run());
+  const tip = f.git('rev-parse', '--short', 'main');
+  f.git('switch', 'older');
+  return { ...f, head: f.git('rev-parse', '--short', 'HEAD'), tip };
+}
+test('HEAD behind integration tip refuses before build or copy', () => {
+  const f = behindFixture(); assert.notEqual(f.head, f.tip, 'fixture HEAD must differ from tip');
+  const r = f.run(); assert.notEqual(r.status, 0, 'HEAD behind tip must refuse');
+  assert.ok(r.stderr.includes(`Refusing deploy: HEAD ${f.head} is behind integration branch 'main' tip ${f.tip}. Check out the tip of 'main', or pass --allow-unmerged for a deliberate rollback.`), r.stderr);
+  assert.doesNotMatch(r.stderr, /not contained|dirty/, 'only the tip guard may fire');
+  f.untouched();
+});
+test('HEAD behind integration tip with --allow-unmerged deploys with rollback reminders', () => {
+  const f = behindFixture(); const r = f.run(['--allow-unmerged', f.vault]); f.deployed(r);
+  const reminder = `WARNING: ROLLBACK: HEAD ${f.head} is behind integration branch 'main' tip ${f.tip}; redeploy from the tip when the rollback is over.`;
+  assert.equal(r.stderr.split(reminder).length - 1, 2, `rollback reminder must appear twice: ${r.stderr}`);
+});
+test('HEAD at advanced integration tip deploys', () => {
+  const f = behindFixture(); f.git('switch', '--detach', 'main');
+  assert.equal(f.git('rev-parse', '--short', 'HEAD'), f.tip);
+  const r = f.run(); f.deployed(r); assert.equal(r.stderr, '');
 });
 test('untracked files refuse before build or copy', () => {
   const f = fixture(); writeFileSync(join(f.repo, 'untracked'), 'not committed');
@@ -117,7 +139,7 @@ test('unmerged side branch refuses before build or copy; printed command fast-fo
   f.deployed(f.run());
 });
 test('integration branch checked out nowhere prints checkout + ff command that works', () => {
-  const f = fixture(); const holding = f.side();
+  const f = fixture(); const holding = f.side(); const sideSha = f.git('rev-parse', 'HEAD');
   f.git('worktree', 'remove', holding);
   const r = f.run(); assert.notEqual(r.status, 0, 'unmerged HEAD must refuse');
   f.untouched();
@@ -126,7 +148,7 @@ test('integration branch checked out nowhere prints checkout + ff command that w
   assert.match(command, / checkout main && git -C .* merge --ff-only /);
   const fixed = spawnSync('bash', ['-c', command], { cwd: f.repo, env: cleanEnv(), encoding: 'utf8', timeout: 10_000 });
   assert.equal(fixed.status, 0, fixed.stderr);
-  assert.equal(f.git('rev-parse', 'main'), f.git('rev-parse', 'HEAD'));
+  assert.equal(f.git('rev-parse', 'main'), sideSha, 'main must land on the side commit captured before the command ran');
   f.deployed(f.run());
 });
 test('AIOS_INTEGRATION_BRANCH override uses named local integration branch', () => {

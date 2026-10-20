@@ -29,9 +29,9 @@ On desktop, the dashboard can launch a Claude Code (Dispatch) session directly: 
 - **BRAT** (recommended for forks): add this repo in the BRAT plugin settings; releases carry the built assets.
 - **Manual**: copy `main.js`, `manifest.json`, `styles.css` into `<vault>/.obsidian/plugins/aios-dashboard/`, or run `./deploy.sh <vault-path>`.
 
-Deploy refuses before building or copying unless HEAD is contained in local `main` and the working tree is clean.
+Deploy refuses before building or copying unless HEAD is the tip of local `main` and the working tree is clean. An older commit already in `main` (behind the tip) also refuses, so an old worktree cannot roll the vault back by accident.
 Set `AIOS_INTEGRATION_BRANCH=<branch>` to select another local integration branch.
-Use `./deploy.sh --allow-unmerged <vault-path>` (flag also accepted after the path) for a deliberate preview; commit and merge it this session. Missing branches still refuse.
+Use `./deploy.sh --allow-unmerged <vault-path>` (flag also accepted after the path) for a deliberate preview, which you commit and merge this session, or a deliberate rollback to a commit behind the tip, which you redeploy from the tip when it is over. Missing branches still refuse.
 
 ## Develop
 

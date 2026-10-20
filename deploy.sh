@@ -44,14 +44,26 @@ if ! git merge-base --is-ancestor HEAD "refs/heads/$INTEGRATION_BRANCH"; then
       "$(git rev-parse --show-toplevel)" "$(git rev-parse HEAD)" >&2
   fi
 fi
+# A contained commit behind the tip would roll the vault back (D-2026-10-20-01).
+BEHIND=false
+INTEGRATION_TIP=$(git rev-parse "refs/heads/$INTEGRATION_BRANCH")
+TIP_SHA=$(git rev-parse --short "$INTEGRATION_TIP")
+if [[ "$UNMERGED" == false && "$(git rev-parse HEAD)" != "$INTEGRATION_TIP" ]]; then
+  BEHIND=true
+fi
 DIRTY=false
 if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
   DIRTY=true
   echo "WARNING: dirty working tree; uncommitted changes would be deployed but are in no branch." >&2
 fi
-if [[ "$UNMERGED" == true || "$DIRTY" == true ]]; then
+if [[ "$UNMERGED" == true || "$DIRTY" == true || "$BEHIND" == true ]]; then
   if [[ "$ALLOW_UNMERGED" != true ]]; then
-    echo "Refusing deploy. Fast-forward the integration branch and commit changes, or use --allow-unmerged for a deliberate preview." >&2
+    if [[ "$BEHIND" == true ]]; then
+      echo "Refusing deploy: HEAD $HEAD_SHA is behind integration branch '$INTEGRATION_BRANCH' tip $TIP_SHA. Check out the tip of '$INTEGRATION_BRANCH', or pass --allow-unmerged for a deliberate rollback." >&2
+    fi
+    if [[ "$UNMERGED" == true || "$DIRTY" == true ]]; then
+      echo "Refusing deploy. Fast-forward the integration branch and commit changes, or use --allow-unmerged for a deliberate preview." >&2
+    fi
     exit 1
   fi
 fi
@@ -59,6 +71,9 @@ preview_reminder() {
   if [[ "$ALLOW_UNMERGED" == true ]]; then
     if [[ "$UNMERGED" == true ]]; then
       echo "WARNING: PREVIEW ONLY: HEAD $HEAD_SHA is not in integration branch '$INTEGRATION_BRANCH'; it MUST be merged this session." >&2
+    fi
+    if [[ "$BEHIND" == true ]]; then
+      echo "WARNING: ROLLBACK: HEAD $HEAD_SHA is behind integration branch '$INTEGRATION_BRANCH' tip $TIP_SHA; redeploy from the tip when the rollback is over." >&2
     fi
     if [[ "$DIRTY" == true ]]; then
       echo "WARNING: PREVIEW ONLY: dirty changes are in no branch; they MUST be committed and merged into '$INTEGRATION_BRANCH' this session." >&2
