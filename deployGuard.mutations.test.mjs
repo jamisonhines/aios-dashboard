@@ -16,6 +16,8 @@ const FILES = ['deploy.sh', 'package.json', 'README.md'];
 const repoDir = fileURLToPath(new URL('./', import.meta.url));
 const here = (name) => new URL(`./${name}`, import.meta.url);
 const ANCESTRY = 'if ! git merge-base --is-ancestor HEAD "refs/heads/$INTEGRATION_BRANCH"; then';
+const TIP_CHECK = 'if [[ "$UNMERGED" == false && "$(git rev-parse HEAD)" != "$INTEGRATION_TIP" ]]; then';
+const TIP_LOOKUP = 'INTEGRATION_TIP=$(git rev-parse "refs/heads/$INTEGRATION_BRANCH")';
 
 const cases = [
   ['ancestry', 'deploy.sh', ANCESTRY, 'if false; then', 'unmerged side branch'],
@@ -31,6 +33,11 @@ const cases = [
   ['untracked flag', 'deploy.sh', ' --untracked-files=normal', '', 'status.showUntrackedFiles is no'],
   ['unoccupied ff cmd', 'deploy.sh', "printf 'git -C %q checkout %q && git -C %q merge --ff-only %q\\n'", "printf 'git -C %q checkout %q && git -C %q merge --bogus %q\\n'", 'checked out nowhere'],
   ['env override', 'deploy.sh', 'INTEGRATION_BRANCH="${AIOS_INTEGRATION_BRANCH:-main}"', 'INTEGRATION_BRANCH="main"', 'AIOS_INTEGRATION_BRANCH override'],
+  ['tip check removed', 'deploy.sh', TIP_CHECK, 'if false; then', 'behind integration tip refuses'],
+  ['tip wrong ref HEAD', 'deploy.sh', TIP_LOOKUP, 'INTEGRATION_TIP=$(git rev-parse HEAD)', 'behind integration tip refuses'],
+  ['tip wrong ref main', 'deploy.sh', TIP_LOOKUP, 'INTEGRATION_TIP=$(git rev-parse refs/heads/main)', 'AIOS_INTEGRATION_BRANCH override'],
+  ['rollback reminder', 'deploy.sh', 'echo "WARNING: ROLLBACK:', ': "WARNING: ROLLBACK:', 'behind integration tip with --allow-unmerged'],
+  ['unoccupied ff target', 'deploy.sh', '"$(git rev-parse --show-toplevel)" "$(git rev-parse HEAD)" >&2', '"$(git rev-parse --show-toplevel)" "$INTEGRATION_BRANCH" >&2', 'checked out nowhere'],
 ];
 
 const runTests = (srcDir, filter, reporter) => spawnSync(
@@ -50,8 +57,10 @@ for (const [name, file, from, to, filter] of cases) {
   const original = originals[file];
   if (original.split(from).length !== 2) throw new Error(`nonunique or missing mutation target: ${name}`);
   let mutated = original.replace(from, to);
-  // Ancestry could mask a missing-branch bypass. Disable it too for differential proof.
-  if (name === 'missing branch') mutated = mutated.replace(ANCESTRY, 'if false; then');
+  // Ancestry and the tip lookup could mask a missing-branch bypass. Disable both for differential proof.
+  if (name === 'missing branch') mutated = mutated.replace(ANCESTRY, 'if false; then').replace(TIP_LOOKUP, 'INTEGRATION_TIP=$(git rev-parse HEAD)');
+  // With ancestry gone, a side commit reads as behind the tip. Disable the tip check too.
+  if (name === 'ancestry') mutated = mutated.replace(TIP_CHECK, 'if false; then');
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'deploy-guard-mutation-')));
   tmpRoots.push(dir);
   for (const f of FILES) writeFileSync(join(dir, f), f === file ? mutated : originals[f]);
