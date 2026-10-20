@@ -925,15 +925,24 @@ export function applyAgentTranscript(agents, agentType, entries) {
       // workflows'/skills' byDay so the Usage tab range toggle can consume
       // this dimension the same way (per the task spec).
       byDay: new Map(),
+      // model -> { runs, messages, costUsd } (D-2026-10-20-02): which models
+      // this agent's runs used. A run counts once per model it touched.
+      models: {},
     });
   }
   const a = agents.get(key);
   a.runs += 1;
 
+  const modelsThisRun = new Set();
   for (const e of entries) {
     const family = modelFamily(e.model);
     const cost = estimateCost(family, e, e.timestamp, e.model);
     const dayKey = localDay(e.timestamp);
+    const modelKey = e.model || "unknown";
+    const m = (a.models[modelKey] ||= { runs: 0, messages: 0, costUsd: 0 });
+    if (!modelsThisRun.has(modelKey)) { modelsThisRun.add(modelKey); m.runs += 1; }
+    m.messages += 1;
+    m.costUsd += cost;
     a.costUsd += cost;
     a.outputTokens += e.output_tokens || 0;
     a.messages += 1;
