@@ -36,6 +36,8 @@ const cases = [
   ['tip check removed', 'deploy.sh', TIP_CHECK, 'if false; then', 'behind integration tip refuses'],
   ['tip wrong ref HEAD', 'deploy.sh', TIP_LOOKUP, 'INTEGRATION_TIP=$(git rev-parse HEAD)', 'behind integration tip refuses'],
   ['tip wrong ref main', 'deploy.sh', TIP_LOOKUP, 'INTEGRATION_TIP=$(git rev-parse refs/heads/main)', 'AIOS_INTEGRATION_BRANCH override'],
+  ['tip check inverted', 'deploy.sh', '"$(git rev-parse HEAD)" != "$INTEGRATION_TIP"', '"$(git rev-parse HEAD)" == "$INTEGRATION_TIP"', 'HEAD at advanced integration tip deploys'],
+  ['README tip', 'README.md', 'HEAD is the tip of local `main`', 'HEAD is contained in local `main`', 'deploy documentation'],
   ['rollback reminder', 'deploy.sh', 'echo "WARNING: ROLLBACK:', ': "WARNING: ROLLBACK:', 'behind integration tip with --allow-unmerged'],
   ['unoccupied ff target', 'deploy.sh', '"$(git rev-parse --show-toplevel)" "$(git rev-parse HEAD)" >&2', '"$(git rev-parse --show-toplevel)" "$INTEGRATION_BRANCH" >&2', 'checked out nowhere'],
 ];
