@@ -54,6 +54,6 @@ assert.deepEqual(
   ],
   "RC-10 the confirm label sits on the ok button and Cancel on the cancel button, nothing else"
 );
-assert.ok(modal.includes("  onClose() { this.contentEl.empty(); }\n"), "RC-11 closing the dialog only empties it");
+assert.deepEqual(modal.split("\n").filter((l) => l.includes("onClose")), ["  onClose() { this.contentEl.empty(); }"], "RC-11 closing the dialog only empties it");
 assert.ok(!/this\[/.test(modal), "RC-11 no computed member access in the dialog (a disguised callback call)");
 console.log("updateCardRenderContract.test.mjs: all assertions passed");
