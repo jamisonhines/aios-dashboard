@@ -40,4 +40,20 @@ assert.match(spawnBody, /started: false/, "RC-5 a launch that never started says
 // REQ-F8 (review2 m-4): both pre-spawn exits report started: false, exactly.
 assert.ok(spawnBody.includes('done({ started: false, exitCode: null, stdout: "", stderr: "", spawnError: null, engineExists: false });'), "RC-8 a missing engine never started");
 assert.ok(spawnBody.includes('if (!launch.command) { done({ started: false, exitCode: null, stdout: "", stderr: "", spawnError: launch.reason, engineExists: true }); return; }'), "RC-9 a missing node never started");
+// Review3 m-3: the confirm dialog's buttons keep their roles. Swapping the two labels (the button reading "Cancel" would
+// start the update) or reaching the callback from onClose must fail here, not only in a live vault.
+const modalAt = source.indexOf("class UpdateConfirmModal extends Modal {");
+assert.ok(modalAt > 0, "RC-10 UpdateConfirmModal exists");
+const modal = source.slice(modalAt, source.indexOf("\n}\n", modalAt));
+const buttons = modal.split("\n").filter((l) => l.includes('createEl("button"'));
+assert.deepEqual(
+  buttons.map((l) => l.trim()),
+  [
+    'const ok = footer.createEl("button", { cls: "aios-btn aios-btn-cta", text: this.confirmLabel });',
+    'const cancel = footer.createEl("button", { cls: "aios-btn", text: "Cancel" });',
+  ],
+  "RC-10 the confirm label sits on the ok button and Cancel on the cancel button, nothing else"
+);
+assert.ok(modal.includes("  onClose() { this.contentEl.empty(); }\n"), "RC-11 closing the dialog only empties it");
+assert.ok(!/this\[/.test(modal), "RC-11 no computed member access in the dialog (a disguised callback call)");
 console.log("updateCardRenderContract.test.mjs: all assertions passed");
