@@ -94,6 +94,11 @@ const kind = (run) => run.argv[1];
   assert.equal(h.runs.length, 3, "CTL-21 a re-check follows the apply");
   assert.equal(kind(h.runs[2]), "check", "CTL-22 the follow-up is a check");
   assert.match(h.ctl.view().outcome.headline, /AIOS updated to 0\.2\.0 in commit aaaaaaa/, "CTL-23 the outcome is shown");
+  await h.settle(2, ok(status({ updateAvailable: false, files: [] })));
+  h.ctl.recheck();
+  assert.ok(h.ctl.view().outcome, "CTL-23b a dashboard re-open (recheck) keeps the commit and undo line on screen");
+  h.ctl.checkNow();
+  assert.equal(h.ctl.view().outcome, null, "CTL-23c Check now clears it");
 }
 {
   // No code in the update: the confirm passes no code flag.

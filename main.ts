@@ -22,11 +22,7 @@ import {
 } from "./taskIdClaim.mjs";
 import {
   UPDATE_ENGINE_PATH,
-  buildCheckArgv,
-  buildApplyArgv,
-  computeUpdateCard,
-  updateConfirmText,
-  computeApplyOutcome,
+  createUpdateController,
 } from "./updateCard.mjs";
 import {
   resolveBuckets,
@@ -2901,21 +2897,19 @@ async function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageR
 // ---------------------------------------------------------------------------
 // AIOS update card (D-2026-10-23-01). Desktop only. Runs the vault's OWN update
 // engine (Operations/scripts/aios-update.mjs), no AI and no tokens. What the card
-// shows and whether its Update button exists is decided in updateCard.mjs; this
-// section only spawns the engine and keeps the result across re-renders (the
-// dashboard re-renders 200ms after every vault change, so the state is module-level).
+// shows, whether its Update button exists, and the check/apply wiring (queueing,
+// the checked commit, no kill on apply) are decided in updateCard.mjs
+// (createUpdateController, tested); this section only spawns the engine and draws
+// the controller's view. The state is module-level because the dashboard
+// re-renders 200ms after every vault change.
 // ---------------------------------------------------------------------------
-type UpdateRun = { exitCode: number | null; stdout: string; stderr: string; spawnError: string | null; engineExists: boolean };
-let updateCard: any = null;
-let updateCheckInFlight: Promise<void> | null = null;
-let updateApplyInFlight: Promise<void> | null = null;
-let updateApplyOutcome: any = null;
-const UPDATE_CHECK_TIMEOUT_MS = 120_000;
-const UPDATE_APPLY_TIMEOUT_MS = 300_000;
+type UpdateRun = { started: boolean; exitCode: number | null; stdout: string; stderr: string; spawnError: string | null; engineExists: boolean };
 
-function runUpdateEngine(basePath: string, argv: string[], timeoutMs: number): Promise<UpdateRun> {
+// opts.timeoutMs: a number arms a kill timer (check); null never kills (apply, whose verified rollback a kill would skip).
+function runUpdateEngine(basePath: string, argv: string[], opts: { timeoutMs: number | null }): Promise<UpdateRun> {
   return new Promise<UpdateRun>((resolve) => {
     let settled = false;
+    let started = false;
     const done = (r: UpdateRun) => { if (!settled) { settled = true; resolve(r); } };
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2923,52 +2917,41 @@ function runUpdateEngine(basePath: string, argv: string[], timeoutMs: number): P
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const nodePath = require("path");
       if (!fs.existsSync(nodePath.join(basePath, UPDATE_ENGINE_PATH))) {
-        done({ exitCode: null, stdout: "", stderr: "", spawnError: null, engineExists: false });
+        done({ started: false, exitCode: null, stdout: "", stderr: "", spawnError: null, engineExists: false });
         return;
       }
       const launch = resolveNodeForExporter();
-      if (!launch.command) { done({ exitCode: null, stdout: "", stderr: "", spawnError: launch.reason, engineExists: true }); return; }
+      if (!launch.command) { done({ started: false, exitCode: null, stdout: "", stderr: "", spawnError: launch.reason, engineExists: true }); return; }
       let stdout = "";
       let stderr = "";
       const child = require("child_process").spawn(launch.command, argv, { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+      started = true;
       child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
       child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
-      child.once("error", (err: any) => done({ exitCode: null, stdout, stderr, spawnError: err?.message || String(err), engineExists: true }));
-      child.once("close", (code: number) => done({ exitCode: code, stdout, stderr, spawnError: null, engineExists: true }));
-      const t = setTimeout(() => {
-        try { child.kill(); } catch { /* gone */ }
-        done({ exitCode: null, stdout, stderr, spawnError: `the updater did not finish within ${timeoutMs / 1000}s`, engineExists: true });
-      }, timeoutMs);
-      (t as any)?.unref?.();
+      child.once("error", (err: any) => done({ started, exitCode: null, stdout, stderr, spawnError: err?.message || String(err), engineExists: true }));
+      child.once("close", (code: number) => done({ started, exitCode: code, stdout, stderr, spawnError: null, engineExists: true }));
+      if (typeof opts.timeoutMs === "number") {
+        const t = setTimeout(() => {
+          try { child.kill(); } catch { /* gone */ }
+          done({ started, exitCode: null, stdout, stderr, spawnError: `the updater did not finish within ${opts.timeoutMs! / 1000}s`, engineExists: true });
+        }, opts.timeoutMs);
+        (t as any)?.unref?.();
+      }
     } catch (error: any) {
-      done({ exitCode: null, stdout: "", stderr: "", spawnError: error?.message || String(error), engineExists: true });
+      done({ started, exitCode: null, stdout: "", stderr: "", spawnError: error?.message || String(error), engineExists: true });
     }
   });
 }
 
-function startUpdateCheck(app: App, onSettled: () => void): void {
-  if (!Platform.isDesktop || updateCheckInFlight || updateApplyInFlight) return;
-  const basePath = getVaultBasePath(app);
-  if (!basePath) return;
-  updateCheckInFlight = runUpdateEngine(basePath, buildCheckArgv(), UPDATE_CHECK_TIMEOUT_MS)
-    .then((run) => { updateCard = computeUpdateCard(run); })
-    .finally(() => { updateCheckInFlight = null; onSettled(); });
-}
-
-function startUpdateApply(app: App, allowCode: boolean, onSettled: () => void): void {
-  if (!Platform.isDesktop || updateApplyInFlight || updateCheckInFlight) return;
-  const basePath = getVaultBasePath(app);
-  if (!basePath) return;
-  updateApplyOutcome = null;
-  updateApplyInFlight = runUpdateEngine(basePath, buildApplyArgv({ allowCode }), UPDATE_APPLY_TIMEOUT_MS)
-    .then((run) => { updateApplyOutcome = computeApplyOutcome(run); })
-    .finally(() => {
-      updateApplyInFlight = null;
-      // Re-check so the card reflects the new installed version (or the refusal) right away.
-      startUpdateCheck(app, onSettled);
-      onSettled();
-    });
-}
+// The app and the redraw of the dashboard that last rendered the card.
+let updateApp: App | null = null;
+let updateRefresh: () => void = () => {};
+const updateController = createUpdateController({
+  runEngine: runUpdateEngine,
+  isDesktop: Platform.isDesktop,
+  getBasePath: () => (updateApp ? getVaultBasePath(updateApp) : null),
+  onChange: () => updateRefresh(),
+});
 
 class UpdateConfirmModal extends Modal {
   private body: string;
@@ -2996,21 +2979,22 @@ class UpdateConfirmModal extends Modal {
 
 function renderUpdateCard(app: App, container: HTMLElement, refresh: () => void) {
   if (!Platform.isDesktop) return;
+  updateApp = app;
+  updateRefresh = refresh;
   // First render this session: check now (the view's onOpen also re-checks on every open).
-  if (!updateCard && !updateCheckInFlight) startUpdateCheck(app, refresh);
-  const c = updateCard;
-  const busy = Boolean(updateCheckInFlight || updateApplyInFlight);
-  const quiet = !updateApplyOutcome && (!c || c.quiet);
-  const box = container.createDiv({ cls: quiet ? "aios-update-line" : "aios-update-card" });
+  updateController.ensureChecked();
+  const v = updateController.view();
+  if (!v.visible) return;
+  const box = container.createDiv({ cls: v.quiet ? "aios-update-line" : "aios-update-card" });
   const head = box.createDiv({ cls: "aios-update-head" });
-  const headText = updateApplyInFlight ? "Updating AIOS..." : !c ? "Checking for AIOS updates..." : c.headline;
-  head.createSpan({ cls: "aios-update-headline", text: headText });
+  head.createSpan({ cls: "aios-update-headline", text: v.headText });
   head.createDiv({ cls: "aios-header-spacer" });
-  const checkBtn = head.createEl("button", { cls: "aios-btn aios-update-check", text: updateCheckInFlight ? "Checking..." : "Check now" });
-  checkBtn.disabled = busy;
-  checkBtn.addEventListener("click", () => { updateApplyOutcome = null; startUpdateCheck(app, refresh); refresh(); });
+  const checkBtn = head.createEl("button", { cls: "aios-btn aios-update-check", text: v.checkLabel });
+  checkBtn.disabled = v.checkDisabled;
+  checkBtn.addEventListener("click", () => { updateController.checkNow(); refresh(); });
+  if (v.status) box.createDiv({ cls: "aios-update-next", text: v.status });
 
-  const o = updateApplyOutcome;
+  const o = v.outcome;
   if (o) {
     const res = box.createDiv({ cls: `aios-update-result ${o.ok ? "aios-update-ok" : "aios-update-bad"}` });
     res.createDiv({ cls: "aios-update-result-head", text: o.headline });
@@ -3018,26 +3002,23 @@ function renderUpdateCard(app: App, container: HTMLElement, refresh: () => void)
     if (o.undo) res.createDiv({ cls: "aios-update-undo", text: o.undo });
     if (o.next) res.createDiv({ cls: "aios-update-next", text: o.next });
   }
-  if (!c || c.quiet || busy) return;
-  if (c.lines.length) {
+  if (v.facts.length) {
     const facts = box.createDiv({ cls: "aios-update-facts" });
-    for (const l of c.lines) facts.createDiv({ cls: "aios-update-line-item", text: l });
+    for (const l of v.facts) facts.createDiv({ cls: "aios-update-line-item", text: l });
   }
-  if (c.notes.length) {
+  if (v.notes.length) {
     const notes = box.createDiv({ cls: "aios-update-notes" });
     notes.createDiv({ cls: "aios-section-eyebrow", text: "What's new" });
-    for (const l of c.notes) notes.createDiv({ cls: "aios-update-note", text: l });
+    for (const l of v.notes) notes.createDiv({ cls: "aios-update-note", text: l });
   }
-  if (c.next) box.createDiv({ cls: "aios-update-next", text: c.next });
-  if (c.showUpdate) {
+  if (v.next) box.createDiv({ cls: "aios-update-next", text: v.next });
+  if (v.showUpdate) {
     const actions = box.createDiv({ cls: "aios-update-actions" });
     const btn = actions.createEl("button", { cls: "aios-btn aios-btn-cta aios-update-go", text: "Update" });
     btn.addEventListener("click", () => {
-      const confirm = updateConfirmText(c);
-      new UpdateConfirmModal(app, confirm.body, confirm.confirmLabel, () => {
-        startUpdateApply(app, confirm.allowCode, refresh);
-        refresh();
-      }).open();
+      const req = updateController.requestUpdate();
+      if (!req) { refresh(); return; }
+      new UpdateConfirmModal(app, req.body, req.confirmLabel, req.go).open();
     });
   }
 }
@@ -5734,7 +5715,9 @@ class DashboardView extends ItemView {
 
   async onOpen() {
     // Every dashboard open re-runs the update check (the card renders the last result meanwhile).
-    startUpdateCheck(this.app, () => this.render());
+    updateApp = this.app;
+    updateRefresh = () => this.render();
+    updateController.recheck();
     this.render();
   }
 
