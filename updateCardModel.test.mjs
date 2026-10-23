@@ -13,11 +13,12 @@ import {
   shortVersion,
 } from "./updateCard.mjs";
 
-// A check --json payload as the schema-2 engine prints it (Operations/scripts/aios-update.mjs).
+// A check --json payload as the schema-3 engine prints it (Operations/scripts/aios-update.mjs).
+const SEEN = "1111111111111111111111111111111111111111";
 const status = (over = {}) => ({
-  schema: 2,
+  schema: 3,
   checkedAt: "2026-10-23T10:00:00.000Z",
-  template: { source: "/t", ref: "main", commit: "abc", version: "0.2.0" },
+  template: { source: "/t", ref: "main", commit: SEEN, version: "0.2.0" },
   installed: { version: "0.1.0", commit: "cc69ca40" },
   updateAvailable: true,
   changelog: "## 0.2.0\n\n- GL-012 and build-project templates.\n- The dashboard ships with AIOS.",
@@ -42,10 +43,10 @@ const allText = (card) => [card.headline, ...card.lines, card.next || ""].join("
 // ---------------------------------------------------------------- argv: the only flags the card may pass
 assert.equal(UPDATE_ENGINE_PATH, "Operations/scripts/aios-update.mjs", "CARD-ARGV-1 the card runs the instance's own engine by its vault-relative path");
 assert.deepEqual(buildCheckArgv(), ["Operations/scripts/aios-update.mjs", "check", "--json"], "CARD-ARGV-2 check is check --json, nothing else");
-assert.deepEqual(buildApplyArgv({ allowCode: false }), ["Operations/scripts/aios-update.mjs", "apply", "--json"], "CARD-ARGV-3 apply without code consent carries no flag");
-assert.deepEqual(buildApplyArgv({ allowCode: true }), ["Operations/scripts/aios-update.mjs", "apply", "--json", "--allow-code"], "CARD-ARGV-4 code consent adds only --allow-code");
+assert.deepEqual(buildApplyArgv({ allowCode: false, expectCommit: SEEN }), ["Operations/scripts/aios-update.mjs", "apply", "--json", "--expect-commit", SEEN], "CARD-ARGV-3 apply without code consent carries no flag");
+assert.deepEqual(buildApplyArgv({ allowCode: true, expectCommit: SEEN }), ["Operations/scripts/aios-update.mjs", "apply", "--json", "--expect-commit", SEEN, "--allow-code"], "CARD-ARGV-4 code consent adds only --allow-code");
 for (const allowCode of [true, false]) {
-  const argv = buildApplyArgv({ allowCode });
+  const argv = buildApplyArgv({ allowCode, expectCommit: SEEN });
   for (const banned of ["--adopt", "--accept-collisions", "--allow-safety-config", "--template", "--ref", "--instance"]) {
     assert.ok(!argv.includes(banned), `CARD-ARGV-5 the card never passes ${banned}`);
   }
@@ -131,8 +132,25 @@ refusal("safety", [".claude/hooks/x.py"], "AIOS 0.2 is ready, but it changes saf
 refusal("detached", [], "AIOS 0.2 is ready, but this vault's git is not on a branch.", "Ask Dispatch.");
 refusal("plugin-newer", [], "AIOS 0.2 is ready, but this AIOS already has a newer dashboard than the update brings.", "Ask Dispatch.");
 {
-  const card = refusal("hidden-edits", ["AGENTS.md"], "AIOS 0.2 is ready, but the updater found a problem it will not work around.", "Ask Dispatch.");
+  const card = refusal("something-new", ["AGENTS.md"], "AIOS 0.2 is ready, but the updater found a problem it will not work around.", "Ask Dispatch.");
   assert.ok(card.lines.includes("engine words"), "CARD-REF an unknown-to-the-card kind shows the engine's own sentence");
+}
+// REQ-F4 (review m-4): the three kinds that used to show the raw engine sentence get plain words and a next step.
+{
+  const card = refusal("hidden-edits", ["AGENTS.md"], "AIOS 0.2 is ready, but git is set to ignore changes to some AIOS files, so the updater cannot prove they are clean.", "Ask Dispatch to clear that git setting.");
+  assert.ok(card.lines.includes("AGENTS.md") && !card.lines.includes("engine words"), "CARD-F4-WORDS-1 hidden-edits lists the files, not the engine sentence");
+}
+{
+  const card = refusal("unsafe-targets", ["Agents/x.md"], "AIOS 0.2 is ready, but some files it would write are not safe to write (a link, a folder or a locked file).", "Ask Dispatch.");
+  assert.ok(card.lines.includes("Agents/x.md") && !card.lines.includes("engine words"), "CARD-F4-WORDS-2 unsafe-targets lists the files, not the engine sentence");
+}
+{
+  const card = refusal("code", [".obsidian/plugins/aios-dashboard/main.js"], "AIOS 0.2 is ready, but the update now includes dashboard code you have not confirmed.", "Press Check now, then confirm again.");
+  assert.ok(!card.lines.includes("engine words"), "CARD-F4-WORDS-3 code never shows the engine sentence (it names --allow-code)");
+}
+{
+  const card = refusal("moved", [], "AIOS 0.2 is ready, but the update changed since you checked.", "Press Check now and look at it again before updating.");
+  assert.ok(!card.lines.includes("engine words"), "CARD-F2-WORDS moved never shows the engine sentence");
 }
 {
   // Two blockers: both are shown, and the button stays hidden.
@@ -182,22 +200,22 @@ refusal("plugin-newer", [], "AIOS 0.2 is ready, but this AIOS already has a newe
   delete legacy.schema;
   delete legacy.blockers;
   const card = computeUpdateCard(ran(legacy));
-  assert.equal(card.state, "old-engine", "CARD-ERR-16 an engine without schema 2 cannot drive the button");
+  assert.equal(card.state, "old-engine", "CARD-ERR-16 an engine without schema 3 cannot drive the button");
   assert.equal(card.showUpdate, false, "CARD-ERR-17 no button on an old engine");
   assert.equal(card.headline, "AIOS 0.2 is ready, but this AIOS's updater is older than this card.", "CARD-ERR-18 text");
   assert.equal(card.next, "Ask Dispatch to run this one update by hand. After that the card works.", "CARD-ERR-19 next");
 }
 {
   // An engine that prints blockers but a different schema is not trusted to drive the button either.
-  const card = computeUpdateCard(ran(status({ schema: 1, blockers: [] })));
-  assert.equal(card.state, "old-engine", "CARD-ERR-20 only schema 2 drives the Update button");
+  const card = computeUpdateCard(ran(status({ schema: 2, blockers: [] })));
+  assert.equal(card.state, "old-engine", "CARD-ERR-20 only schema 3 (the engine that knows --expect-commit) drives the Update button");
   assert.equal(card.showUpdate, false, "CARD-ERR-21 no button on another schema");
 }
 
 // ---------------------------------------------------------------- apply outcome
 {
   const sha = "0123456789abcdef0123456789abcdef01234567";
-  const out = computeApplyOutcome({ exitCode: 0, stdout: JSON.stringify({ ...withCode(), committed: sha, refused: [], refusals: [], pluginChanged: true }), stderr: "", spawnError: null });
+  const out = computeApplyOutcome({ started: true, exitCode: 0, stdout: JSON.stringify({ ...withCode(), committed: sha, refused: [], refusals: [], pluginChanged: true }), stderr: "", spawnError: null });
   assert.equal(out.ok, true, "CARD-APPLY-1 success");
   assert.equal(out.headline, "AIOS updated to 0.2.0 in commit 0123456.", "CARD-APPLY-2 names the commit");
   assert.equal(out.undo, `To undo it: git revert ${sha}`, "CARD-APPLY-3 how to undo, full sha");
@@ -205,27 +223,66 @@ refusal("plugin-newer", [], "AIOS 0.2 is ready, but this AIOS already has a newe
   assert.ok(out.lines.includes("The dashboard itself changed. Reload Obsidian to use the new version (Command palette: Reload app without saving)."), "CARD-APPLY-5 reload wording");
 }
 {
-  const out = computeApplyOutcome({ exitCode: 0, stdout: JSON.stringify({ ...status(), committed: "a".repeat(40), refused: [], refusals: [], pluginChanged: false }), stderr: "", spawnError: null });
+  const out = computeApplyOutcome({ started: true, exitCode: 0, stdout: JSON.stringify({ ...status(), committed: "a".repeat(40), refused: [], refusals: [], pluginChanged: false }), stderr: "", spawnError: null });
   assert.equal(out.reload, false, "CARD-APPLY-6 no reload when the plugin did not change");
   assert.ok(!out.lines.some((l) => /Reload/.test(l)), "CARD-APPLY-7 no reload wording");
 }
 {
-  const out = computeApplyOutcome({ exitCode: 3, stdout: JSON.stringify({ ...status(), committed: null, refused: ["x"], refusals: [{ kind: "collisions", message: "x", paths: ["AGENTS.md"] }], pluginChanged: false }), stderr: "", spawnError: null });
+  const out = computeApplyOutcome({ started: true, exitCode: 3, stdout: JSON.stringify({ ...status(), committed: null, refused: ["x"], refusals: [{ kind: "collisions", message: "x", paths: ["AGENTS.md"] }], pluginChanged: false }), stderr: "", spawnError: null });
   assert.equal(out.ok, false, "CARD-APPLY-8 refusal at apply time");
   assert.equal(out.headline, "The update did not run: this AIOS changed some of its files itself.", "CARD-APPLY-9 plain refusal");
   assert.equal(out.next, "Ask Dispatch to merge them.", "CARD-APPLY-10 next step");
   assert.equal(out.undo, null, "CARD-APPLY-11 nothing to undo");
 }
 {
-  const out = computeApplyOutcome({ exitCode: 1, stdout: "", stderr: "update failed and was rolled back (verified identical to the pre-apply state): hook said no\n", spawnError: null });
+  const out = computeApplyOutcome({ started: true, exitCode: 1, stdout: "", stderr: "update failed and was rolled back (verified identical to the pre-apply state): hook said no\n", spawnError: null });
   assert.equal(out.ok, false, "CARD-APPLY-12 engine error");
   assert.equal(out.headline, "The update failed and nothing was changed.", "CARD-APPLY-13 verified rollback reads plainly");
   assert.ok(out.lines.includes("update failed and was rolled back (verified identical to the pre-apply state): hook said no"), "CARD-APPLY-14 the engine sentence is kept");
 }
 {
-  const out = computeApplyOutcome({ exitCode: 1, stdout: "", stderr: "update failed: x. ROLLBACK INCOMPLETE, the instance differs\n", spawnError: null });
+  const out = computeApplyOutcome({ started: true, exitCode: 1, stdout: "", stderr: "update failed: x. ROLLBACK INCOMPLETE, the instance differs\n", spawnError: null });
   assert.equal(out.headline, "The update failed and could not fully undo itself.", "CARD-APPLY-15 incomplete rollback is never called clean");
   assert.equal(out.next, "Do not edit anything. Ask Dispatch now.", "CARD-APPLY-16 next step");
+}
+
+// ---------------------------------------------------------------- REQ-F2: consent is tied to the checked commit
+assert.equal(computeUpdateCard(ran(status())).templateCommit, SEEN, "CARD-F2-1 the card keeps the template commit it checked");
+assert.throws(() => buildApplyArgv({ allowCode: false }), /checked template commit/, "CARD-F2-2 no apply argv without the checked commit");
+assert.throws(() => buildApplyArgv({ allowCode: true, expectCommit: "main" }), /checked template commit/, "CARD-F2-3 a branch name is not a checked commit");
+{
+  const card = computeUpdateCard(ran(status({ template: { source: "/t", ref: "main", commit: "abc", version: "0.2.0" } })));
+  assert.equal(card.showUpdate, false, "CARD-F2-4 no Update button when the check did not name a full template commit");
+  assert.equal(card.state, "error", "CARD-F2-5 state");
+}
+{
+  const out = computeApplyOutcome({ started: true, exitCode: 3, stdout: JSON.stringify({ ...status(), committed: null, refused: ["the update changed since you checked, check again (x)"], refusals: [{ kind: "moved", message: "the update changed since you checked, check again (x)", paths: [] }], pluginChanged: false }), stderr: "", spawnError: null });
+  assert.equal(out.headline, "The update did not run: the update changed since you checked.", "CARD-F2-6 moved refusal at apply time reads plainly");
+  assert.equal(out.next, "Press Check now and look at it again before updating.", "CARD-F2-7 moved next step");
+}
+
+// ---------------------------------------------------------------- REQ-F4 (review m-2): an unknown outcome is never "nothing ran"
+const NOTHING = /nothing was changed|did not run/i;
+for (const [label, raw] of [
+  ["killed or stopped (no exit code)", { started: true, exitCode: null, stdout: "", stderr: "", spawnError: null }],
+  ["process error after start", { started: true, exitCode: null, stdout: "", stderr: "", spawnError: "read EPIPE" }],
+  ["exit 1 with an unexpected error", { started: true, exitCode: 1, stdout: "", stderr: "EACCES: permission denied, open '.git/info/exclude'\n", spawnError: null }],
+  ["exit 0 with unreadable output", { started: true, exitCode: 0, stdout: "garbage", stderr: "", spawnError: null }],
+]) {
+  const out = computeApplyOutcome(raw);
+  assert.equal(out.ok, false, `CARD-F4-UNK ${label}: not ok`);
+  assert.equal(out.headline, "Update result unknown: ask Dispatch.", `CARD-F4-UNK ${label}: headline`);
+  assert.equal(out.next, "Do not edit anything or press Update again. Ask Dispatch to check git log.", `CARD-F4-UNK ${label}: next`);
+  assert.doesNotMatch([out.headline, ...out.lines, out.next].join("\n"), NOTHING, `CARD-F4-UNK ${label}: never claims nothing ran`);
+}
+{
+  const out = computeApplyOutcome({ started: false, exitCode: null, stdout: "", stderr: "", spawnError: "no node binary found" });
+  assert.equal(out.headline, "Could not start the update. Nothing was changed.", "CARD-F4-START the updater never started: nothing ran is true");
+  assert.ok(out.lines.includes("no node binary found"), "CARD-F4-START reason shown");
+}
+{
+  const out = computeApplyOutcome({ started: true, exitCode: 2, stdout: "", stderr: "could not fetch template /t main: fatal\n", spawnError: null });
+  assert.equal(out.headline, "Could not reach the AIOS template. Nothing was changed.", "CARD-F4-FETCH a fetch failure happens before any write");
 }
 
 // ---------------------------------------------------------------- version display
