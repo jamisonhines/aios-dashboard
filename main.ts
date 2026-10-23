@@ -23,6 +23,8 @@ import {
 import {
   UPDATE_ENGINE_PATH,
   createUpdateController,
+  onUpdateClick,
+  wireConfirmButtons,
 } from "./updateCard.mjs";
 import {
   resolveBuckets,
@@ -2970,9 +2972,8 @@ class UpdateConfirmModal extends Modal {
     for (const para of this.body.split("\n\n")) contentEl.createEl("p", { cls: "aios-update-confirm-text", text: para });
     const footer = contentEl.createDiv({ cls: "aios-modal-footer" });
     const ok = footer.createEl("button", { cls: "aios-btn aios-btn-cta", text: this.confirmLabel });
-    ok.addEventListener("click", () => { this.close(); this.onConfirm(); });
     const cancel = footer.createEl("button", { cls: "aios-btn", text: "Cancel" });
-    cancel.addEventListener("click", () => this.close());
+    wireConfirmButtons({ ok, cancel, close: () => this.close(), onConfirm: this.onConfirm });
   }
   onClose() { this.contentEl.empty(); }
 }
@@ -3016,9 +3017,7 @@ function renderUpdateCard(app: App, container: HTMLElement, refresh: () => void)
     const actions = box.createDiv({ cls: "aios-update-actions" });
     const btn = actions.createEl("button", { cls: "aios-btn aios-btn-cta aios-update-go", text: "Update" });
     btn.addEventListener("click", () => {
-      const req = updateController.requestUpdate();
-      if (!req) { refresh(); return; }
-      new UpdateConfirmModal(app, req.body, req.confirmLabel, req.go).open();
+      if (!onUpdateClick(updateController, (body, label, go) => new UpdateConfirmModal(app, body, label, go).open())) refresh();
     });
   }
 }

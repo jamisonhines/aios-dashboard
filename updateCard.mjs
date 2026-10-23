@@ -302,3 +302,17 @@ export function createUpdateController(deps) {
     },
   };
 }
+
+/** The Update button's click: opens the confirm (openConfirm(body, label, go)); it never runs the update itself. */
+export function onUpdateClick(controller, openConfirm) {
+  const req = controller.requestUpdate();
+  if (!req) return false;
+  openConfirm(req.body, req.confirmLabel, req.go);
+  return true;
+}
+
+/** The confirm dialog's two buttons: only the confirm button runs onConfirm, after closing; Cancel only closes. */
+export function wireConfirmButtons({ ok, cancel, close, onConfirm }) {
+  ok.addEventListener("click", () => { close(); onConfirm(); });
+  cancel.addEventListener("click", () => close());
+}
