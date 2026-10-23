@@ -16,7 +16,7 @@ const makeHome = async (base) => { const home=path.join(base,"home"), bin=path.j
 const run = (script, vault, env) => new Promise(resolve => { const child=spawn(process.execPath,[script,vault],{env:{...process.env,AIOS_EXPORT_TEST_MODE:"1",...env},stdio:["ignore","pipe","pipe"]}); let stderr=""; child.stderr.on("data",d=>stderr+=d); child.once("exit",code=>resolve({code,stderr})); });
 try {
   await fs.writeFile(path.join(copy,"export-json-atomic.mjs"),helper.replace(renameNeedle,slowLiveWrite));
-  for (const name of ["export-ops-map.mjs","export-automation-health.mjs","export-agent-models.mjs"]) await fs.copyFile(path.join(here,"vault-scripts",name),path.join(copy,name));
+  for (const name of ["export-ops-map.mjs","export-automation-health.mjs","export-agent-models.mjs","local-config.mjs"]) await fs.copyFile(path.join(here,"vault-scripts",name),path.join(copy,name));
   const env=await makeHome(root);
   const cases=[["export-ops-map.mjs","ops-map.json","Operations"],["export-automation-health.mjs","automation-health.json",path.join("Operations","usage")],["export-agent-models.mjs","agent-models.json","Operations"]];
   for (const [script,fileName,dir] of cases) {
