@@ -285,6 +285,13 @@ for (const [label, raw] of [
   assert.equal(out.headline, "Could not reach the AIOS template. Nothing was changed.", "CARD-F4-FETCH a fetch failure happens before any write");
 }
 
+// REQ-F8 (review2 m-4): a refusal list on any exit code but 3 is not trusted as "did not run".
+{
+  const out = computeApplyOutcome({ started: true, exitCode: 1, stdout: JSON.stringify({ ...status(), committed: null, refused: ["x"], refusals: [{ kind: "collisions", message: "x", paths: ["AGENTS.md"] }], pluginChanged: false }), stderr: "", spawnError: null });
+  assert.equal(out.headline, "Update result unknown: ask Dispatch.", "CARD-F8-1 refusals with exit 1 read as result unknown");
+  assert.doesNotMatch(out.headline, /did not run/, "CARD-F8-2 never did not run");
+}
+
 // ---------------------------------------------------------------- version display
 assert.equal(shortVersion("2.14.0"), "2.14", "CARD-VER-1 trailing .0 patch dropped");
 assert.equal(shortVersion("1.0.0"), "1.0", "CARD-VER-2 keeps major.minor");

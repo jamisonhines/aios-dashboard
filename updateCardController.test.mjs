@@ -7,6 +7,8 @@ import {
   UPDATE_CHECK_TIMEOUT_MS,
   UPDATE_APPLY_SLOW_MS,
   createUpdateController,
+  onUpdateClick,
+  wireConfirmButtons,
 } from "./updateCard.mjs";
 
 const SEEN = "1111111111111111111111111111111111111111";
@@ -174,6 +176,39 @@ const kind = (run) => run.argv[1];
   await h.settle(1, applied);
   assert.equal(h.ctl.view().status, null, "CTL-T-5 slow notice clears when apply ends");
   assert.equal(slow.cleared, true, "CTL-T-6 timer cleared");
+}
+
+// ---------------------------------------------------------------- REQ-F8 (review2 m-1): the confirm dialog really confirms first
+const fakeButton = () => { const handlers = []; return { addEventListener: (ev, fn) => { if (ev === "click") handlers.push(fn); }, click: () => handlers.forEach((fn) => fn()), handlers }; };
+{
+  const h = harness();
+  h.ctl.ensureChecked();
+  await h.settle(0, ok(status()));
+  let dialog = null;
+  const opened = onUpdateClick(h.ctl, (body, label, go) => { dialog = { body, label, go }; });
+  assert.equal(opened, true, "CTL-C-1 the Update click opens the confirm");
+  assert.equal(h.runs.length, 1, "CTL-C-2 the Update click alone never starts apply");
+  const okBtn = fakeButton(), cancelBtn = fakeButton();
+  let closed = 0;
+  wireConfirmButtons({ ok: okBtn, cancel: cancelBtn, close: () => { closed++; }, onConfirm: dialog.go });
+  assert.equal(h.runs.length, 1, "CTL-C-3 opening and wiring the dialog never starts apply");
+  cancelBtn.click();
+  assert.equal(closed, 1, "CTL-C-4 Cancel closes the dialog");
+  assert.equal(h.runs.length, 1, "CTL-C-5 Cancel never starts apply");
+  okBtn.click();
+  assert.equal(closed, 2, "CTL-C-6 the confirm button closes the dialog");
+  assert.equal(h.runs.length, 2, "CTL-C-7 only the confirm button starts apply");
+  assert.equal(kind(h.runs[1]), "apply", "CTL-C-8 and it is the apply");
+  assert.equal(okBtn.handlers.length, 1, "CTL-C-9 one handler on the confirm button");
+  assert.equal(cancelBtn.handlers.length, 1, "CTL-C-10 one handler on Cancel");
+}
+{
+  const h = harness();
+  h.ctl.ensureChecked();
+  await h.settle(0, ok(status({ blockers: [{ kind: "dirty", message: "m", paths: ["AGENTS.md"] }] })));
+  let openedDialog = false;
+  assert.equal(onUpdateClick(h.ctl, () => { openedDialog = true; }), false, "CTL-C-11 no confirm for a blocked card");
+  assert.equal(openedDialog, false, "CTL-C-12 no dialog opened");
 }
 
 console.log("updateCardController.test.mjs: all assertions passed");
