@@ -187,6 +187,12 @@ refusal("plugin-newer", [], "AIOS 0.2 is ready, but this AIOS already has a newe
   assert.equal(card.headline, "AIOS 0.2 is ready, but this AIOS's updater is older than this card.", "CARD-ERR-18 text");
   assert.equal(card.next, "Ask Dispatch to run this one update by hand. After that the card works.", "CARD-ERR-19 next");
 }
+{
+  // An engine that prints blockers but a different schema is not trusted to drive the button either.
+  const card = computeUpdateCard(ran(status({ schema: 1, blockers: [] })));
+  assert.equal(card.state, "old-engine", "CARD-ERR-20 only schema 2 drives the Update button");
+  assert.equal(card.showUpdate, false, "CARD-ERR-21 no button on another schema");
+}
 
 // ---------------------------------------------------------------- apply outcome
 {
