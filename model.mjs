@@ -56,6 +56,7 @@ export { spliceAnswer };
 /** @typedef {{ slug: string, label: string }} Bucket */
 
 /** Default standalone-task buckets (used when the Dashboard note declares none). */
+// Neutral examples (the same areas AGENTS.md names); an owner's own areas go in the Dashboard note's dashboard_buckets.
 export const DEFAULT_BUCKETS = [
   { slug: "identity", label: "Identity" },
   { slug: "work", label: "Work" },
@@ -63,9 +64,8 @@ export const DEFAULT_BUCKETS = [
   { slug: "health", label: "Health" },
   { slug: "growth", label: "Growth" },
   { slug: "money", label: "Money" },
-  { slug: "ai", label: "AI" },
-  { slug: "web-design", label: "Web Design" },
-  { slug: "georgian", label: "Georgian" },
+  { slug: "learning", label: "Learning" },
+  { slug: "home", label: "Home" },
 ];
 
 /**
@@ -1471,11 +1471,19 @@ export const AUTOMATION_STATE_LABELS = {
   ok: "ok",
 };
 
-// Reverse-DNS prefixes stripped from tile labels. Matches the exporter's
-// DEFAULT_LABEL_PREFIXES.
-export const AUTOMATION_LABEL_PREFIXES = ["com.jaymo.", "com.aios.", "ge.vagabondadventures."];
+// Reverse-DNS prefixes stripped from tile labels when the exporter's output
+// does not name its own (`labelPrefixes`, from the instance's
+// Instance/local-config.json). Matches the exporter's DEFAULT_LABEL_PREFIXES.
+export const AUTOMATION_LABEL_PREFIXES = ["com.aios."];
 
-/** "com.jaymo.morning-brief" -> "morning-brief"; unknown prefixes pass through. */
+/** The prefixes the exporter used, when it wrote a well-formed list; else the default. */
+function automationLabelPrefixes(health) {
+  const raw = health?.labelPrefixes;
+  if (Array.isArray(raw) && raw.length > 0 && raw.every((p) => typeof p === "string" && p.length > 0)) return raw;
+  return AUTOMATION_LABEL_PREFIXES;
+}
+
+/** "com.aios.morning-brief" -> "morning-brief"; unknown prefixes pass through. */
 export function stripAutomationPrefix(label, prefixes = AUTOMATION_LABEL_PREFIXES) {
   for (const p of prefixes) {
     if (label.startsWith(p) && label.length > p.length) return label.slice(p.length);
@@ -1551,13 +1559,14 @@ export function automationSummaryCounts(jobs) {
  */
 export function computeAutomationView(health, now) {
   const jobs = Array.isArray(health?.jobs) ? health.jobs : [];
+  const prefixes = automationLabelPrefixes(health);
   const tiles = jobs
     .filter((j) => j && typeof j.label === "string")
     .map((j) => {
       const state = AUTOMATION_STATE_ORDER.includes(j.state) ? j.state : "unknown";
       return {
         label: j.label,
-        shortLabel: stripAutomationPrefix(j.label),
+        shortLabel: stripAutomationPrefix(j.label, prefixes),
         state,
         stateLabel: AUTOMATION_STATE_LABELS[state],
         relativeLastActivity: formatRelativeAgo(j.lastActivity ?? null, now),

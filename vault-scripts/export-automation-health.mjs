@@ -19,12 +19,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { withOwnedExportLock, writeJsonAtomic } from "./export-json-atomic.mjs";
+import { launchdPrefixesFrom, readLocalConfig } from "./local-config.mjs";
 
 const execFileP = promisify(execFile);
 
 // Only launchd labels starting with one of these prefixes are ours to watch.
-// CLI arg 2 (comma-separated) overrides.
-export const DEFAULT_LABEL_PREFIXES = ["com.jaymo.", "com.aios.", "ge.vagabondadventures.", "ge.vagabondskischool."];
+// Instance/local-config.json launchdLabelPrefixes replaces the default; CLI arg 2 (comma-separated) overrides both.
+export const DEFAULT_LABEL_PREFIXES = ["com.aios."];
 
 // Red-first display/sort order. "unknown" means the label is not in
 // `launchctl list` at all (not loaded), which is a red state.
@@ -199,14 +200,18 @@ export function sortJobsRedFirst(jobs) {
     );
 }
 
-/** Parse the comma-separated prefix override; falls back to the default set. */
-export function resolvePrefixes(arg) {
-  if (!arg) return DEFAULT_LABEL_PREFIXES;
+/**
+ * Which label prefixes to watch: the comma-separated CLI argument, else the instance's
+ * Instance/local-config.json `launchdLabelPrefixes`, else the neutral default.
+ */
+export function resolvePrefixes(arg, config = {}) {
+  const fallback = launchdPrefixesFrom(config) ?? DEFAULT_LABEL_PREFIXES;
+  if (!arg) return fallback;
   const parsed = arg
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  return parsed.length > 0 ? parsed : DEFAULT_LABEL_PREFIXES;
+  return parsed.length > 0 ? parsed : fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +288,7 @@ async function buildJob(plist, launchMap, now) {
 
 async function main() {
   const vaultRoot = path.resolve(process.argv[2] || process.cwd());
-  const prefixes = resolvePrefixes(process.argv[3]);
+  const prefixes = resolvePrefixes(process.argv[3], readLocalConfig(vaultRoot));
   const outDir = path.join(vaultRoot, "Operations", "usage");
   const outFile = path.join(outDir, "automation-health.json");
   const agentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
@@ -309,6 +314,8 @@ async function main() {
 
   const output = {
     generatedAt: now.toISOString(),
+    // The dashboard strips these from labels for display, so it never needs its own list.
+    labelPrefixes: prefixes,
     jobs: sortJobsRedFirst(jobs),
   };
 

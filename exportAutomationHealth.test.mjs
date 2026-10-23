@@ -27,17 +27,17 @@ assert.equal(NOW.getDay(), 6, "fixture sanity: 2026-07-11 is a Saturday");
 {
   const text =
     "PID\tStatus\tLabel\n" +
-    "-\t127\tcom.jaymo.morning-brief\n" +
-    "-\t126\tcom.jaymo.daily-archive\n" +
-    "2172\t0\tcom.jaymo.dispatch-bot\n" +
-    "-\t0\tge.vagabondadventures.triage\n" +
+    "-\t127\torg.example.morning-brief\n" +
+    "-\t126\torg.example.daily-archive\n" +
+    "2172\t0\torg.example.dispatch-bot\n" +
+    "-\t0\tnet.demo.triage\n" +
     "\n" +
     "garbage line\n";
   const map = parseLaunchctlList(text);
   assert.equal(map.size, 4, "4 parsed rows (header + garbage skipped)");
-  assert.deepEqual(map.get("com.jaymo.morning-brief"), { pid: null, lastExitStatus: 127 });
-  assert.deepEqual(map.get("com.jaymo.daily-archive"), { pid: null, lastExitStatus: 126 });
-  assert.deepEqual(map.get("com.jaymo.dispatch-bot"), { pid: 2172, lastExitStatus: 0 });
+  assert.deepEqual(map.get("org.example.morning-brief"), { pid: null, lastExitStatus: 127 });
+  assert.deepEqual(map.get("org.example.daily-archive"), { pid: null, lastExitStatus: 126 });
+  assert.deepEqual(map.get("org.example.dispatch-bot"), { pid: 2172, lastExitStatus: 0 });
   assert.equal(map.has("PID"), false, "header line skipped");
 }
 assert.equal(parseLaunchctlList("").size, 0, "empty text -> empty map");
@@ -213,6 +213,9 @@ assert.equal(
 assert.deepEqual(resolvePrefixes(undefined), DEFAULT_LABEL_PREFIXES, "no arg -> defaults");
 assert.deepEqual(resolvePrefixes(""), DEFAULT_LABEL_PREFIXES, "empty arg -> defaults");
 assert.deepEqual(resolvePrefixes("com.acme., org.x."), ["com.acme.", "org.x."], "comma override");
-assert.deepEqual(DEFAULT_LABEL_PREFIXES, ["com.jaymo.", "com.aios.", "ge.vagabondadventures.", "ge.vagabondskischool."]);
+// REQ-C3: neutral default; an instance's own prefixes come from Instance/local-config.json, the CLI still wins.
+assert.deepEqual(DEFAULT_LABEL_PREFIXES, ["com.aios."]);
+assert.deepEqual(resolvePrefixes(undefined, { launchdLabelPrefixes: ["org.example."] }), ["org.example."], "config replaces the default");
+assert.deepEqual(resolvePrefixes("com.acme.", { launchdLabelPrefixes: ["org.example."] }), ["com.acme."], "the CLI beats the config");
 
 console.log("exportAutomationHealth.test.mjs: all assertions passed");
