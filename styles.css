@@ -2860,3 +2860,94 @@
 .aios-dashboard-root .aios-incidents-toggle:hover {
   color: var(--aios-text);
 }
+
+/* ---------------------------------------------------------------------
+   AIOS update card (D-2026-10-23-01): Today tab, desktop only. Quiet one
+   line when up to date; a plain card when an update or a refusal exists.
+   --------------------------------------------------------------------- */
+.aios-dashboard-root .aios-update-line,
+.aios-dashboard-root .aios-update-card {
+  border: 1px solid var(--aios-border);
+  background: var(--aios-surface);
+  color: var(--aios-text);
+  margin-bottom: 14px;
+}
+.aios-dashboard-root .aios-update-line {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--aios-dim);
+  border-color: transparent;
+  background: transparent;
+}
+.aios-dashboard-root .aios-update-card {
+  padding: 12px 14px;
+}
+.aios-dashboard-root .aios-update-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aios-dashboard-root .aios-update-card .aios-update-headline {
+  font-weight: 600;
+  font-size: 13px;
+}
+.aios-dashboard-root .aios-update-facts,
+.aios-dashboard-root .aios-update-notes,
+.aios-dashboard-root .aios-update-result {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.aios-dashboard-root .aios-update-line-item,
+.aios-dashboard-root .aios-update-note {
+  color: var(--aios-dim);
+  line-height: 1.5;
+}
+.aios-dashboard-root .aios-update-result-head {
+  font-weight: 600;
+}
+.aios-dashboard-root .aios-update-bad .aios-update-result-head {
+  color: var(--aios-p1);
+}
+.aios-dashboard-root .aios-update-undo {
+  font-family: var(--font-monospace);
+  color: var(--aios-text);
+  margin-top: 4px;
+  user-select: text;
+}
+.aios-dashboard-root .aios-update-next {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--aios-text);
+}
+.aios-dashboard-root .aios-update-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+.aios-dashboard-root .aios-update-line .aios-btn,
+.aios-dashboard-root .aios-update-card .aios-btn {
+  background: var(--aios-surface-2);
+  color: var(--aios-text);
+  border: 1px solid var(--aios-border);
+  border-radius: 0;
+  padding: 4px 12px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.aios-dashboard-root .aios-update-card .aios-btn-cta {
+  background: var(--aios-white);
+  color: #000;
+  border-color: transparent;
+  font-weight: 600;
+  padding: 6px 16px;
+  font-size: 12px;
+}
+.aios-dashboard-root .aios-update-card .aios-btn:disabled,
+.aios-dashboard-root .aios-update-line .aios-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.aios-update-confirm-text {
+  font-size: 13px;
+  line-height: 1.5;
+}

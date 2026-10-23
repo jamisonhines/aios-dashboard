@@ -21,6 +21,14 @@ import {
   todayUTCDay,
 } from "./taskIdClaim.mjs";
 import {
+  UPDATE_ENGINE_PATH,
+  buildCheckArgv,
+  buildApplyArgv,
+  computeUpdateCard,
+  updateConfirmText,
+  computeApplyOutcome,
+} from "./updateCard.mjs";
+import {
   resolveBuckets,
   resolveStatusSections,
   groupProjectsByStatus,
@@ -2890,6 +2898,150 @@ async function refreshUsageSnapshot(app: App, statsPath: string): Promise<UsageR
   return usageRefreshInFlight;
 }
 
+// ---------------------------------------------------------------------------
+// AIOS update card (D-2026-10-23-01). Desktop only. Runs the vault's OWN update
+// engine (Operations/scripts/aios-update.mjs), no AI and no tokens. What the card
+// shows and whether its Update button exists is decided in updateCard.mjs; this
+// section only spawns the engine and keeps the result across re-renders (the
+// dashboard re-renders 200ms after every vault change, so the state is module-level).
+// ---------------------------------------------------------------------------
+type UpdateRun = { exitCode: number | null; stdout: string; stderr: string; spawnError: string | null; engineExists: boolean };
+let updateCard: any = null;
+let updateCheckInFlight: Promise<void> | null = null;
+let updateApplyInFlight: Promise<void> | null = null;
+let updateApplyOutcome: any = null;
+const UPDATE_CHECK_TIMEOUT_MS = 120_000;
+const UPDATE_APPLY_TIMEOUT_MS = 300_000;
+
+function runUpdateEngine(basePath: string, argv: string[], timeoutMs: number): Promise<UpdateRun> {
+  return new Promise<UpdateRun>((resolve) => {
+    let settled = false;
+    const done = (r: UpdateRun) => { if (!settled) { settled = true; resolve(r); } };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fs = require("fs");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const nodePath = require("path");
+      if (!fs.existsSync(nodePath.join(basePath, UPDATE_ENGINE_PATH))) {
+        done({ exitCode: null, stdout: "", stderr: "", spawnError: null, engineExists: false });
+        return;
+      }
+      const launch = resolveNodeForExporter();
+      if (!launch.command) { done({ exitCode: null, stdout: "", stderr: "", spawnError: launch.reason, engineExists: true }); return; }
+      let stdout = "";
+      let stderr = "";
+      const child = require("child_process").spawn(launch.command, argv, { cwd: basePath, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+      child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
+      child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+      child.once("error", (err: any) => done({ exitCode: null, stdout, stderr, spawnError: err?.message || String(err), engineExists: true }));
+      child.once("close", (code: number) => done({ exitCode: code, stdout, stderr, spawnError: null, engineExists: true }));
+      const t = setTimeout(() => {
+        try { child.kill(); } catch { /* gone */ }
+        done({ exitCode: null, stdout, stderr, spawnError: `the updater did not finish within ${timeoutMs / 1000}s`, engineExists: true });
+      }, timeoutMs);
+      (t as any)?.unref?.();
+    } catch (error: any) {
+      done({ exitCode: null, stdout: "", stderr: "", spawnError: error?.message || String(error), engineExists: true });
+    }
+  });
+}
+
+function startUpdateCheck(app: App, onSettled: () => void): void {
+  if (!Platform.isDesktop || updateCheckInFlight || updateApplyInFlight) return;
+  const basePath = getVaultBasePath(app);
+  if (!basePath) return;
+  updateCheckInFlight = runUpdateEngine(basePath, buildCheckArgv(), UPDATE_CHECK_TIMEOUT_MS)
+    .then((run) => { updateCard = computeUpdateCard(run); })
+    .finally(() => { updateCheckInFlight = null; onSettled(); });
+}
+
+function startUpdateApply(app: App, allowCode: boolean, onSettled: () => void): void {
+  if (!Platform.isDesktop || updateApplyInFlight || updateCheckInFlight) return;
+  const basePath = getVaultBasePath(app);
+  if (!basePath) return;
+  updateApplyOutcome = null;
+  updateApplyInFlight = runUpdateEngine(basePath, buildApplyArgv({ allowCode }), UPDATE_APPLY_TIMEOUT_MS)
+    .then((run) => { updateApplyOutcome = computeApplyOutcome(run); })
+    .finally(() => {
+      updateApplyInFlight = null;
+      // Re-check so the card reflects the new installed version (or the refusal) right away.
+      startUpdateCheck(app, onSettled);
+      onSettled();
+    });
+}
+
+class UpdateConfirmModal extends Modal {
+  private body: string;
+  private confirmLabel: string;
+  private onConfirm: () => void;
+  constructor(app: App, body: string, confirmLabel: string, onConfirm: () => void) {
+    super(app);
+    this.body = body;
+    this.confirmLabel = confirmLabel;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("aios-modal");
+    contentEl.createEl("h3", { text: "Update AIOS" });
+    for (const para of this.body.split("\n\n")) contentEl.createEl("p", { cls: "aios-update-confirm-text", text: para });
+    const footer = contentEl.createDiv({ cls: "aios-modal-footer" });
+    const ok = footer.createEl("button", { cls: "aios-btn aios-btn-cta", text: this.confirmLabel });
+    ok.addEventListener("click", () => { this.close(); this.onConfirm(); });
+    const cancel = footer.createEl("button", { cls: "aios-btn", text: "Cancel" });
+    cancel.addEventListener("click", () => this.close());
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+function renderUpdateCard(app: App, container: HTMLElement, refresh: () => void) {
+  if (!Platform.isDesktop) return;
+  // First render this session: check now (the view's onOpen also re-checks on every open).
+  if (!updateCard && !updateCheckInFlight) startUpdateCheck(app, refresh);
+  const c = updateCard;
+  const busy = Boolean(updateCheckInFlight || updateApplyInFlight);
+  const quiet = !updateApplyOutcome && (!c || c.quiet);
+  const box = container.createDiv({ cls: quiet ? "aios-update-line" : "aios-update-card" });
+  const head = box.createDiv({ cls: "aios-update-head" });
+  const headText = updateApplyInFlight ? "Updating AIOS..." : !c ? "Checking for AIOS updates..." : c.headline;
+  head.createSpan({ cls: "aios-update-headline", text: headText });
+  head.createDiv({ cls: "aios-header-spacer" });
+  const checkBtn = head.createEl("button", { cls: "aios-btn aios-update-check", text: updateCheckInFlight ? "Checking..." : "Check now" });
+  checkBtn.disabled = busy;
+  checkBtn.addEventListener("click", () => { updateApplyOutcome = null; startUpdateCheck(app, refresh); refresh(); });
+
+  const o = updateApplyOutcome;
+  if (o) {
+    const res = box.createDiv({ cls: `aios-update-result ${o.ok ? "aios-update-ok" : "aios-update-bad"}` });
+    res.createDiv({ cls: "aios-update-result-head", text: o.headline });
+    for (const l of o.lines) res.createDiv({ cls: "aios-update-line-item", text: l });
+    if (o.undo) res.createDiv({ cls: "aios-update-undo", text: o.undo });
+    if (o.next) res.createDiv({ cls: "aios-update-next", text: o.next });
+  }
+  if (!c || c.quiet || busy) return;
+  if (c.lines.length) {
+    const facts = box.createDiv({ cls: "aios-update-facts" });
+    for (const l of c.lines) facts.createDiv({ cls: "aios-update-line-item", text: l });
+  }
+  if (c.notes.length) {
+    const notes = box.createDiv({ cls: "aios-update-notes" });
+    notes.createDiv({ cls: "aios-section-eyebrow", text: "What's new" });
+    for (const l of c.notes) notes.createDiv({ cls: "aios-update-note", text: l });
+  }
+  if (c.next) box.createDiv({ cls: "aios-update-next", text: c.next });
+  if (c.showUpdate) {
+    const actions = box.createDiv({ cls: "aios-update-actions" });
+    const btn = actions.createEl("button", { cls: "aios-btn aios-btn-cta aios-update-go", text: "Update" });
+    btn.addEventListener("click", () => {
+      const confirm = updateConfirmText(c);
+      new UpdateConfirmModal(app, confirm.body, confirm.confirmLabel, () => {
+        startUpdateApply(app, confirm.allowCode, refresh);
+        refresh();
+      }).open();
+    });
+  }
+}
+
 // Two tiles, both scoped to the selected range (Phase 1 System-browser range
 // toggle, 2026-08-04): replaces the old fixed Today/7d/30d/Output-tokens-30d
 // set. Every number on this pane now follows the same toggle, so the tiles
@@ -4365,6 +4517,8 @@ function renderTodayTab(
 ) {
   const wrap = container.createDiv({ cls: "aios-today-tab" });
 
+  renderUpdateCard(app, wrap, refresh);
+
   const doing = tasks.filter((t) => t.status === "in-progress");
   renderDoingNowStrip(app, tasksRoot, wrap, doing, refresh, undoCtx);
 
@@ -5579,6 +5733,8 @@ class DashboardView extends ItemView {
   }
 
   async onOpen() {
+    // Every dashboard open re-runs the update check (the card renders the last result meanwhile).
+    startUpdateCheck(this.app, () => this.render());
     this.render();
   }
 

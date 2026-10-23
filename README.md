@@ -24,6 +24,10 @@ A "Usage" tab shows token usage and API-equivalent cost estimates: range-scoped 
 
 On desktop, the dashboard can launch a Claude Code (Dispatch) session directly: each health tile's detail modal has a "Fix with Dispatch" button that opens a terminal in the vault with a canned prompt for that problem (plus a "Copy prompt" fallback that works everywhere), and the header has an "Ask Dispatch" button for a plain session. Launch mode is a setting: Terminal.app, iTerm2, or a custom command template with `{vault}` and `{prompt}` placeholders for wiring any other tool. Security note: actions only run the binary or template you configured in settings, prompts are passed as single quoted arguments, and the launched session is visible and interactive, so nothing executes without you watching it.
 
+## AIOS update card
+
+On desktop, the Today tab shows the vault's AIOS update status (D-2026-10-23-01). When the dashboard opens, and on "Check now", it runs the vault's own `Operations/scripts/aios-update.mjs check --json` from the vault root: no AI, no tokens. Up to date is one quiet line. An available update shows the incoming AIOS version, the change notes, the number of files, the incoming and installed dashboard versions, and a plain note when the update includes dashboard code. Refusals (not set up yet, local edits, unsaved changes, safety settings, fetch failure) are plain sentences with a next step and hide the Update button. Update confirms first; only an update with code changes passes `--allow-code`, and the confirm says so. The card never passes `--adopt`, `--accept-collisions` or `--allow-safety-config`. After an update it shows the commit and `git revert <sha>`, and asks for an Obsidian reload when the dashboard itself changed. The rules live in `updateCard.mjs` (pure, tested by `updateCardModel.test.mjs`).
+
 ## Install
 
 - **BRAT** (recommended for forks): add this repo in the BRAT plugin settings; releases carry the built assets.
@@ -41,6 +45,7 @@ npm run dev     # watch build
 npm test        # node test suites
 npm run build   # production main.js
 ./deploy.sh ~/AIOS   # build + copy into a vault
+npm run ship-template -- ~/AIOS-template   # build + copy the three built files into the AIOS template (instances get it by update)
 ```
 
 ## Release
