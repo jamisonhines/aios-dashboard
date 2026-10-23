@@ -1131,7 +1131,7 @@ export function computeWorkflowsView(stats) {
  * range-scoped. Workflows with `byDay` but zero activity inside the window
  * are dropped (nothing to show for that range). Sorted by costUsd desc.
  *
- * Reviewer M3 (2026-08-04, found against Jaymo's live usage-stats.json):
+ * Reviewer M3 (2026-08-04, found against a live usage-stats.json):
  * `byDay` can exist WITHOUT a `sessions` key on its day buckets -- that's
  * exactly the shape every workflow in JSON written before the per-day
  * session fold (this same Phase 1 slice) has. Cost/tokens/messages are

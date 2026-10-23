@@ -1,5 +1,5 @@
 /* AIOS Dashboard - design r3 (build 2.8).
-   Jaymo's direction: neutral dark greys carry the UI; purple is strictly an
+   Owner's direction: neutral dark greys carry the UI; purple is strictly an
    accent (active state, primary action, in-progress, progress fill, focus).
    Sharp corners everywhere; hierarchy comes from zoning and surface steps,
    not decoration. Scoped under .aios-dashboard-root so it never bleeds into
@@ -2103,7 +2103,7 @@
    pointer lives there, not on the whole question box) -- Reviewer finding
    2026-08-30: with the toggle on the whole box, clicking or selecting text
    in CONTEXT or in the answer block's padding collapsed the question out
-   from under Jaymo. The Q-id link (a head descendant) still needs its own
+   from under the owner. The Q-id link (a head descendant) still needs its own
    stopPropagation in main.ts so it opens the file instead of toggling; the
    answer textarea and Save button no longer need one, since they live in
    the body, a sibling of head, and a click there never reaches head's
@@ -2169,7 +2169,7 @@
 /* The answer: a visually distinct sub-block offset/indented under its
    question, tinted a DIFFERENT hue (green/positive -- same accent as the
    "answered" pill above, never the red used for stale) than the question's
-   neutral-grey box, so "what Jaymo wrote" reads as unmistakably his at a
+   neutral-grey box, so "what the owner wrote" reads as theirs at a
    glance. No margin-top of its own: .aios-coord-question-body already
    supplies the head-to-body gap, and .aios-coord-question-context (when
    present) already supplies its own margin-bottom before this block, so
@@ -2438,7 +2438,7 @@
    for why), which is itself a non-scrolling flex child sitting above
    .aios-scroll, so it stays visible for exactly the same structural reason
    the tab bar does, with no z-index/containing-block tricks needed. One
-   compact row (Jaymo's real-app report: the old two-row stacked layout was
+   compact row (owner's real-app report: the old two-row stacked layout was
    too tall) -- label, date range, and range/paging controls all share a
    single flex row, right-aligned via .aios-usage-controls' own spacer. */
 .aios-dashboard-root .aios-usage-periodbar {
@@ -2544,7 +2544,7 @@
 
 /* Modal token scope (2.8.2). Obsidian mounts modals at the app root, OUTSIDE
    .aios-dashboard-root, so every var(--aios-*) inside a modal resolved to
-   nothing: transparent background, unstyled text (Jaymo's report: systems
+   nothing: transparent background, unstyled text (owner's report: systems
    cards mid-screen with transparent bg). Mirror the tokens onto the modal
    scope; values must stay in sync with the block at the top of this file. */
 .aios-modal,

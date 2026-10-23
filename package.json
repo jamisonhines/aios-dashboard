@@ -1,6 +1,6 @@
 {
   "name": "aios-dashboard",
-  "version": "2.15.0",
+  "version": "2.15.1",
   "description": "AIOS project + task dashboard plugin for Obsidian",
   "main": "main.js",
   "scripts": {
@@ -17,7 +17,7 @@
     "tasks"
   ],
   "author": "Jamison Hines",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "esbuild": "0.20.2",

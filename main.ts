@@ -4195,7 +4195,7 @@ function renderCoordinationQuestion(
   // no stopPropagation needed there. Reviewer finding 2026-08-30: with the
   // listener on the whole row, clicking (or finishing a text selection)
   // anywhere in CONTEXT or in the answer block's padding collapsed the
-  // question out from under Jaymo, e.g. the moment he tried to copy a
+  // question out from under the owner, e.g. the moment they tried to copy a
   // wiki-link name out of a context line. metaEl's own stopPropagation
   // below still matters: it IS a head descendant, so without it, clicking
   // the Q-id/date link would also toggle collapse instead of opening the
@@ -4246,7 +4246,7 @@ function renderCoordinationQuestion(
 
   // The answer: a visually distinct sub-block offset under the question,
   // tinted a different hue (green/positive, not the red used for stale) so
-  // "what Jaymo wrote" reads as unmistakably his at a glance -- owner
+  // "what the owner wrote" reads as theirs at a glance -- owner
   // feedback 2026-08-29 was that question and answer used to look the same.
   const answerBlock = body.createDiv({ cls: "aios-coord-answer-block" });
   answerBlock.createDiv({ cls: "aios-coord-answer-label", text: "YOUR ANSWER" });
@@ -4265,8 +4265,8 @@ function renderCoordinationQuestion(
 
   // Auto-grow: starts at ~1-2 rows, grows with content up to the CSS
   // max-height (styles.css), then scrolls. 13 of 18 real answers in the
-  // vagabond-ops-app questions.md are long prose, so a fixed single-line
-  // input truncated most of what Jaymo actually writes.
+  // first project's questions.md were long prose, so a fixed single-line
+  // input truncated most of what the owner actually writes.
   input.addEventListener("input", () => {
     viewState.coordinationDrafts.set(draftKey, input.value);
     autoGrowCoordinationTextarea(input);
@@ -4439,7 +4439,7 @@ function renderCoordinationBody(
     // own expand/collapse toggle. Same chip engine as the Projects tab's
     // status filter and the Tasks tab's category filter (renderChips),
     // placed above the list the same way those tabs do. Default
-    // "unanswered": that IS "the things I need" Jaymo asked for, not an
+    // "unanswered": that IS "the things I need" the owner asked for, not an
     // unset state. Persists per project slug so two participating projects
     // can hold different filters; unaffected by the group's own expand
     // state, so it survives a collapse/re-expand of the group itself.
